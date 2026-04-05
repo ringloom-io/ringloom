@@ -8,6 +8,7 @@ pub const memory = @import("memory.zig");
 pub const concurrent = @import("concurrent.zig");
 pub const transport = @import("transport.zig");
 pub const protocol = @import("protocol.zig");
+pub const sender = @import("sender.zig");
 
 // Re-export commonly used platform types at the top level for convenience.
 pub const AtomicI32 = platform.AtomicI32;
@@ -62,6 +63,15 @@ comptime {
     if (@import("builtin").os.tag == .macos) {
         _ = @import("transport/kqueue.zig");
     }
+
+    // Sender layer (task 05)
+    _ = @import("sender/sender_event_loop.zig");
+    _ = @import("sender/peer_sender.zig");
+    _ = @import("sender/retransmit_buffer.zig");
+    _ = @import("sender/retransmit_handler.zig");
+    _ = @import("sender/message_fragmenter.zig");
+    _ = @import("sender/send_buffer_pool.zig");
+    _ = @import("sender/sender_command.zig");
 }
 
 test "root module compiles" {
@@ -71,4 +81,5 @@ test "root module compiles" {
     _ = concurrent;
     _ = transport;
     _ = protocol;
+    _ = sender;
 }
