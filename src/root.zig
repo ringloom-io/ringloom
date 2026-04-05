@@ -14,6 +14,8 @@ pub const flow_control = @import("flow_control.zig");
 pub const ipc = @import("ipc.zig");
 pub const message = @import("message.zig");
 pub const service = @import("service.zig");
+pub const control = @import("control.zig");
+pub const cluster = @import("cluster.zig");
 
 // Re-export commonly used platform types at the top level for convenience.
 pub const AtomicI32 = platform.AtomicI32;
@@ -107,6 +109,19 @@ comptime {
     _ = @import("service/load_balancer.zig");
     _ = @import("service/service_client_test.zig");
 
+    // Control plane (task 09)
+    _ = @import("control/control_messages.zig");
+    _ = @import("control/service_registry.zig");
+    _ = @import("control/service_heartbeat_checker.zig");
+    _ = @import("control/service_leader_election.zig");
+    _ = @import("control/control_loop.zig");
+
+    // Cluster management (task 11 stub)
+    _ = @import("cluster/cluster_manager.zig");
+
+    // Command queue (task 09)
+    _ = @import("concurrent/command_queue.zig");
+
     // Sender layer (task 05)
     _ = @import("sender/sender_event_loop.zig");
     _ = @import("sender/peer_sender.zig");
@@ -130,4 +145,6 @@ test "root module compiles" {
     _ = ipc;
     _ = message;
     _ = service;
+    _ = control;
+    _ = cluster;
 }

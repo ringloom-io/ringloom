@@ -16,10 +16,15 @@ pub const ErrorState = error_state.ErrorState;
 pub const ring_buffer = @import("concurrent/ring_buffer.zig");
 pub const RingBuffer = ring_buffer.RingBuffer;
 
+pub const command_queue = @import("concurrent/command_queue.zig");
+pub const CommandQueue = command_queue.CommandQueue;
+pub const Command = command_queue.Command;
+
 // Ensure all concurrent module tests are discovered by `zig build test`.
 comptime {
     _ = @import("concurrent/counters.zig");
     _ = @import("concurrent/error_log.zig");
     _ = @import("concurrent/error_state.zig");
     _ = @import("concurrent/ring_buffer.zig");
+    _ = @import("concurrent/command_queue.zig");
 }
