@@ -104,7 +104,7 @@ pub const ReceiveLogBuffer = struct {
     }
 
     /// Store the tail position (release). Called by receiver after insert.
-    fn storeTailPosition(self: *ReceiveLogBuffer, pos: i64) void {
+    pub fn storeTailPosition(self: *ReceiveLogBuffer, pos: i64) void {
         @atomicStore(i64, &self.metadata.tail_position, pos, .release);
     }
 

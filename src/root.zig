@@ -9,6 +9,7 @@ pub const concurrent = @import("concurrent.zig");
 pub const transport = @import("transport.zig");
 pub const protocol = @import("protocol.zig");
 pub const sender = @import("sender.zig");
+pub const receiver = @import("receiver.zig");
 
 // Re-export commonly used platform types at the top level for convenience.
 pub const AtomicI32 = platform.AtomicI32;
@@ -64,6 +65,14 @@ comptime {
         _ = @import("transport/kqueue.zig");
     }
 
+    // Receiver layer (task 06)
+    _ = @import("receiver/loss_detector.zig");
+    _ = @import("receiver/fragment_assembler.zig");
+    _ = @import("receiver/peer_receiver.zig");
+    _ = @import("receiver/receive_log_buffer.zig");
+    _ = @import("receiver/message_router.zig");
+    _ = @import("receiver/receiver_event_loop.zig");
+
     // Sender layer (task 05)
     _ = @import("sender/sender_event_loop.zig");
     _ = @import("sender/peer_sender.zig");
@@ -82,4 +91,5 @@ test "root module compiles" {
     _ = transport;
     _ = protocol;
     _ = sender;
+    _ = receiver;
 }
