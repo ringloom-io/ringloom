@@ -109,6 +109,10 @@ pub const ThreadRunner = struct {
     /// Handle to the spawned thread (set after start()).
     thread: ?std.Thread = null,
 
+    /// Optional CPU core to pin this thread to (Linux only).
+    /// When set, `setThreadAffinity` is called after thread creation.
+    cpu_affinity: ?u32 = null,
+
     const Self = @This();
 
     pub fn init(
@@ -122,6 +126,7 @@ pub const ThreadRunner = struct {
             .idle_strategy = idle_strategy,
             .running = AtomicBool.init(false),
             .thread = null,
+            .cpu_affinity = null,
         };
     }
 
@@ -155,13 +160,18 @@ pub const ThreadRunner = struct {
         // Step 1: Set the thread name for debugging.
         setThreadName(self.name);
 
-        // Step 2: Run the event loop.
+        // Step 2: Apply CPU affinity if configured.
+        if (self.cpu_affinity) |core_id| {
+            setThreadAffinity(core_id) catch {};
+        }
+
+        // Step 3: Run the event loop.
         while (self.running.load()) {
             const work_count = self.event_loop.doWork();
             self.idle_strategy.idle(work_count);
         }
 
-        // Step 3: Cleanup.
+        // Step 4: Cleanup.
         self.event_loop.onClose();
     }
 };
@@ -218,10 +228,9 @@ fn setThreadNameMacos(name: []const u8) void {
 pub fn setThreadAffinity(cpu_id: u32) !void {
     switch (comptime builtin.os.tag) {
         .linux => {
-            var mask = std.os.linux.cpu_set_t{ .bits = [_]usize{0} ** @divExact(@bitSizeOf(std.os.linux.cpu_set_t), @bitSizeOf(usize)) };
-            mask.bits[cpu_id / @bitSizeOf(usize)] = @as(usize, 1) << @intCast(cpu_id % @bitSizeOf(usize));
-            const rc = std.os.linux.sched_setaffinity(0, &mask);
-            if (rc != 0) return error.AffinitySetFailed;
+            var mask: std.os.linux.cpu_set_t = @splat(0);
+            mask[cpu_id / @bitSizeOf(usize)] = @as(usize, 1) << @intCast(cpu_id % @bitSizeOf(usize));
+            std.os.linux.sched_setaffinity(0, &mask) catch return error.AffinitySetFailed;
         },
         else => return error.NotSupported,
     }

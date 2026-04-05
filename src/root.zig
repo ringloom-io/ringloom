@@ -16,6 +16,7 @@ pub const message = @import("message.zig");
 pub const service = @import("service.zig");
 pub const control = @import("control.zig");
 pub const cluster = @import("cluster.zig");
+pub const threading = @import("threading.zig");
 
 // Re-export commonly used platform types at the top level for convenience.
 pub const AtomicI32 = platform.AtomicI32;
@@ -121,6 +122,9 @@ comptime {
 
     // Command queue (task 09)
     _ = @import("concurrent/command_queue.zig");
+
+    // Threading model (task 10)
+    _ = @import("threading.zig");
 
     // Sender layer (task 05)
     _ = @import("sender/sender_event_loop.zig");
