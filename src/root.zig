@@ -5,6 +5,7 @@
 
 pub const platform = @import("platform.zig");
 pub const memory = @import("memory.zig");
+pub const concurrent = @import("concurrent.zig");
 
 // Re-export commonly used platform types at the top level for convenience.
 pub const AtomicI32 = platform.AtomicI32;
@@ -38,10 +39,17 @@ comptime {
     _ = @import("memory/service_scanner.zig");
     _ = @import("memory/metadata_descriptor_provider.zig");
     _ = @import("memory/buffers_provider.zig");
+
+    // Concurrent utilities (task 03)
+    _ = @import("concurrent/error_log.zig");
+    _ = @import("concurrent/error_state.zig");
+    _ = @import("concurrent/counters.zig");
+    _ = @import("concurrent/ring_buffer.zig");
 }
 
 test "root module compiles" {
     // Smoke test: verify the module graph is valid.
     _ = platform;
     _ = memory;
+    _ = concurrent;
 }
