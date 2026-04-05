@@ -10,6 +10,7 @@ pub const transport = @import("transport.zig");
 pub const protocol = @import("protocol.zig");
 pub const sender = @import("sender.zig");
 pub const receiver = @import("receiver.zig");
+pub const flow_control = @import("flow_control.zig");
 
 // Re-export commonly used platform types at the top level for convenience.
 pub const AtomicI32 = platform.AtomicI32;
@@ -73,6 +74,15 @@ comptime {
     _ = @import("receiver/message_router.zig");
     _ = @import("receiver/receiver_event_loop.zig");
 
+    // Flow control layer (task 07)
+    _ = @import("flow_control/sender_flow_control.zig");
+    _ = @import("flow_control/receiver_flow_control.zig");
+    _ = @import("flow_control/status_message.zig");
+    _ = @import("flow_control/zero_window_probe.zig");
+    _ = @import("flow_control/back_pressure.zig");
+    _ = @import("flow_control/counters.zig");
+    _ = @import("flow_control/test_flow_control.zig");
+
     // Sender layer (task 05)
     _ = @import("sender/sender_event_loop.zig");
     _ = @import("sender/peer_sender.zig");
@@ -92,4 +102,5 @@ test "root module compiles" {
     _ = protocol;
     _ = sender;
     _ = receiver;
+    _ = flow_control;
 }
