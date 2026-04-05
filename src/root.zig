@@ -6,6 +6,8 @@
 pub const platform = @import("platform.zig");
 pub const memory = @import("memory.zig");
 pub const concurrent = @import("concurrent.zig");
+pub const transport = @import("transport.zig");
+pub const protocol = @import("protocol.zig");
 
 // Re-export commonly used platform types at the top level for convenience.
 pub const AtomicI32 = platform.AtomicI32;
@@ -45,6 +47,21 @@ comptime {
     _ = @import("concurrent/error_state.zig");
     _ = @import("concurrent/counters.zig");
     _ = @import("concurrent/ring_buffer.zig");
+
+    // Protocol layer (task 04)
+    _ = @import("protocol/frames.zig");
+    _ = @import("protocol/frame_parser.zig");
+
+    // Transport layer (task 04)
+    _ = @import("transport/buffer_pool.zig");
+    _ = @import("transport/udp_socket.zig");
+    _ = @import("transport/network_io.zig");
+    if (@import("builtin").os.tag == .linux) {
+        _ = @import("transport/io_uring.zig");
+    }
+    if (@import("builtin").os.tag == .macos) {
+        _ = @import("transport/kqueue.zig");
+    }
 }
 
 test "root module compiles" {
@@ -52,4 +69,6 @@ test "root module compiles" {
     _ = platform;
     _ = memory;
     _ = concurrent;
+    _ = transport;
+    _ = protocol;
 }
