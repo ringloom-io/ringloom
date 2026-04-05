@@ -11,6 +11,9 @@ pub const protocol = @import("protocol.zig");
 pub const sender = @import("sender.zig");
 pub const receiver = @import("receiver.zig");
 pub const flow_control = @import("flow_control.zig");
+pub const ipc = @import("ipc.zig");
+pub const message = @import("message.zig");
+pub const service = @import("service.zig");
 
 // Re-export commonly used platform types at the top level for convenience.
 pub const AtomicI32 = platform.AtomicI32;
@@ -83,6 +86,27 @@ comptime {
     _ = @import("flow_control/counters.zig");
     _ = @import("flow_control/test_flow_control.zig");
 
+    // IPC layer (task 08)
+    _ = @import("ipc/ipc_producer.zig");
+    _ = @import("ipc/ipc_consumer.zig");
+    _ = @import("ipc/ipc_test.zig");
+
+    // Message layer (task 08)
+    _ = @import("message/message_header.zig");
+    _ = @import("message/control_encoding.zig");
+    _ = @import("message/message_fragmenting_producer.zig");
+    _ = @import("message/message_assembler.zig");
+
+    // Service layer (task 08)
+    _ = @import("service/brz_engine.zig");
+    _ = @import("service/message_consumer.zig");
+    _ = @import("service/control_agent.zig");
+    _ = @import("service/service_client.zig");
+    _ = @import("service/service_client_registry.zig");
+    _ = @import("service/service_instance.zig");
+    _ = @import("service/load_balancer.zig");
+    _ = @import("service/service_client_test.zig");
+
     // Sender layer (task 05)
     _ = @import("sender/sender_event_loop.zig");
     _ = @import("sender/peer_sender.zig");
@@ -103,4 +127,7 @@ test "root module compiles" {
     _ = sender;
     _ = receiver;
     _ = flow_control;
+    _ = ipc;
+    _ = message;
+    _ = service;
 }

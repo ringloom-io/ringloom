@@ -63,6 +63,12 @@ pub const frame_header_version: u8 = 0;
 /// Sentinel msg_type_id written into padding records.
 pub const padding_msg_type_id: i32 = -1;
 
+/// Message type ID for control messages (registration, heartbeat, etc.).
+pub const control_msg_type_id: i32 = 1;
+
+/// Message type ID for application messages.
+pub const application_msg_type_id: i32 = 2;
+
 pub const frame_type_pad: u8 = 0x00;
 pub const frame_type_data: u8 = 0x01;
 pub const frame_type_nak: u8 = 0x02;

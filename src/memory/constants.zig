@@ -61,8 +61,36 @@ pub const default_heartbeat_timeout_ms: i64 = platform_constants.default_heartbe
 /// Default storage path.
 pub const default_storage_path: []const u8 = platform_constants.default_storage_path;
 
+/// Message type ID for control messages.
+pub const control_msg_type_id: i32 = platform_constants.control_msg_type_id;
+
+/// Message type ID for application messages.
+pub const application_msg_type_id: i32 = platform_constants.application_msg_type_id;
+
 /// Services subdirectory.
 pub const services_directory: []const u8 = platform_constants.services_directory;
+
+// ── Protocol Flags ────────────────────────────────────────────────────
+
+/// Begin fragment flag.
+pub const flag_begin: u8 = platform_constants.flag_begin;
+
+/// End fragment flag.
+pub const flag_end: u8 = platform_constants.flag_end;
+
+/// Unfragmented message flag (begin | end).
+pub const flag_unfragmented: u8 = platform_constants.flag_unfragmented;
+
+/// Admin message flag.
+pub const flag_admin: u8 = platform_constants.flag_admin;
+
+// ── Timing & Limits ──────────────────────────────────────────────────
+
+/// Services write heartbeat timestamps at this interval.
+pub const service_heartbeat_write_interval_ms: i64 = platform_constants.service_heartbeat_write_interval_ms;
+
+/// Max control messages read per duty cycle.
+pub const control_read_limit: u32 = platform_constants.control_read_limit;
 
 // ── Helper Functions (re-exported) ────────────────────────────────────
 
