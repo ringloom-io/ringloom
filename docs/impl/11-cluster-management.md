@@ -14,11 +14,23 @@ and manage per-service leader designation. Every operation in this subsystem run
 of the two existing event loop threads (broker-agent or routing-agent) — no additional
 threads are introduced.
 
-The design maps directly to the Java reference implementation's `cluster/` and
-`admin/` packages (`ClusterManager`, `LeaderElection`, `NodeMembership`,
-`ClusterEventHandler`, `ClusterStateManager`, `BrokerAdminPublisher`,
-`BrokerAdminSubscriber`, `ServiceLeaderElectionManager`) but replaces Aeron with the
-custom UDP transport from doc 04 and SBE flyweights with `packed struct` overlays.
+The design simplifies the Java reference implementation's `cluster/` and `admin/`
+packages (`ClusterManager`, `LeaderElection`, `NodeMembership`, `ClusterEventHandler`,
+`ClusterStateManager`, `BrokerAdminPublisher`, `BrokerAdminSubscriber`,
+`ServiceLeaderElectionManager`). Key changes from the Java reference:
+
+1. **VRRP-style leader election** replaces the Bully algorithm — heartbeats and
+   elections are unified into a single mechanism, eliminating three message types and
+   the 5-second election window.
+2. **Merged `Node` struct** — peer connection state is folded into `Node`, removing
+   the parallel `PeerConnection` tracking structure.
+3. **Return values instead of callbacks** — `LeaderElection` methods return results
+   that the caller acts on, instead of invoking function-pointer callbacks.
+4. **Snapshot on peer join only** — `ClusterStateSnapshot` is sent when a new peer
+   connects, not on every leader change. Incremental updates handle the steady state.
+
+As with the rest of the Zig rewrite, Aeron is replaced with the custom UDP transport
+from doc 04 and SBE flyweights with `packed struct` overlays.
 
 ---
 
@@ -27,33 +39,34 @@ custom UDP transport from doc 04 and SBE flyweights with `packed struct` overlay
 1. [Overview](#1-overview)
 2. [Peer Connection Lifecycle](#2-peer-connection-lifecycle)
    1. [Connection Establishment](#21-connection-establishment)
-   2. [PeerConnection](#22-peerconnection)
-   3. [Disconnection Detection](#23-disconnection-detection)
-3. [Broker Leader Election (Bully Algorithm)](#3-broker-leader-election-bully-algorithm)
+   2. [Disconnection Detection](#22-disconnection-detection)
+3. [Broker Leader Election (VRRP-style)](#3-broker-leader-election-vrrp-style)
    1. [Algorithm](#31-algorithm)
-   2. [Admin Message Protocol](#32-admin-message-protocol)
-   3. [Admin Message Wire Format](#33-admin-message-wire-format)
-   4. [LeaderElection Implementation](#34-leaderelection-implementation)
-   5. [Election Timing](#35-election-timing)
-4. [Cluster State Synchronization](#4-cluster-state-synchronization)
-   1. [State Model](#41-state-model)
-   2. [ClusterStateSnapshot](#42-clusterstatesnapshot)
-   3. [Handling State Snapshot](#43-handling-state-snapshot)
-   4. [Incremental Updates](#44-incremental-updates)
-5. [Service Leader Election (Cluster-Wide)](#5-service-leader-election-cluster-wide)
-   1. [Policy](#51-policy)
-   2. [Triggers](#52-triggers)
-   3. [ServiceLeaderElectionManager](#53-serviceleaderelectionmanager)
-   4. [Handling ServiceLeaderDesignated](#54-handling-serviceleaderdesignated)
-   5. [Split-Brain Recovery](#55-split-brain-recovery)
-6. [Node Membership](#6-node-membership)
-7. [Broker-to-Broker Heartbeat](#7-broker-to-broker-heartbeat)
-8. [Admin Message Dispatch](#8-admin-message-dispatch)
-9. [ClusterManager Facade](#9-clustermanager-facade)
-10. [ClusterEventHandler](#10-clustereventhandler)
-11. [Integration with Existing Event Loops](#11-integration-with-existing-event-loops)
-12. [Testing](#12-testing)
-13. [File Structure](#13-file-structure)
+   2. [Why VRRP over Bully](#32-why-vrrp-over-bully)
+   3. [LeaderElection Implementation](#33-leaderelection-implementation)
+   4. [Election Timing](#34-election-timing)
+4. [Admin Message Protocol](#4-admin-message-protocol)
+   1. [Message Table](#41-message-table)
+   2. [Admin Message Wire Format](#42-admin-message-wire-format)
+5. [Cluster State Synchronization](#5-cluster-state-synchronization)
+   1. [State Model](#51-state-model)
+   2. [ClusterStateSnapshot](#52-clusterstatesnapshot)
+   3. [Handling State Snapshot](#53-handling-state-snapshot)
+   4. [Incremental Updates](#54-incremental-updates)
+6. [Service Leader Election (Cluster-Wide)](#6-service-leader-election-cluster-wide)
+   1. [Policy](#61-policy)
+   2. [Triggers](#62-triggers)
+   3. [ServiceLeaderElectionManager](#63-serviceleaderelectionmanager)
+   4. [Handling ServiceLeaderDesignated](#64-handling-serviceleaderdesignated)
+   5. [Split-Brain Recovery](#65-split-brain-recovery)
+7. [Node Membership](#7-node-membership)
+8. [Broker-to-Broker Heartbeat](#8-broker-to-broker-heartbeat)
+9. [Admin Message Dispatch](#9-admin-message-dispatch)
+10. [ClusterManager Facade](#10-clustermanager-facade)
+11. [ClusterEventHandler](#11-clustereventhandler)
+12. [Integration with Existing Event Loops](#12-integration-with-existing-event-loops)
+13. [Testing](#13-testing)
+14. [File Structure](#14-file-structure)
 
 ---
 
@@ -70,8 +83,8 @@ Cluster management handles five responsibilities:
 | Responsibility | Mechanism | Owner |
 |---|---|---|
 | **Peer connection lifecycle** | SETUP → SM handshake, heartbeat liveness | Sender + receiver event loops |
-| **Broker leader election** | Bully algorithm (lowest `nodeId` wins) | Broker-agent event loop |
-| **Cluster state synchronization** | Snapshot on election + incremental updates | Broker-agent event loop |
+| **Broker leader election** | VRRP-style master advertisement (lowest `nodeId` wins) | Broker-agent event loop |
+| **Cluster state synchronization** | Snapshot on peer join + incremental updates | Broker-agent event loop |
 | **Service leader election** | Lowest `serviceId` wins, managed by broker leader | Broker-agent event loop |
 | **Admin message routing** | DATA frames with `ADMIN` flag on admin channel | Both event loops |
 
@@ -118,7 +131,8 @@ Broker A (nodeId=1)                        Broker B (nodeId=2)
 
 1. Read peer endpoints from config (`broker.member.host.ports`), which contains a
    comma-separated list of `host:port` pairs.
-2. For each peer, allocate a `PeerConnection` struct and resolve the `std.net.Address`.
+2. For each peer, resolve the `std.net.Address` and register the node in
+   `NodeMembership` with `connection_state = .disconnected`.
 3. Enqueue a `send_setup` command to the sender event loop (via the sender command
    queue from doc 10).
 4. The sender event loop encodes a SETUP frame (see doc 04 §2.3) and submits it as an
@@ -128,95 +142,27 @@ Broker A (nodeId=1)                        Broker B (nodeId=2)
 6. When the sender event loop gets the SM completion, it sets `send_limit = window`,
    marking the connection as established.
 7. The receiver event loop posts a `peer_connected` command to the broker-agent, which
-   triggers leader election (§3).
+   updates `Node.connection_state = .connected` and triggers `ClusterStateSnapshot`
+   exchange (§5.2).
 
 Both sides independently initiate SETUP to each other — the protocol is symmetric.
 A broker accepts a SETUP from a peer even if it has already sent its own SETUP to
 that peer. The result is two unidirectional channels (one send log per direction),
 matching the Java reference's one Aeron `Publication` + one `Subscription` per peer.
 
-### 2.2 PeerConnection
+**Connection state** is tracked directly on the `Node` struct in `NodeMembership`
+(see §7). There is no separate `PeerConnection` struct — all peer metadata lives in
+one place. Since `nodeId` is `u8`, the `NodeMembership` array is at most 256
+entries — allocated once at startup from the page allocator.
 
-`PeerConnection` is the broker-agent thread's view of a peer broker. It does not
-directly touch network I/O — it holds metadata and connection state. The sender and
-receiver event loops maintain their own per-peer state (`PeerSender`, `PeerReceiver`
-from docs 05/06) keyed by `nodeId`.
-
-```zig
-// src/cluster/peer_connection.zig
-
-const std = @import("std");
-const clock = @import("../platform/clock.zig");
-
-pub const ConnectionState = enum(u8) {
-    /// No connection attempt in progress.
-    disconnected,
-    /// SETUP frame sent, waiting for SM.
-    setup_sent,
-    /// SM received, traffic can flow.
-    connected,
-};
-
-pub const PeerConnection = struct {
-    /// Unique broker identifier (from config).
-    node_id: u8,
-    /// Resolved UDP address for this peer.
-    address: std.net.Address,
-    /// Current connection state. Written only on broker-agent thread.
-    state: ConnectionState = .disconnected,
-    /// Monotonic timestamp of last admin heartbeat received from this peer.
-    /// Used for liveness detection (§2.3).
-    last_heartbeat_received_ns: i64 = 0,
-    /// Monotonic timestamp of last SETUP attempt (for retry backoff).
-    last_setup_sent_ns: i64 = 0,
-    /// Number of consecutive SETUP attempts without a successful SM response.
-    setup_attempt_count: u32 = 0,
-
-    const SETUP_RETRY_INTERVAL_NS: i64 = 1 * std.time.ns_per_s;
-    const MAX_SETUP_ATTEMPTS: u32 = 0; // 0 = unlimited retries
-
-    pub fn init(node_id: u8, address: std.net.Address) PeerConnection {
-        return .{
-            .node_id = node_id,
-            .address = address,
-        };
-    }
-
-    /// Returns true if a SETUP retry is due.
-    pub fn shouldRetrySend(self: *const PeerConnection, now_ns: i64) bool {
-        if (self.state != .setup_sent and self.state != .disconnected) return false;
-        return (now_ns - self.last_setup_sent_ns) >= SETUP_RETRY_INTERVAL_NS;
-    }
-
-    pub fn markSetupSent(self: *PeerConnection, now_ns: i64) void {
-        self.state = .setup_sent;
-        self.last_setup_sent_ns = now_ns;
-        self.setup_attempt_count += 1;
-    }
-
-    pub fn markConnected(self: *PeerConnection, now_ns: i64) void {
-        self.state = .connected;
-        self.last_heartbeat_received_ns = now_ns;
-        self.setup_attempt_count = 0;
-    }
-
-    pub fn markDisconnected(self: *PeerConnection) void {
-        self.state = .disconnected;
-        self.setup_attempt_count = 0;
-    }
-};
-```
-
-The broker-agent thread maintains a fixed-size array of `PeerConnection` pointers,
-indexed by `nodeId`. Since `nodeId` is `u8`, the array is at most 256 entries —
-allocated once at startup from the page allocator.
-
-### 2.3 Disconnection Detection
+### 2.2 Disconnection Detection
 
 A peer is considered disconnected when:
 
-1. **No admin heartbeat received** for `IMAGE_LIVENESS_TIMEOUT` (default 10 seconds).
-   The broker-agent thread checks `last_heartbeat_received_ns` during its duty cycle.
+1. **No admin heartbeat received** for `MASTER_DOWN_INTERVAL` (default 3 seconds, see
+   §3.4). The broker-agent thread checks `Node.last_heartbeat_ns` during its duty
+   cycle. This is the same timer used for leader election — liveness detection and
+   election are unified.
 2. **Receiver event loop reports a fatal error** for the peer's receive log (CRC
    failures beyond threshold, or the peer sends a TEARDOWN frame).
 
@@ -229,11 +175,12 @@ Both paths funnel through the same handler on the broker-agent thread:
 /// This is the single point of disconnection handling — all downstream
 /// effects flow from here.
 pub fn handlePeerDisconnected(self: *ClusterEventHandler, node_id: u8) void {
-    const peer = self.peers[node_id] orelse return;
-    if (peer.state == .disconnected) return; // already handled
+    const node = &(self.node_membership.nodes[node_id] orelse return);
+    if (node.connection_state == .disconnected) return; // already handled
 
     // 1. Mark disconnected
-    peer.markDisconnected();
+    node.connection_state = .disconnected;
+    node.setup_attempt_count = 0;
 
     // 2. Remove the node from membership
     self.node_membership.removeNode(node_id);
@@ -255,103 +202,313 @@ pub fn handlePeerDisconnected(self: *ClusterEventHandler, node_id: u8) void {
         self.error_log.record("Failed to enqueue close_peer to sender: {}", .{err});
     };
 
-    // 6. Trigger broker leader election
-    self.leader_election.triggerElection();
+    // 6. Leader election is handled automatically — if the departed node
+    //    was the master, the master-down timer will fire and a new leader
+    //    will be elected (§3).
 
     // 7. If we are the broker leader, re-evaluate service leaders
     //    for any services that had instances on the departed node
     if (self.leader_election.isLocalNodeLeader()) {
-        self.service_leader_election.reEvaluateAllLeaders(self);
+        self.reEvaluateAndBroadcast();
     }
 }
 ```
 
 **Liveness check (runs as a duty-cycle function on the broker-agent thread):**
 
-```zig
-// src/cluster/cluster_event_handler.zig (partial)
-
-const IMAGE_LIVENESS_TIMEOUT_NS: i64 = 10 * std.time.ns_per_s;
-
-/// Duty-cycle function: returns work count (0 or 1).
-pub fn checkPeerLiveness(self: *ClusterEventHandler, now_ns: i64) u32 {
-    var work_count: u32 = 0;
-    for (self.peers) |maybe_peer| {
-        const peer = maybe_peer orelse continue;
-        if (peer.state != .connected) continue;
-        if (now_ns - peer.last_heartbeat_received_ns > IMAGE_LIVENESS_TIMEOUT_NS) {
-            self.handlePeerDisconnected(peer.node_id);
-            work_count += 1;
-        }
-    }
-    return work_count;
-}
-```
+The liveness check uses the same `MASTER_DOWN_INTERVAL_NS` (3 seconds) as the
+leader election timer — a single timeout governs both peer liveness and leadership.
+The `ClusterEventHandler.checkPeerLiveness()` method (§11) iterates all connected
+nodes and calls `handlePeerDisconnected()` for any whose `last_heartbeat_ns`
+exceeds the interval. This feeds into the leader election naturally: if the departed
+node was the leader, `checkMasterDown()` will fire on the next duty cycle and
+elect a new leader.
 
 ---
 
-## 3. Broker Leader Election (Bully Algorithm)
+## 3. Broker Leader Election (VRRP-style)
 
 ### 3.1 Algorithm
 
-The cluster uses a Bully algorithm variant where the **lowest `nodeId` always wins**.
-This matches the Java reference's `LeaderElection` class.
+The cluster uses a VRRP-style (Virtual Router Redundancy Protocol, RFC 5798) master
+advertisement protocol where the **lowest `nodeId` always wins**. Unlike the Bully
+algorithm used in the Java reference, this approach unifies heartbeats and leader
+election into a single mechanism: **a heartbeat from a node is simultaneously its
+claim to leadership priority**.
 
 ```
-Trigger: peer connection established or peer disconnected
+Trigger: periodic heartbeat (1 second interval)
 
 ┌──────────────┐        ┌──────────────┐        ┌──────────────┐
 │   Broker A    │        │   Broker B    │        │   Broker C    │
 │   nodeId=1    │        │   nodeId=2    │        │   nodeId=3    │
 └──────┬────────┘        └──────┬────────┘        └──────┬────────┘
        │                        │                        │
-       │  InitiateElection(1)   │                        │
+       │  BrokerHeartbeat(1)    │                        │
        ├───────────────────────►├───────────────────────►│
        │                        │                        │
-       │                        │  InitiateElection(2)   │
+       │  BrokerHeartbeat(2)    │                        │
        │◄───────────────────────┼───────────────────────►│
        │                        │                        │
-       │                        │                        │  InitiateElection(3)
+       │                        │   BrokerHeartbeat(3)   │
        │◄───────────────────────┼◄───────────────────────┤
        │                        │                        │
-       │  NodeAcknowledgment(1) │                        │
-       │  ("I have priority")   │                        │
-       ├───────────────────────►│                        │
-       │  NodeAcknowledgment(1) │                        │
-       ├────────────────────────┼───────────────────────►│
+       │  All nodes see nodeId=1│has the lowest ID       │
+       │  → A is accepted as    │leader by all nodes     │
+       │  (master-down timers   │reset on each heartbeat)│
        │                        │                        │
-       │  (election window expires — 5 seconds)          │
-       │                        │                        │
-       │  LeaderAnnouncement(1) │                        │
-       ├───────────────────────►├───────────────────────►│
-       │                        │                        │
-       │  ClusterStateSnapshot  │                        │
-       ├───────────────────────►├───────────────────────►│
 ```
 
 **Step-by-step:**
 
-1. **Trigger detected:** A peer connects (SM received) or disconnects (liveness
-   timeout). Any broker can initiate.
-2. **Broadcast `InitiateElection(myNodeId, myHostPort)`** to all peers via the admin
-   channel.
-3. **On receiving `InitiateElection(senderNodeId, hostPort)`:**
-   - Register the sender as a known cluster member.
-   - If `myNodeId < senderNodeId`: send `NodeAcknowledgment(myNodeId)` to that peer —
-     this means "I have priority over you."
-   - If `myNodeId > senderNodeId`: do nothing (the sender has priority).
-   - If no local election is in progress, start one.
-4. **Election window:** Wait `ELECTION_WINDOW_NS` (5 seconds) for all acknowledgments
-   to arrive.
-5. **Decide winner:** When the window expires, each broker independently determines the
-   lowest `nodeId` it has seen (including itself). If `lowestSeen == myNodeId`, this
-   broker is the leader.
-6. **Leader announces:** Broadcast `LeaderAnnouncement(myNodeId)` to all peers.
-7. **Non-leaders accept:** On receiving `LeaderAnnouncement`, stop any in-progress
-   election and accept the announced leader.
-8. **Post-election:** The leader sends `ClusterStateSnapshot` to synchronize state.
+1. **Every broker broadcasts `BrokerHeartbeat(myNodeId)` every 1 second** to all
+   connected peers. This is both a liveness signal and a leadership assertion.
+2. **On receiving `BrokerHeartbeat(senderNodeId)`:**
+   - If `senderNodeId` is unknown, register the sender as a new cluster member
+     (equivalent to Java's `memberJoined()`).
+   - Update `Node.last_heartbeat_ns` for liveness tracking.
+   - If `senderNodeId` ≤ current leader's `nodeId` (or no leader is known), accept
+     the sender as the new leader and reset the master-down timer.
+   - If `senderNodeId` > current leader's `nodeId`, ignore the leadership claim
+     (a better-priority node is already leading).
+3. **Master-down timer:** Each broker maintains a timer initialized to
+   `MASTER_DOWN_INTERVAL` (3 seconds). The timer is reset every time a heartbeat is
+   received from the current leader. If the timer expires without a heartbeat from
+   the leader, the broker assumes the leader is dead.
+4. **On master-down timer expiry:**
+   - Clear the current leader.
+   - Check if the local node has the lowest `nodeId` among all known alive nodes.
+   - If yes, declare self as leader: call `onLeaderElected(self.local_node_id)`.
+   - If no, wait for the node with the lowest `nodeId` to assert itself via its
+     next heartbeat (which will arrive within 1 second).
+5. **Post-election:** The new leader sends `ClusterStateSnapshot` only if this is a
+   new peer connection (not on every leadership change). Service leader re-evaluation
+   still runs on every leadership change.
+6. **Preemption:** If a node with a lower `nodeId` comes online (e.g. a crashed broker
+   restarts), it starts sending heartbeats. All other nodes automatically defer to it
+   as the new leader — no explicit election round is needed.
 
-### 3.2 Admin Message Protocol
+**Key insight:** There is no election phase, no election window, no acknowledgment
+round. The heartbeat *is* the election. Leadership is an emergent property of "which
+node with the lowest ID am I hearing from?"
+
+### 3.2 Why VRRP over Bully
+
+The Java reference implementation uses a Bully algorithm with three dedicated election
+message types (`InitiateElection`, `NodeAcknowledgment`, `LeaderAnnouncement`) and a
+5-second election window. The VRRP-style approach is simpler and faster:
+
+| Aspect | Bully (Java reference) | VRRP-style (this design) |
+|---|---|---|
+| **Election message types** | 3 (`InitiateElection`, `NodeAcknowledgment`, `LeaderAnnouncement`) | 0 — reuses `BrokerHeartbeat` |
+| **Total admin message types** | 8 | 5 |
+| **Election state** | `election_in_progress`, `election_start_ns`, `lowest_seen`, callbacks | `master_down_deadline_ns` — one field |
+| **Time to elect new leader** | 5 seconds (election window) | 3 seconds (master-down interval), tunable |
+| **Code complexity** | ~150 lines for `LeaderElection` | ~60 lines for `LeaderElection` |
+| **Correctness edge cases** | Stale elections, overlapping windows, late acknowledgments | Essentially none — stateless |
+| **Preemption** | Requires explicit re-election round | Automatic — lower-priority node's heartbeat preempts |
+| **Cold start convergence** | 5 seconds after first peer connects | 3 seconds (master-down timer) |
+
+The VRRP approach is well-proven in production — keepalived has used it for 20+ years
+for Linux high-availability clusters.
+
+### 3.3 LeaderElection Implementation
+
+The `LeaderElection` struct is owned by the broker-agent thread. It tracks leadership
+state and uses return values (not callbacks) so the caller can act on state changes
+directly.
+
+```zig
+// src/cluster/leader_election.zig
+
+const std = @import("std");
+const clock = @import("../platform/clock.zig");
+
+pub const LeaderElection = struct {
+    /// Result returned by methods that may change leadership state.
+    pub const Result = struct {
+        /// The leader nodeId after this operation, or null if no leader.
+        leader: ?u8 = null,
+        /// True if the leader changed as a result of this operation.
+        changed: bool = false,
+    };
+
+    /// This broker's node ID (immutable after init).
+    local_node_id: u8,
+
+    /// The currently accepted cluster leader. `null` = no leader known.
+    current_leader: ?u8 = null,
+
+    /// Monotonic deadline: if `clock.monotonicNanos()` exceeds this value
+    /// without a heartbeat from the current leader, the leader is presumed dead.
+    master_down_deadline_ns: i64 = 0,
+
+    /// 3 × heartbeat interval. The leader must send at least one heartbeat
+    /// within this window or it is considered dead.
+    const MASTER_DOWN_INTERVAL_NS: i64 = 3 * std.time.ns_per_s;
+
+    pub fn init(local_node_id: u8) LeaderElection {
+        return .{
+            .local_node_id = local_node_id,
+            // Set initial deadline so the first check after startup triggers
+            // self-election if no peers respond within the interval.
+            .master_down_deadline_ns = clock.monotonicNanos() + MASTER_DOWN_INTERVAL_NS,
+        };
+    }
+
+    // ── Heartbeat handling (the core of VRRP-style election) ─────────
+
+    /// Called when a BrokerHeartbeat is received from a peer.
+    /// Returns a Result indicating whether the leader changed.
+    ///
+    /// This is the primary election mechanism: if the sender has equal or
+    /// better priority (lower nodeId) than the current leader, it becomes
+    /// the new leader. The master-down timer is reset.
+    pub fn onBrokerHeartbeat(self: *LeaderElection, sender_id: u8, now_ns: i64) Result {
+        const current = self.current_leader orelse std.math.maxInt(u8);
+
+        if (sender_id <= current) {
+            // Sender has equal or better priority — accept as leader
+            const changed = self.current_leader == null or self.current_leader.? != sender_id;
+            self.current_leader = sender_id;
+            self.master_down_deadline_ns = now_ns + MASTER_DOWN_INTERVAL_NS;
+            return .{ .leader = sender_id, .changed = changed };
+        }
+
+        // Sender has worse priority — not a leadership change, but still
+        // a valid heartbeat for liveness purposes (handled by caller).
+        return .{ .leader = self.current_leader, .changed = false };
+    }
+
+    // ── Master-down timer check ──────────────────────────────────────
+
+    /// Called once per broker-agent duty cycle. Checks if the master-down
+    /// timer has expired. If so, determines the new leader.
+    ///
+    /// Returns a Result. If `changed == true`, the caller must invoke
+    /// post-election logic (service leader re-evaluation, etc.).
+    pub fn checkMasterDown(self: *LeaderElection, now_ns: i64) Result {
+        // No timeout if we are the leader (we don't need our own heartbeats)
+        if (self.current_leader != null and self.current_leader.? == self.local_node_id) {
+            return .{ .leader = self.current_leader, .changed = false };
+        }
+
+        // Timer hasn't expired yet
+        if (now_ns < self.master_down_deadline_ns) {
+            return .{ .leader = self.current_leader, .changed = false };
+        }
+
+        // Master-down timer expired — the current leader is presumed dead.
+        // Become leader if we have the lowest nodeId among known-alive nodes.
+        // (The caller provides alive-node information via NodeMembership;
+        //  here we optimistically self-elect. If a better node is alive,
+        //  its next heartbeat will preempt us within 1 second.)
+        const previous = self.current_leader;
+        self.current_leader = self.local_node_id;
+        self.master_down_deadline_ns = now_ns + MASTER_DOWN_INTERVAL_NS;
+
+        const changed = previous == null or previous.? != self.local_node_id;
+        return .{ .leader = self.local_node_id, .changed = changed };
+    }
+
+    // ── Peer departure ───────────────────────────────────────────────
+
+    /// Called when a peer is known to have disconnected (e.g. TEARDOWN
+    /// frame received). If the departed peer was the leader, resets the
+    /// master-down timer to trigger immediate re-election on the next
+    /// duty cycle.
+    pub fn onPeerDisconnected(self: *LeaderElection, departed_id: u8, now_ns: i64) Result {
+        if (self.current_leader != null and self.current_leader.? == departed_id) {
+            // Leader is gone — expire the timer immediately
+            self.current_leader = null;
+            self.master_down_deadline_ns = now_ns; // triggers on next checkMasterDown()
+            return .{ .leader = null, .changed = true };
+        }
+        return .{ .leader = self.current_leader, .changed = false };
+    }
+
+    // ── Queries ──────────────────────────────────────────────────────
+
+    pub fn isLocalNodeLeader(self: *const LeaderElection) bool {
+        return self.current_leader != null and self.current_leader.? == self.local_node_id;
+    }
+
+    pub fn getLeader(self: *const LeaderElection) ?u8 {
+        return self.current_leader;
+    }
+};
+```
+
+**Design notes:**
+
+- **No callbacks.** Every method returns a `Result` struct. The caller
+  (`ClusterEventHandler`) inspects `result.changed` and invokes downstream logic.
+  This eliminates re-entrant call chains and makes testing trivial — assert on
+  return values, no mock callbacks needed.
+- **No election state machine.** There is no `election_in_progress` flag, no
+  `lowest_seen` accumulator, no election window timer. The single
+  `master_down_deadline_ns` field replaces all of it.
+- **Self-election on master-down.** When the timer fires, the local node declares
+  itself leader. If a node with a lower `nodeId` is still alive, its heartbeat
+  will arrive within 1 second and preempt. This is correct because: (a) the
+  preempting node has better priority, and (b) all other nodes will also accept
+  the preemption when they receive the same heartbeat.
+
+### 3.4 Election Timing
+
+The master-down interval is 3 seconds (`MASTER_DOWN_INTERVAL_NS = 3 × 1s`), derived
+from the heartbeat interval of 1 second. This means a broker must miss 3 consecutive
+heartbeats before being declared dead. The interval provides tolerance for temporary
+packet loss and scheduling jitter while being 40% faster than the old 5-second Bully
+election window.
+
+**Timeline for a 3-broker cluster startup:**
+
+```
+t=0.0s   Broker A starts (nodeId=1), sends SETUP to B and C
+t=0.1s   Broker B starts (nodeId=2), sends SETUP to A and C
+t=0.2s   Broker C starts (nodeId=3), sends SETUP to A and B
+t=0.3s   A↔B connected (SM received)
+t=0.4s   A↔C connected
+t=0.5s   B↔C connected
+         — all brokers start exchanging BrokerHeartbeat —
+t=0.5s   B and C receive BrokerHeartbeat(1) from A
+         → both accept A as leader (nodeId=1 is lowest)
+         → A's master-down timer is checked: A sees only its own heartbeat,
+           self-elects immediately (no one with lower nodeId exists)
+t=0.5s   Leader elected: A (nodeId=1). Total time: ~0.2s after connections.
+t=0.5s   A sends ClusterStateSnapshot to B and C (triggered by peer join)
+```
+
+**Timeline for leader failure:**
+
+```
+t=0.0s   A is the leader (nodeId=1). Heartbeats flowing normally.
+t=1.0s   A crashes. No more heartbeats from A.
+t=1.0s   B and C still see their master-down timers counting down.
+t=3.0s   B's master-down timer expires. B self-elects (nodeId=2).
+         C's master-down timer expires. C self-elects (nodeId=3).
+t=3.0s   B sends BrokerHeartbeat(2). C receives it.
+         C sees nodeId=2 < nodeId=3 → accepts B as leader.
+t=3.0s   Leader elected: B (nodeId=2). Total time: ~3s after crash.
+```
+
+**Preemption timeline (crashed leader restarts):**
+
+```
+t=0.0s   B is the leader (nodeId=2). A was previously crashed.
+t=5.0s   A restarts, re-establishes connections.
+t=5.5s   A sends BrokerHeartbeat(1). B and C receive it.
+         Both see nodeId=1 < nodeId=2 → accept A as new leader.
+t=5.5s   A's master-down timer fires, A self-elects (lowest known nodeId).
+t=5.5s   Leader preempted: A (nodeId=1). No election round needed.
+```
+
+---
+
+## 4. Admin Message Protocol
+
+### 4.1 Message Table
 
 Admin messages use a distinct **admin channel** — a separate logical stream from the
 service message channel. In the Java reference, this is an Aeron stream with a
@@ -362,19 +519,23 @@ handler instead of the message router.
 
 | templateId | Message | Direction | Description |
 |:----------:|---------|-----------|-------------|
-| 1 | `InitiateElection` | Any → all peers | Start an election round |
-| 2 | `NodeAcknowledgment` | Responder → initiator | "I have priority (lower nodeId)" |
-| 3 | `LeaderAnnouncement` | Winner → all peers | Declare the election winner |
-| 4 | `BrokerHeartbeat` | Any → all peers | Broker liveness keepalive |
-| 5 | `ClusterStateSnapshot` | Leader → all peers | Full state sync after election |
-| 6 | `ServiceAdded` | Any → all peers | A service registered locally |
-| 7 | `ServiceRemoved` | Any → all peers | A service deregistered locally |
-| 8 | `ServiceLeaderDesignated` | Leader → all peers | Leader designated for a service |
+| 1 | `BrokerHeartbeat` | Any → all peers | Broker liveness + leadership assertion |
+| 2 | `ClusterStateSnapshot` | Any → new peer | Full state sync on peer connection |
+| 3 | `ServiceAdded` | Any → all peers | A service registered locally |
+| 4 | `ServiceRemoved` | Any → all peers | A service deregistered locally |
+| 5 | `ServiceLeaderDesignated` | Leader → all peers | Leader designated for a service |
 
-These template IDs match the Java SBE schema (`broker/src/main/resources/messages.xml`)
-exactly.
+Compared to the Java reference which has 8 message types (including `InitiateElection`,
+`NodeAcknowledgment`, `LeaderAnnouncement`), the VRRP-style protocol needs only 5.
+The three election-specific message types are eliminated — `BrokerHeartbeat` subsumes
+their function.
 
-### 3.3 Admin Message Wire Format
+**templateId renumbering note:** The Java SBE schema (`broker/src/main/resources/messages.xml`)
+uses templateIds 1–8. This design renumbers to 1–5 for simplicity. If wire
+compatibility with the Java broker is needed during a migration period, the original
+IDs (4–8) can be preserved and IDs 1–3 simply left unused.
+
+### 4.2 Admin Message Wire Format
 
 Admin messages are framed inside DATA frames (doc 04) with the `ADMIN` flag. The
 payload starts with an 8-byte `AdminMessageHeader` followed by the message-specific
@@ -386,7 +547,7 @@ Admin message layout (inside DATA frame payload):
 Offset   Size   Type     Field
 ───────────────────────────────────────────────
 0        2      u16      block_length     — size of the message body (excluding header)
-2        2      u16      template_id      — message type (1–8)
+2        2      u16      template_id      — message type (1–5)
 4        2      u16      schema_id        — always 688 (matches Java SBE schema)
 6        2      u16      version          — schema version (1)
 8        N      bytes    message body     — template-specific fields
@@ -419,32 +580,15 @@ comptime {
 ```zig
 // src/cluster/admin_messages.zig (continued)
 
-/// templateId = 1: InitiateElection
+/// templateId = 1: BrokerHeartbeat
+/// Serves as both liveness keepalive and leadership priority assertion.
 /// Java SBE: nodeId (uint8) + hostAndPort (char[22])
-pub const InitiateElectionBody = packed struct {
+pub const BrokerHeartbeatBody = packed struct {
     node_id: u8,
     host_and_port: [22]u8,
 };
 
-/// templateId = 2: NodeAcknowledgment
-/// Java SBE: nodeId (uint8)
-pub const NodeAcknowledgmentBody = packed struct {
-    node_id: u8,
-};
-
-/// templateId = 3: LeaderAnnouncement
-/// Java SBE: nodeId (uint8)
-pub const LeaderAnnouncementBody = packed struct {
-    node_id: u8,
-};
-
-/// templateId = 4: BrokerHeartbeat
-/// Java SBE: nodeId (uint8)
-pub const BrokerHeartbeatBody = packed struct {
-    node_id: u8,
-};
-
-/// templateId = 6: ServiceAdded
+/// templateId = 3: ServiceAdded
 /// Java SBE: nodeId (uint8) + serviceId (uint16) + serviceName (char[32])
 ///           + leaderElectionEnabled (uint8 BooleanType)
 pub const ServiceAddedBody = packed struct {
@@ -454,7 +598,7 @@ pub const ServiceAddedBody = packed struct {
     leader_election_enabled: u8, // 0 = false, 1 = true
 };
 
-/// templateId = 7: ServiceRemoved
+/// templateId = 4: ServiceRemoved
 /// Java SBE: nodeId (uint8) + serviceId (uint16) + serviceName (char[32])
 pub const ServiceRemovedBody = packed struct {
     node_id: u8,
@@ -462,7 +606,7 @@ pub const ServiceRemovedBody = packed struct {
     service_name: [32]u8,
 };
 
-/// templateId = 8: ServiceLeaderDesignated
+/// templateId = 5: ServiceLeaderDesignated
 /// Java SBE: nodeId (uint8) + serviceId (uint16) + serviceName (char[32])
 pub const ServiceLeaderDesignatedBody = packed struct {
     node_id: u8,
@@ -471,8 +615,8 @@ pub const ServiceLeaderDesignatedBody = packed struct {
 };
 ```
 
-`ClusterStateSnapshot` (templateId = 5) contains a repeating group and is handled
-separately (§4.2).
+`ClusterStateSnapshot` (templateId = 2) contains a repeating group and is handled
+separately (§5.2).
 
 **Encoding helper (zero-copy into send buffer):**
 
@@ -508,242 +652,11 @@ pub fn encodeAdminMessage(
 }
 ```
 
-### 3.4 LeaderElection Implementation
-
-The `LeaderElection` struct is owned by the broker-agent thread. It tracks election
-state and handles inbound election messages posted from the receiver event loop via the
-command queue. This maps to the Java `LeaderElection` class and its inner
-`ElectionStatus`.
-
-```zig
-// src/cluster/leader_election.zig
-
-const std = @import("std");
-const clock = @import("../platform/clock.zig");
-const admin = @import("admin_messages.zig");
-
-pub const LeaderElection = struct {
-    /// This broker's node ID (immutable after init).
-    local_node_id: u8,
-
-    /// The currently accepted cluster leader. `null` = no leader known.
-    current_leader: ?u8 = null,
-
-    /// Whether an election round is in progress.
-    election_in_progress: bool = false,
-
-    /// Monotonic timestamp when the current election round started.
-    election_start_ns: i64 = 0,
-
-    /// The lowest nodeId seen so far in this election round (including self).
-    /// This is equivalent to `ElectionStatus.currentLeaderId` in the Java code.
-    lowest_seen: u8 = std.math.maxInt(u8),
-
-    /// Callback: send an admin message to a specific peer.
-    send_admin_fn: *const fn (node_id: u8, buf: []const u8) void,
-
-    /// Callback: broadcast an admin message to all connected peers.
-    broadcast_admin_fn: *const fn (buf: []const u8) void,
-
-    /// Callback: invoked when a leader is elected (equivalent to
-    /// `ClusterEventHandler.leaderElected()`).
-    on_leader_elected_fn: *const fn (leader_node_id: u8) void,
-
-    /// Callback: invoked when a new member joins (equivalent to
-    /// `ClusterEventHandler.memberJoined()`).
-    on_member_joined_fn: *const fn (node_id: u8, host_and_port: []const u8) void,
-
-    /// Pre-allocated buffer for encoding outbound admin messages.
-    /// Large enough for any single admin message.
-    send_buf: [256]u8 = undefined,
-
-    const ELECTION_WINDOW_NS: i64 = 5 * std.time.ns_per_s;
-
-    pub fn init(
-        local_node_id: u8,
-        send_admin_fn: *const fn (u8, []const u8) void,
-        broadcast_admin_fn: *const fn ([]const u8) void,
-        on_leader_elected_fn: *const fn (u8) void,
-        on_member_joined_fn: *const fn (u8, []const u8) void,
-    ) LeaderElection {
-        return .{
-            .local_node_id = local_node_id,
-            .send_admin_fn = send_admin_fn,
-            .broadcast_admin_fn = broadcast_admin_fn,
-            .on_leader_elected_fn = on_leader_elected_fn,
-            .on_member_joined_fn = on_member_joined_fn,
-        };
-    }
-
-    // ── Election initiation ──────────────────────────────────────────
-
-    /// Called when a peer connects or disconnects. Starts a new election
-    /// round if one is not already in progress.
-    pub fn triggerElection(self: *LeaderElection) void {
-        if (!self.election_in_progress) {
-            self.lowest_seen = self.local_node_id;
-        }
-        self.election_in_progress = true;
-        self.election_start_ns = clock.monotonicNanos();
-
-        // Broadcast InitiateElection to all peers
-        const len = admin.encodeAdminMessage(
-            &self.send_buf,
-            admin.InitiateElectionBody,
-            1, // templateId
-            .{
-                .node_id = self.local_node_id,
-                .host_and_port = encodeHostPort(), // filled from config
-            },
-        );
-        self.broadcast_admin_fn(self.send_buf[0..len]);
-    }
-
-    // ── Inbound message handlers ─────────────────────────────────────
-    // Called on the broker-agent thread after the receiver event loop
-    // posts deserialized admin commands via the inter-loop command queue.
-
-    /// Handle InitiateElection from a peer.
-    /// Java equivalent: `LeaderElection.handleInitElection()`.
-    pub fn onInitiateElection(self: *LeaderElection, source_node_id: u8, host_and_port: []const u8) void {
-        // Register the sender as a cluster member
-        self.on_member_joined_fn(source_node_id, host_and_port);
-
-        // Track lowest nodeId seen
-        if (source_node_id < self.lowest_seen) {
-            self.lowest_seen = source_node_id;
-        }
-
-        // Send acknowledgment if we have priority (lower nodeId)
-        if (self.local_node_id < source_node_id) {
-            const len = admin.encodeAdminMessage(
-                &self.send_buf,
-                admin.NodeAcknowledgmentBody,
-                2, // templateId
-                .{ .node_id = self.local_node_id },
-            );
-            self.send_admin_fn(source_node_id, self.send_buf[0..len]);
-        }
-
-        // If we haven't started our own election, start one
-        if (!self.election_in_progress) {
-            self.triggerElection();
-        }
-    }
-
-    /// Handle NodeAcknowledgment from a peer.
-    /// Java equivalent: `LeaderElection.handleNodeAcknowledgment()`.
-    pub fn onNodeAcknowledgment(self: *LeaderElection, node_id: u8) void {
-        if (node_id < self.lowest_seen) {
-            self.lowest_seen = node_id;
-        }
-    }
-
-    /// Handle LeaderAnnouncement from a peer.
-    /// Java equivalent: `LeaderElection.handleLeaderAnnouncement()`.
-    pub fn onLeaderAnnouncement(self: *LeaderElection, leader_node_id: u8) void {
-        self.current_leader = leader_node_id;
-        self.election_in_progress = false;
-        self.on_leader_elected_fn(leader_node_id);
-    }
-
-    // ── Duty-cycle check ─────────────────────────────────────────────
-
-    /// Called once per broker-agent duty cycle. Checks if the election
-    /// window has expired and, if so, resolves the election.
-    /// Returns 1 if an election was resolved, 0 otherwise.
-    pub fn checkElectionResult(self: *LeaderElection, now_ns: i64) u32 {
-        if (!self.election_in_progress) return 0;
-
-        // Wait for the full election window
-        if (now_ns - self.election_start_ns < ELECTION_WINDOW_NS) return 0;
-
-        // Election window expired — lowest nodeId wins
-        const leader = self.lowest_seen;
-        self.current_leader = leader;
-        self.election_in_progress = false;
-
-        if (leader == self.local_node_id) {
-            // We are the leader — announce to all peers
-            const len = admin.encodeAdminMessage(
-                &self.send_buf,
-                admin.LeaderAnnouncementBody,
-                3, // templateId
-                .{ .node_id = self.local_node_id },
-            );
-            self.broadcast_admin_fn(self.send_buf[0..len]);
-        }
-
-        self.on_leader_elected_fn(leader);
-        return 1;
-    }
-
-    // ── Queries ──────────────────────────────────────────────────────
-
-    pub fn isLocalNodeLeader(self: *const LeaderElection) bool {
-        return self.current_leader != null and self.current_leader.? == self.local_node_id;
-    }
-
-    pub fn getLeader(self: *const LeaderElection) ?u8 {
-        return self.current_leader;
-    }
-
-    pub fn isElectionInProgress(self: *const LeaderElection) bool {
-        return self.election_in_progress;
-    }
-
-    // ── Peer departure ───────────────────────────────────────────────
-
-    /// Called when a peer disconnects. If the departed peer was the
-    /// current leader, triggers a new election. Matches the Java
-    /// `LeaderElection.memberLeft()` method.
-    pub fn memberLeft(self: *LeaderElection, departed_node_id: u8) void {
-        const was_leader = self.current_leader != null and
-            self.current_leader.? == departed_node_id;
-        if (was_leader) {
-            self.current_leader = null;
-            self.triggerElection();
-        }
-    }
-
-    // ── Internal ─────────────────────────────────────────────────────
-
-    fn encodeHostPort() [22]u8 {
-        // Filled from broker config at init time. Pad with zeros.
-        // Implementation reads from BrokerConfig.localHostPort.
-        return [_]u8{0} ** 22; // placeholder — real impl copies config string
-    }
-};
-```
-
-### 3.5 Election Timing
-
-The election window is 5 seconds (`ELECTION_WINDOW_NS`), matching the Java
-`ELECTION_WINDOW_MILLIS = 5_000`. This is deliberately long — election correctness
-depends on all live peers having time to respond, and the election happens only on
-topology changes (not on the hot path).
-
-**Timeline for a 3-broker cluster startup:**
-
-```
-t=0.0s   Broker A starts, sends SETUP to B and C
-t=0.1s   Broker B starts, sends SETUP to A and C
-t=0.2s   Broker C starts, sends SETUP to A and B
-t=0.3s   A↔B connected (SM received), both trigger election
-t=0.4s   A↔C connected, C triggers election
-t=0.5s   B↔C connected
-         — all brokers exchange InitiateElection + NodeAcknowledgment —
-t=5.3s   Election window expires on A (first to start)
-         A sees lowest_seen=1 (itself) → announces leadership
-t=5.4s   B and C receive LeaderAnnouncement(1), accept A as leader
-t=5.4s   A sends ClusterStateSnapshot to B and C
-```
-
 ---
 
-## 4. Cluster State Synchronization
+## 5. Cluster State Synchronization
 
-### 4.1 State Model
+### 5.1 State Model
 
 The cluster maintains an eventually-consistent replica of the service registry on every
 broker. The source of truth for a service instance is the broker where that service is
@@ -770,28 +683,39 @@ The broker-agent thread stores remote instances in a flat array (pre-allocated f
 `MAX_REMOTE_INSTANCES`, e.g. 4096). Lookups by `(serviceId, nodeId)` use a hash map;
 lookups by `serviceName` scan the array (rare, cold-path only).
 
-### 4.2 ClusterStateSnapshot
+### 5.2 ClusterStateSnapshot
 
-Sent by the leader (and by each newly joined broker) after an election settles or
-when a new peer connects. The Java `BrokerAdminPublisher.sendClusterStateSnapshot()`
-encodes an SBE repeating group of services.
+Sent by each broker **when a new peer connects** (SETUP handshake completes). Unlike
+the Java reference which sends snapshots on every leader election, this design sends
+them only on peer join. Rationale:
 
-In Zig, the snapshot uses a variable-length encoding:
+- **Peer join** is the only event where a node might have missed incremental updates
+  (it was offline or newly joining).
+- **Leader change** does not cause data loss — all nodes already received incremental
+  `ServiceAdded`/`ServiceRemoved` updates while the previous leader was alive.
+- **Split-brain recovery** is handled by service leader re-evaluation (§6.5), which
+  does not require a full state snapshot.
+
+This reduces network traffic during leader flapping scenarios.
+
+The Java `BrokerAdminPublisher.sendClusterStateSnapshot()` encodes an SBE repeating
+group of services. In Zig, the snapshot uses a variable-length encoding:
 
 ```
-ClusterStateSnapshot wire layout (templateId = 5):
+ClusterStateSnapshot wire layout (templateId = 2):
 
 AdminMessageHeader (8 bytes)
 ├── block_length: 5    (fixed fields below)
-├── template_id:  5
+├── template_id:  2
 ├── schema_id:    688
 └── version:      1
 
-Fixed fields (5 bytes):
+Fixed fields (1 byte):
 ├── node_id:       u8     (the sender's nodeId)
-├── group header:  4 bytes
-│   ├── block_length: u16  (size of each group entry)
-│   └── num_in_group:  u16  (number of service entries)
+
+Group header (4 bytes):
+├── block_length:  u16    (size of each group entry)
+└── num_in_group:  u16    (number of service entries)
 
 Repeated group entries (N × entry_size):
 ├── service_id:              u16
@@ -834,7 +758,7 @@ pub fn encodeClusterStateSnapshot(
     const hdr_ptr: *admin.AdminMessageHeader = @ptrCast(@alignCast(buf[offset..].ptr));
     hdr_ptr.* = .{
         .block_length = 1, // node_id only (fixed part before group)
-        .template_id = 5,
+        .template_id = 2,
         .schema_id = admin.SCHEMA_ID,
         .version = admin.SCHEMA_VERSION,
     };
@@ -867,18 +791,18 @@ pub fn encodeClusterStateSnapshot(
 }
 ```
 
-**Sending (called by the new leader after election or when a peer joins):**
+**Sending (called when a new peer connects):**
 
 ```zig
 // src/cluster/cluster_state.zig (continued)
 
-/// Send our local service instances as a snapshot to all peers (or one peer).
-/// Called on the broker-agent thread.
+/// Send our local service instances as a snapshot to a specific peer or all peers.
+/// Called on the broker-agent thread when a new peer connection is established.
 pub fn sendClusterStateSnapshot(
     self: *ClusterState,
     local_instances: []const RemoteServiceInstance,
     local_node_id: u8,
-    broadcast_fn: *const fn (buf: []const u8) void,
+    send_fn: *const fn (buf: []const u8) void,
 ) void {
     if (local_instances.len == 0) return;
 
@@ -887,11 +811,11 @@ pub fn sendClusterStateSnapshot(
         local_node_id,
         local_instances,
     );
-    broadcast_fn(self.snapshot_buf[0..len]);
+    send_fn(self.snapshot_buf[0..len]);
 }
 ```
 
-### 4.3 Handling State Snapshot
+### 5.3 Handling State Snapshot
 
 When a broker receives a `ClusterStateSnapshot`, it merges the contents into its
 local replica. Merge is additive for new entries and removes stale entries for the
@@ -955,12 +879,12 @@ pub fn onClusterStateSnapshot(
 }
 ```
 
-### 4.4 Incremental Updates
+### 5.4 Incremental Updates
 
 After the initial snapshot exchange, service additions and removals are propagated
 incrementally. Each broker broadcasts updates for its own local services only.
 
-**ServiceAdded (templateId = 6):**
+**ServiceAdded (templateId = 3):**
 
 Sent when a service completes registration on the local broker (see doc 09 §3). The
 broker-agent thread encodes the message and broadcasts it:
@@ -981,7 +905,7 @@ pub fn broadcastServiceAdded(
     const len = admin.encodeAdminMessage(
         &self.send_buf,
         admin.ServiceAddedBody,
-        6, // templateId
+        3, // templateId
         .{
             .node_id = local_node_id,
             .service_id = service_id,
@@ -1026,7 +950,7 @@ pub fn onServiceAdded(
 }
 ```
 
-**ServiceRemoved (templateId = 7):**
+**ServiceRemoved (templateId = 4):**
 
 ```zig
 /// Handle a ServiceRemoved message from a peer broker.
@@ -1051,9 +975,9 @@ pub fn onServiceRemoved(
 
 ---
 
-## 5. Service Leader Election (Cluster-Wide)
+## 6. Service Leader Election (Cluster-Wide)
 
-### 5.1 Policy
+### 6.1 Policy
 
 Service leader election is an optional, per-service feature that designates exactly one
 instance of a named service as the "leader" across the entire cluster. The rule is
@@ -1066,7 +990,7 @@ A service opts in by setting `leaderElectionEnabled = true` in its registration 
 (`brz.service.leader_election.enabled = true` in config). If not opted in, no leader
 is tracked for that service.
 
-### 5.2 Triggers
+### 6.2 Triggers
 
 Service leader evaluation is invoked on the broker-agent thread when:
 
@@ -1077,7 +1001,7 @@ Service leader evaluation is invoked on the broker-agent thread when:
 | Broker leadership changes (new broker leader elected) | Re-evaluate all service leaders |
 | Cluster state snapshot received from a peer | Register instances, then evaluate affected services |
 
-### 5.3 ServiceLeaderElectionManager
+### 6.3 ServiceLeaderElectionManager
 
 The `ServiceLeaderElectionManager` is single-threaded (broker-agent thread only). It
 maintains per-service-name leader state using a hash map keyed by service name.
@@ -1330,9 +1254,9 @@ pub const ServiceLeaderElectionManager = struct {
 };
 ```
 
-### 5.4 Handling ServiceLeaderDesignated
+### 6.4 Handling ServiceLeaderDesignated
 
-When a non-leader broker receives `ServiceLeaderDesignated` (templateId = 8) from the
+When a non-leader broker receives `ServiceLeaderDesignated` (templateId = 5) from the
 cluster leader, it updates its local tracking and forwards the leader change to local
 service instances via their control ring buffers:
 
@@ -1389,7 +1313,7 @@ pub fn broadcastServiceLeaderDesignated(
     const len = admin.encodeAdminMessage(
         &self.send_buf,
         admin.ServiceLeaderDesignatedBody,
-        8, // templateId
+        5, // templateId
         .{
             .node_id = local_node_id,
             .service_id = service_id,
@@ -1400,23 +1324,21 @@ pub fn broadcastServiceLeaderDesignated(
 }
 ```
 
-### 5.5 Split-Brain Recovery
+### 6.5 Split-Brain Recovery
 
-When the cluster leader changes (e.g. old leader crashed, new leader elected via
-Bully algorithm), the new leader calls `reEvaluateAllLeaders()`. This iterates every
-service with leader election enabled, clears the current leader, and re-picks the
-lowest `serviceId`. If the leader changed, it broadcasts `ServiceLeaderDesignated`
-to all peers and `LeaderChanged` to all local instances.
+When the cluster leader changes (e.g. old leader crashed, new leader emerged via
+VRRP-style heartbeat priority), the new leader calls `reEvaluateAllLeaders()`. This
+iterates every service with leader election enabled, clears the current leader, and
+re-picks the lowest `serviceId`. If the leader changed, it broadcasts
+`ServiceLeaderDesignated` to all peers and `LeaderChanged` to all local instances.
 
 This matches the Java `ClusterEventHandler.leaderElected()` → `reEvaluateAllLeaders()`
 flow:
 
 ```zig
-// Called in ClusterEventHandler.onLeaderElected() when this broker is the new leader.
+// Called in ClusterEventHandler when a leadership change is detected.
 
-fn reEvaluateAndBroadcast(
-    self: *ClusterEventHandler,
-) void {
+fn reEvaluateAndBroadcast(self: *ClusterEventHandler) void {
     var changes: [256]ServiceLeaderElectionManager.ServiceLeaderChange = undefined;
     const count = self.service_leader_election.reEvaluateAllLeaders(&changes);
 
@@ -1441,28 +1363,85 @@ fn reEvaluateAndBroadcast(
 }
 ```
 
+Note that **no `ClusterStateSnapshot` is sent on leadership change**. The incremental
+`ServiceAdded`/`ServiceRemoved` updates already keep all nodes in sync. The snapshot
+is only needed when a *new peer connects* (§5.2), because that peer may have missed
+incremental updates while it was offline.
+
 ---
 
-## 6. Node Membership
+## 7. Node Membership
 
 `NodeMembership` tracks all known brokers in the cluster. It is the Zig equivalent of
 the Java `NodeMembership` class with its `Int2ObjectHashMap<Node>`.
+
+**Key change from the Java reference:** The `Node` struct includes connection lifecycle
+fields (`connection_state`, `last_setup_sent_ns`, `setup_attempt_count`) that were
+previously in a separate `PeerConnection` struct. This eliminates a parallel tracking
+data structure and ensures all per-node state lives in one place.
 
 ```zig
 // src/cluster/node_membership.zig
 
 const std = @import("std");
 
+pub const ConnectionState = enum(u8) {
+    /// No connection attempt in progress.
+    disconnected,
+    /// SETUP frame sent, waiting for SM.
+    setup_sent,
+    /// SM received, traffic can flow.
+    connected,
+};
+
 pub const Node = struct {
     id: u8,
     /// "host:port" string, null-padded to 22 bytes.
     host_and_port: [22]u8,
+    /// Resolved UDP address for this peer. Null for the local node.
+    address: ?std.net.Address = null,
     /// True if this is the local broker.
     is_local: bool,
     /// True if this node is the current cluster leader.
     is_leader: bool = false,
     /// Monotonic timestamp of last heartbeat from this node.
     last_heartbeat_ns: i64 = 0,
+
+    // ── Connection lifecycle (merged from PeerConnection) ────────────
+
+    /// Current connection state. Written only on broker-agent thread.
+    connection_state: ConnectionState = .disconnected,
+    /// Monotonic timestamp of last SETUP attempt (for retry backoff).
+    last_setup_sent_ns: i64 = 0,
+    /// Number of consecutive SETUP attempts without a successful SM response.
+    setup_attempt_count: u32 = 0,
+
+    const SETUP_RETRY_INTERVAL_NS: i64 = 1 * std.time.ns_per_s;
+
+    /// Returns true if a SETUP retry is due.
+    pub fn shouldRetrySetup(self: *const Node, now_ns: i64) bool {
+        if (self.is_local) return false;
+        if (self.connection_state != .setup_sent and
+            self.connection_state != .disconnected) return false;
+        return (now_ns - self.last_setup_sent_ns) >= SETUP_RETRY_INTERVAL_NS;
+    }
+
+    pub fn markSetupSent(self: *Node, now_ns: i64) void {
+        self.connection_state = .setup_sent;
+        self.last_setup_sent_ns = now_ns;
+        self.setup_attempt_count += 1;
+    }
+
+    pub fn markConnected(self: *Node, now_ns: i64) void {
+        self.connection_state = .connected;
+        self.last_heartbeat_ns = now_ns;
+        self.setup_attempt_count = 0;
+    }
+
+    pub fn markDisconnected(self: *Node) void {
+        self.connection_state = .disconnected;
+        self.setup_attempt_count = 0;
+    }
 };
 
 pub const NodeMembership = struct {
@@ -1482,16 +1461,18 @@ pub const NodeMembership = struct {
             .id = local_node_id,
             .host_and_port = local_host_and_port,
             .is_local = true,
+            .connection_state = .connected, // local node is always "connected"
         };
         self.count = 1;
         return self;
     }
 
-    pub fn addNode(self: *NodeMembership, node_id: u8, host_and_port: [22]u8) void {
+    pub fn addNode(self: *NodeMembership, node_id: u8, host_and_port: [22]u8, address: ?std.net.Address) void {
         if (self.nodes[node_id] != null) return; // already known
         self.nodes[node_id] = .{
             .id = node_id,
             .host_and_port = host_and_port,
+            .address = address,
             .is_local = false,
         };
         self.count += 1;
@@ -1506,6 +1487,11 @@ pub const NodeMembership = struct {
 
     pub fn hasNode(self: *const NodeMembership, node_id: u8) bool {
         return self.nodes[node_id] != null;
+    }
+
+    pub fn getNode(self: *NodeMembership, node_id: u8) ?*Node {
+        if (self.nodes[node_id]) |*node| return node;
+        return null;
     }
 
     pub fn getLocalNode(self: *const NodeMembership) *const Node {
@@ -1539,7 +1525,7 @@ pub const NodeMembership = struct {
         return false;
     }
 
-    /// Returns the lowest nodeId among all known nodes (for election).
+    /// Returns the lowest nodeId among all known nodes.
     pub fn findHighestPriorityNodeId(self: *const NodeMembership) u8 {
         for (self.nodes, 0..) |slot, i| {
             if (slot != null) return @intCast(i);
@@ -1562,18 +1548,35 @@ pub const NodeMembership = struct {
 ```
 
 **Why a flat array instead of a hash map:** `nodeId` is `u8` (0–255). A 256-slot array
-of `?Node` uses ~256 × `@sizeOf(?Node)` ≈ ~10 KB. It fits in L1 cache, gives O(1)
-lookups with no hashing, and is allocation-free after init. The Java reference uses
+of `?Node` uses ~256 × `@sizeOf(?Node)` ≈ ~16 KB (slightly larger than before due to
+the merged connection fields). It fits in L1/L2 cache, gives O(1) lookups with no
+hashing, and is allocation-free after init. The Java reference uses
 `Int2ObjectHashMap` because Java lacks value-type arrays with nullable elements — in
 Zig the flat array is strictly better.
 
+**Why merge `PeerConnection` into `Node`:** The previous design had two parallel
+arrays — `NodeMembership.nodes[256]` and `ClusterEventHandler.peers[256]` — both
+indexed by `nodeId`, both tracking the same peer. This meant connection state was in
+`PeerConnection` while membership state was in `Node`, requiring coordinated updates
+across both. The merged design puts all per-node state in one struct, eliminating an
+entire file (`peer_connection.zig`) and the `peers` array from `ClusterEventHandler`.
+
 ---
 
-## 7. Broker-to-Broker Heartbeat
+## 8. Broker-to-Broker Heartbeat
 
-Each broker broadcasts an admin `BrokerHeartbeat` (templateId = 4) to all peers at a
-regular interval. This serves as the liveness signal that `checkPeerLiveness()` (§2.3)
-monitors.
+Each broker broadcasts an admin `BrokerHeartbeat` (templateId = 1) to all peers at a
+regular interval. This serves a dual purpose:
+
+1. **Liveness signal:** The broker-agent thread monitors `Node.last_heartbeat_ns` to
+   detect dead peers.
+2. **Leadership assertion:** The heartbeat carries the sender's `nodeId`, which is its
+   priority for leader election (§3). Receiving a heartbeat from a lower `nodeId`
+   triggers leader acceptance.
+
+The heartbeat body includes `host_and_port` so that a broker receiving a heartbeat
+from an unknown `nodeId` can register it as a new cluster member without requiring a
+prior SETUP handshake for the admin channel.
 
 ```zig
 // src/cluster/broker_heartbeat.zig
@@ -1584,20 +1587,22 @@ const admin = @import("admin_messages.zig");
 
 pub const BrokerHeartbeatSender = struct {
     local_node_id: u8,
+    local_host_and_port: [22]u8,
     next_heartbeat_ns: i64 = 0,
     send_buf: [64]u8 = undefined,
     broadcast_fn: *const fn (buf: []const u8) void,
 
-    /// Interval between broker heartbeats. Matches the Java reference's
-    /// 1-second scheduler interval for admin subscriber polling.
+    /// Interval between broker heartbeats.
     const HEARTBEAT_INTERVAL_NS: i64 = 1 * std.time.ns_per_s;
 
     pub fn init(
         local_node_id: u8,
+        local_host_and_port: [22]u8,
         broadcast_fn: *const fn (buf: []const u8) void,
     ) BrokerHeartbeatSender {
         return .{
             .local_node_id = local_node_id,
+            .local_host_and_port = local_host_and_port,
             .broadcast_fn = broadcast_fn,
         };
     }
@@ -1610,8 +1615,11 @@ pub const BrokerHeartbeatSender = struct {
         const len = admin.encodeAdminMessage(
             &self.send_buf,
             admin.BrokerHeartbeatBody,
-            4, // templateId
-            .{ .node_id = self.local_node_id },
+            1, // templateId
+            .{
+                .node_id = self.local_node_id,
+                .host_and_port = self.local_host_and_port,
+            },
         );
         self.broadcast_fn(self.send_buf[0..len]);
         self.next_heartbeat_ns = now_ns + HEARTBEAT_INTERVAL_NS;
@@ -1623,15 +1631,42 @@ pub const BrokerHeartbeatSender = struct {
 **Receiving heartbeats:**
 
 When the receiver event loop gets a `BrokerHeartbeat` admin message, it posts the
-source `nodeId` and the current monotonic timestamp to the broker-agent command queue.
-The broker-agent thread updates `PeerConnection.last_heartbeat_received_ns`:
+source `nodeId`, `host_and_port`, and the current monotonic timestamp to the
+broker-agent command queue. The broker-agent thread processes it:
 
 ```zig
 // Broker-agent command handler (in cluster_event_handler.zig)
 
-pub fn onBrokerHeartbeat(self: *ClusterEventHandler, node_id: u8, now_ns: i64) void {
-    if (self.peers[node_id]) |peer| {
-        peer.last_heartbeat_received_ns = now_ns;
+/// Handle an inbound BrokerHeartbeat. This is the unified handler for:
+/// 1. Liveness tracking (update last_heartbeat_ns)
+/// 2. Peer discovery (register unknown nodes)
+/// 3. Leader election (VRRP-style priority comparison)
+pub fn onBrokerHeartbeat(
+    self: *ClusterEventHandler,
+    node_id: u8,
+    host_and_port: [22]u8,
+    now_ns: i64,
+) void {
+    // 1. Register unknown peers (discovery via heartbeat)
+    if (!self.node_membership.hasNode(node_id)) {
+        self.node_membership.addNode(node_id, host_and_port, null);
+        // Send our state to the new peer
+        self.cluster_state.sendClusterStateSnapshot(
+            self.service_registry.getLocalInstances(),
+            self.local_node_id,
+            self.broadcast_admin_fn,
+        );
+    }
+
+    // 2. Update liveness timestamp
+    if (self.node_membership.getNode(node_id)) |node| {
+        node.last_heartbeat_ns = now_ns;
+    }
+
+    // 3. Leader election via VRRP-style priority comparison
+    const result = self.leader_election.onBrokerHeartbeat(node_id, now_ns);
+    if (result.changed) {
+        self.handleLeaderChange(result.leader.?);
     }
 }
 ```
@@ -1639,16 +1674,17 @@ pub fn onBrokerHeartbeat(self: *ClusterEventHandler, node_id: u8, now_ns: i64) v
 **Timing relationship:**
 
 ```
-Heartbeat interval:  1 second
-Liveness timeout:   10 seconds
+Heartbeat interval:    1 second
+Master-down interval:  3 seconds (3 × heartbeat interval)
 
-A peer must miss 10 consecutive heartbeats before being declared dead.
-This provides tolerance for temporary packet loss and scheduling jitter.
+A peer must miss 3 consecutive heartbeats before being declared dead
+and a new leader potentially elected. This provides tolerance for
+temporary packet loss and scheduling jitter.
 ```
 
 ---
 
-## 8. Admin Message Dispatch
+## 9. Admin Message Dispatch
 
 Admin messages arrive as DATA frames with the `ADMIN` flag (`0x20`) set. The receiver
 event loop detects this flag, decodes the `AdminMessageHeader`, and dispatches by
@@ -1666,10 +1702,7 @@ const CmdQueue = @import("../threading/cmd_queue.zig").CmdQueue;
 
 /// Admin command variants posted from receiver → broker-agent.
 pub const AdminCommand = union(enum) {
-    initiate_election: struct { node_id: u8, host_and_port: [22]u8 },
-    node_acknowledgment: struct { node_id: u8 },
-    leader_announcement: struct { leader_node_id: u8 },
-    broker_heartbeat: struct { node_id: u8, received_ns: i64 },
+    broker_heartbeat: struct { node_id: u8, host_and_port: [22]u8, received_ns: i64 },
     cluster_state_snapshot: struct { data: []const u8 },
     service_added: struct { data: []const u8 },
     service_removed: struct { data: []const u8 },
@@ -1691,60 +1724,34 @@ pub fn dispatchAdminMessage(
     const body = payload[@sizeOf(admin.AdminMessageHeader)..];
 
     switch (header.template_id) {
-        1 => { // InitiateElection
-            const msg: *const admin.InitiateElectionBody = @ptrCast(
-                @alignCast(body.ptr),
-            );
-            cmd_queue.enqueue(.{
-                .initiate_election = .{
-                    .node_id = msg.node_id,
-                    .host_and_port = msg.host_and_port,
-                },
-            }) catch {};
-        },
-        2 => { // NodeAcknowledgment
-            const msg: *const admin.NodeAcknowledgmentBody = @ptrCast(
-                @alignCast(body.ptr),
-            );
-            cmd_queue.enqueue(.{
-                .node_acknowledgment = .{ .node_id = msg.node_id },
-            }) catch {};
-        },
-        3 => { // LeaderAnnouncement
-            const msg: *const admin.LeaderAnnouncementBody = @ptrCast(
-                @alignCast(body.ptr),
-            );
-            cmd_queue.enqueue(.{
-                .leader_announcement = .{ .leader_node_id = msg.node_id },
-            }) catch {};
-        },
-        4 => { // BrokerHeartbeat
+        1 => { // BrokerHeartbeat
             const msg: *const admin.BrokerHeartbeatBody = @ptrCast(
                 @alignCast(body.ptr),
             );
             cmd_queue.enqueue(.{
                 .broker_heartbeat = .{
                     .node_id = msg.node_id,
+                    .host_and_port = msg.host_and_port,
                     .received_ns = now_ns,
                 },
             }) catch {};
         },
-        5 => { // ClusterStateSnapshot (variable-length — copy payload)
+        2 => { // ClusterStateSnapshot (variable-length — copy payload)
             cmd_queue.enqueue(.{
                 .cluster_state_snapshot = .{ .data = body },
             }) catch {};
         },
-        6 => { // ServiceAdded
+        3 => { // ServiceAdded
             cmd_queue.enqueue(.{
                 .service_added = .{ .data = body },
             }) catch {};
         },
-        7 => { // ServiceRemoved
+        4 => { // ServiceRemoved
             cmd_queue.enqueue(.{
                 .service_removed = .{ .data = body },
             }) catch {};
         },
-        8 => { // ServiceLeaderDesignated
+        5 => { // ServiceLeaderDesignated
             cmd_queue.enqueue(.{
                 .service_leader_designated = .{ .data = body },
             }) catch {};
@@ -1765,13 +1772,11 @@ pub fn processAdminCommands(self: *ClusterEventHandler, now_ns: i64) u32 {
     var work_count: u32 = 0;
     while (self.admin_cmd_queue.dequeue()) |cmd| {
         switch (cmd) {
-            .initiate_election => |e| self.leader_election.onInitiateElection(
+            .broker_heartbeat => |e| self.onBrokerHeartbeat(
                 e.node_id,
-                &e.host_and_port,
+                e.host_and_port,
+                e.received_ns,
             ),
-            .node_acknowledgment => |e| self.leader_election.onNodeAcknowledgment(e.node_id),
-            .leader_announcement => |e| self.leader_election.onLeaderAnnouncement(e.leader_node_id),
-            .broker_heartbeat => |e| self.onBrokerHeartbeat(e.node_id, e.received_ns),
             .cluster_state_snapshot => |e| self.cluster_state.onClusterStateSnapshot(
                 e.data,
                 self.service_registry,
@@ -1799,8 +1804,12 @@ pub fn processAdminCommands(self: *ClusterEventHandler, now_ns: i64) u32 {
         work_count += 1;
     }
 
-    // Also check election timeout
-    work_count += self.leader_election.checkElectionResult(now_ns);
+    // Also check master-down timer (VRRP-style election)
+    const election_result = self.leader_election.checkMasterDown(now_ns);
+    if (election_result.changed) {
+        self.handleLeaderChange(election_result.leader.?);
+        work_count += 1;
+    }
 
     return work_count;
 }
@@ -1808,7 +1817,7 @@ pub fn processAdminCommands(self: *ClusterEventHandler, now_ns: i64) u32 {
 
 ---
 
-## 9. ClusterManager Facade
+## 10. ClusterManager Facade
 
 `ClusterManager` is a read-only facade that other subsystems (message routing, control
 plane) use to query cluster state. It holds references to `NodeMembership` and
@@ -1868,11 +1877,19 @@ pub const ClusterManager = struct {
 
 ---
 
-## 10. ClusterEventHandler
+## 11. ClusterEventHandler
 
 `ClusterEventHandler` is the central coordinator that wires together all cluster
 subsystems. It is the Zig equivalent of the Java `ClusterEventHandler` class. It
 lives on the broker-agent thread and orchestrates reactions to cluster events.
+
+**Key changes from the Java reference:**
+
+1. **No `peers` array.** Connection state is merged into `NodeMembership.Node` (§7).
+2. **No function pointer callbacks on `LeaderElection`.** The handler inspects return
+   values from `LeaderElection` methods and dispatches downstream logic directly.
+3. **Unified heartbeat + election handling** in `onBrokerHeartbeat()` — one method
+   handles liveness, peer discovery, and leader election.
 
 ```zig
 // src/cluster/cluster_event_handler.zig
@@ -1882,7 +1899,6 @@ const LeaderElection = @import("leader_election.zig").LeaderElection;
 const NodeMembership = @import("node_membership.zig").NodeMembership;
 const ClusterState = @import("cluster_state.zig").ClusterState;
 const ServiceLeaderElectionManager = @import("service_leader_election.zig").ServiceLeaderElectionManager;
-const PeerConnection = @import("peer_connection.zig").PeerConnection;
 const BrokerHeartbeatSender = @import("broker_heartbeat.zig").BrokerHeartbeatSender;
 const AdminCommand = @import("admin_dispatch.zig").AdminCommand;
 const CmdQueue = @import("../threading/cmd_queue.zig").CmdQueue;
@@ -1897,9 +1913,6 @@ pub const ClusterEventHandler = struct {
     control_processor: *ControlMessageProcessor,
     heartbeat_sender: *BrokerHeartbeatSender,
 
-    // ── Peer tracking ────────────────────────────────────────────────
-    peers: [256]?*PeerConnection = [_]?*PeerConnection{null} ** 256,
-
     // ── Inter-loop communication ─────────────────────────────────────
     admin_cmd_queue: *CmdQueue(AdminCommand),
     sender_cmd_queue: *CmdQueue(SenderCommand),
@@ -1912,9 +1925,12 @@ pub const ClusterEventHandler = struct {
     broadcast_admin_fn: *const fn (buf: []const u8) void,
     notifySubscribersFn: *const fn (service_name: []const u8) void,
 
-    /// Called when the broker leader election settles.
-    /// Equivalent to Java `ClusterEventHandler.leaderElected()`.
-    pub fn onLeaderElected(self: *ClusterEventHandler, leader_node_id: u8) void {
+    // ── Constants ────────────────────────────────────────────────────
+    const MASTER_DOWN_INTERVAL_NS: i64 = 3 * std.time.ns_per_s;
+
+    /// Called when a leadership change is detected.
+    /// Handles both the NodeMembership update and downstream effects.
+    fn handleLeaderChange(self: *ClusterEventHandler, leader_node_id: u8) void {
         self.node_membership.electLeader(leader_node_id);
 
         if (self.node_membership.isLeader()) {
@@ -1924,14 +1940,43 @@ pub const ClusterEventHandler = struct {
         }
     }
 
-    /// Called when a new peer broker connects.
-    /// Equivalent to Java `ClusterEventHandler.memberJoined()`.
-    pub fn onMemberJoined(self: *ClusterEventHandler, node_id: u8, host_and_port: []const u8) void {
-        var hp: [22]u8 = [_]u8{0} ** 22;
-        const copy_len = @min(host_and_port.len, 22);
-        @memcpy(hp[0..copy_len], host_and_port[0..copy_len]);
+    /// Handle an inbound BrokerHeartbeat. Unified handler for liveness,
+    /// peer discovery, and leader election.
+    pub fn onBrokerHeartbeat(
+        self: *ClusterEventHandler,
+        node_id: u8,
+        host_and_port: [22]u8,
+        now_ns: i64,
+    ) void {
+        // 1. Register unknown peers (discovery via heartbeat)
+        if (!self.node_membership.hasNode(node_id)) {
+            self.node_membership.addNode(node_id, host_and_port, null);
+            // Send our state to the new peer
+            self.cluster_state.sendClusterStateSnapshot(
+                self.service_registry.getLocalInstances(),
+                self.local_node_id,
+                self.broadcast_admin_fn,
+            );
+        }
 
-        self.node_membership.addNode(node_id, hp);
+        // 2. Update liveness timestamp
+        if (self.node_membership.getNode(node_id)) |node| {
+            node.last_heartbeat_ns = now_ns;
+        }
+
+        // 3. Leader election via VRRP-style priority comparison
+        const result = self.leader_election.onBrokerHeartbeat(node_id, now_ns);
+        if (result.changed) {
+            self.handleLeaderChange(result.leader.?);
+        }
+    }
+
+    /// Called when a new peer connection is established (SETUP handshake
+    /// complete). Sends ClusterStateSnapshot to the new peer.
+    pub fn onPeerConnected(self: *ClusterEventHandler, node_id: u8, now_ns: i64) void {
+        if (self.node_membership.getNode(node_id)) |node| {
+            node.markConnected(now_ns);
+        }
 
         // Send our local state to the new peer
         self.cluster_state.sendClusterStateSnapshot(
@@ -1941,10 +1986,65 @@ pub const ClusterEventHandler = struct {
         );
     }
 
-    /// Called when a peer broker disconnects (heartbeat timeout).
-    /// Equivalent to Java `ClusterEventHandler.memberLeft()`.
-    pub fn onMemberLeft(self: *ClusterEventHandler, node_id: u8) void {
-        self.handlePeerDisconnected(node_id);
+    /// Called on the broker-agent thread when a peer is determined to be dead.
+    /// This is the single point of disconnection handling — all downstream
+    /// effects flow from here.
+    pub fn handlePeerDisconnected(self: *ClusterEventHandler, node_id: u8) void {
+        const node = self.node_membership.getNode(node_id) orelse return;
+        if (node.connection_state == .disconnected) return;
+
+        // 1. Mark disconnected
+        node.markDisconnected();
+
+        // 2. Remove the node from membership
+        self.node_membership.removeNode(node_id);
+
+        // 3. Remove all service instances registered on that node
+        const removed_count = self.service_registry.removeByNodeId(node_id);
+        if (removed_count > 0) {
+            self.notifyAffectedSubscribers(node_id);
+        }
+
+        // 4. Command receiver event loop to tear down receive log buffer
+        self.receiver_cmd_queue.enqueue(.{ .close_peer = node_id }) catch |err| {
+            self.error_log.record("Failed to enqueue close_peer command: {}", .{err});
+        };
+
+        // 5. Command sender event loop to remove peer from send list
+        self.sender_cmd_queue.enqueue(.{ .close_peer = node_id }) catch |err| {
+            self.error_log.record("Failed to enqueue close_peer to sender: {}", .{err});
+        };
+
+        // 6. Notify leader election of the departure
+        const election_result = self.leader_election.onPeerDisconnected(
+            node_id,
+            @import("../platform/clock.zig").monotonicNanos(),
+        );
+        if (election_result.changed) {
+            // Leader will be re-elected on next checkMasterDown()
+        }
+
+        // 7. If we are the broker leader, re-evaluate service leaders
+        if (self.leader_election.isLocalNodeLeader()) {
+            self.reEvaluateAndBroadcast();
+        }
+    }
+
+    /// Check all connected peers for heartbeat timeout.
+    /// Uses the same interval as the VRRP master-down timer.
+    fn checkPeerLiveness(self: *ClusterEventHandler, now_ns: i64) u32 {
+        var work_count: u32 = 0;
+        for (&self.node_membership.nodes) |*slot| {
+            if (slot.*) |*node| {
+                if (node.is_local) continue;
+                if (node.connection_state != .connected) continue;
+                if (now_ns - node.last_heartbeat_ns > MASTER_DOWN_INTERVAL_NS) {
+                    self.handlePeerDisconnected(node.id);
+                    work_count += 1;
+                }
+            }
+        }
+        return work_count;
     }
 
     // ── Duty cycle ───────────────────────────────────────────────────
@@ -1955,37 +2055,74 @@ pub const ClusterEventHandler = struct {
         var work_count: u32 = 0;
 
         // 1. Drain admin commands from receiver event loop
+        //    (includes VRRP-style election check via checkMasterDown)
         work_count += self.processAdminCommands(now_ns);
 
-        // 2. Check election timeout
-        work_count += self.leader_election.checkElectionResult(now_ns);
-
-        // 3. Check peer liveness
+        // 2. Check peer liveness (heartbeat timeout)
         work_count += self.checkPeerLiveness(now_ns);
 
-        // 4. Send broker heartbeats
+        // 3. Send broker heartbeats
         work_count += self.heartbeat_sender.sendIfDue(now_ns);
 
-        // 5. Retry SETUP for disconnected peers
+        // 4. Retry SETUP for disconnected peers
         work_count += self.retrySetups(now_ns);
 
         return work_count;
     }
 
-    // (private methods: processAdminCommands, checkPeerLiveness,
-    //  handlePeerDisconnected, reEvaluateAndBroadcast, retrySetups
-    //  — implementations shown in earlier sections)
+    // ── Private ──────────────────────────────────────────────────────
+
+    fn reEvaluateAndBroadcast(self: *ClusterEventHandler) void {
+        var changes: [256]ServiceLeaderElectionManager.ServiceLeaderChange = undefined;
+        const count = self.service_leader_election.reEvaluateAllLeaders(&changes);
+
+        for (changes[0..count]) |change| {
+            const result = change.result;
+
+            self.cluster_state.broadcastServiceLeaderDesignated(
+                result.service_id,
+                change.service_name,
+                self.local_node_id,
+                self.broadcast_admin_fn,
+            );
+
+            self.control_processor.broadcastLeaderChanged(
+                trimServiceName(&change.service_name),
+                result.service_id,
+                result.node_id,
+            );
+        }
+    }
+
+    fn retrySetups(self: *ClusterEventHandler, now_ns: i64) u32 {
+        var work_count: u32 = 0;
+        for (&self.node_membership.nodes) |*slot| {
+            if (slot.*) |*node| {
+                if (node.is_local) continue;
+                if (node.shouldRetrySetup(now_ns)) {
+                    self.sender_cmd_queue.enqueue(.{
+                        .send_setup = .{ .node_id = node.id },
+                    }) catch {};
+                    node.markSetupSent(now_ns);
+                    work_count += 1;
+                }
+            }
+        }
+        return work_count;
+    }
+
+    // (processAdminCommands implementation shown in §9)
 };
 ```
 
 ---
 
-## 11. Integration with Existing Event Loops
+## 12. Integration with Existing Event Loops
 
 The cluster management subsystem does **not** introduce new threads. It plugs into the
 two event loops from doc 10:
 
-### 11.1 Broker-Agent Thread
+### 12.1 Broker-Agent Thread
 
 The `ClusterEventHandler.doWork()` function is registered as a duty-cycle function in
 the broker-agent event loop. It runs alongside the existing control message processing
@@ -2003,7 +2140,7 @@ Broker-agent duty cycle:
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### 11.2 Receiver Event Loop (Routing-Agent Thread)
+### 12.2 Receiver Event Loop (Routing-Agent Thread)
 
 The receiver event loop is extended to detect the `ADMIN` flag on DATA frames and
 route them to `dispatchAdminMessage()` instead of the message router:
@@ -2026,7 +2163,7 @@ fn handleDataFrame(self: *ReceiverEventLoop, frame: *const DataFrameHeader, payl
 }
 ```
 
-### 11.3 Sender Event Loop
+### 12.3 Sender Event Loop
 
 The sender event loop handles outbound admin messages by encoding them as DATA frames
 with the `ADMIN` flag set. Admin messages share the same UDP socket as application
@@ -2034,7 +2171,7 @@ messages — no separate socket is needed (unlike the Java reference which uses 
 separate Aeron stream ID). The `ADMIN` flag in the frame header is sufficient to
 distinguish the two types at the receiver.
 
-### 11.4 Command Flow Diagram
+### 12.4 Command Flow Diagram
 
 ```
                        ┌─────────────────────────┐
@@ -2055,7 +2192,7 @@ distinguish the two types at the receiver.
                        │    Sender Event Loop      │               ├──────────────────┤
                        │  (routing-agent thread)   │               │                  │
                        ├───────────────────────────┤  sender_cmd   │ drain admin cmds │
-                       │                           │◄──── queue ──┤ check election   │
+                       │                           │◄──── queue ──┤ check master-down│
                        │  dequeue send commands    │               │ check liveness   │
                        │  encode DATA+ADMIN flag   │               │ send heartbeats  │
                        │  submit io_uring sendmsg  │               │ retry SETUPs     │
@@ -2065,72 +2202,119 @@ distinguish the two types at the receiver.
 
 ---
 
-## 12. Testing
+## 13. Testing
 
-### 12.1 Unit Tests
+### 13.1 Unit Tests
 
 All unit tests run in a single thread with mock/stub callbacks replacing the network
 layer. Pre-allocate small buffers (256–1024 bytes) to exercise edge cases.
 
-**Leader election tests:**
+**Leader election tests (VRRP-style):**
 
 ```zig
 // src/cluster/leader_election.zig — test block
 
-test "lowest nodeId wins election — 3 nodes" {
+test "lowest nodeId wins via heartbeat — 3 nodes" {
     // Given: node 2 is the local node
-    var sent_messages = std.ArrayList(SentMessage).init(std.testing.allocator);
-    defer sent_messages.deinit();
-    var elected_leader: ?u8 = null;
+    var election = LeaderElection.init(2);
 
-    var election = LeaderElection.init(
-        2, // local_node_id
-        makeSendFn(&sent_messages),
-        makeBroadcastFn(&sent_messages),
-        makeElectedFn(&elected_leader),
-        makeJoinedFn(),
-    );
-
-    // When: election triggered, then receive InitiateElection from nodes 1 and 3
-    election.triggerElection();
-    election.onInitiateElection(1, "host1:40456\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00");
-    election.onNodeAcknowledgment(1);
-    election.onInitiateElection(3, "host3:40456\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00");
-
-    // Simulate window expiry
-    const future_ns = std.time.ns_per_s * 10;
-    _ = election.checkElectionResult(future_ns);
+    // When: receive heartbeats from nodes 1 and 3
+    const now_ns: i64 = 1_000_000_000;
+    const result1 = election.onBrokerHeartbeat(3, now_ns);
+    const result2 = election.onBrokerHeartbeat(1, now_ns);
 
     // Then: node 1 should be the leader (lowest nodeId)
     try std.testing.expectEqual(@as(?u8, 1), election.current_leader);
     try std.testing.expect(!election.isLocalNodeLeader());
+    try std.testing.expect(result2.changed); // changed when 1 beat 3
 }
 
-test "election after node disconnect — leader re-election" {
-    // Given: node 1 was the leader
-    var election = LeaderElection.init(2, ...);
-    election.current_leader = 1;
+test "heartbeat from higher nodeId does not change leader" {
+    // Given: node 1 is already the leader
+    var election = LeaderElection.init(2);
+    _ = election.onBrokerHeartbeat(1, 1_000_000_000);
 
-    // When: node 1 disconnects
-    election.memberLeft(1);
+    // When: receive heartbeat from node 3 (worse priority)
+    const result = election.onBrokerHeartbeat(3, 2_000_000_000);
 
-    // Then: election is in progress
-    try std.testing.expect(election.election_in_progress);
-    try std.testing.expectEqual(@as(?u8, null), election.current_leader);
+    // Then: leader unchanged
+    try std.testing.expectEqual(@as(?u8, 1), election.current_leader);
+    try std.testing.expect(!result.changed);
 }
 
-test "single-node cluster auto-elects self" {
+test "master-down timer triggers self-election" {
+    // Given: node 2 is the local node, node 1 was the leader
+    var election = LeaderElection.init(2);
+    _ = election.onBrokerHeartbeat(1, 1_000_000_000);
+    try std.testing.expectEqual(@as(?u8, 1), election.current_leader);
+
+    // When: master-down timer expires (3 seconds, no heartbeat from node 1)
+    const result = election.checkMasterDown(5_000_000_000);
+
+    // Then: node 2 self-elects
+    try std.testing.expectEqual(@as(?u8, 2), election.current_leader);
+    try std.testing.expect(result.changed);
+    try std.testing.expect(election.isLocalNodeLeader());
+}
+
+test "preemption — lower nodeId heartbeat overrides current leader" {
+    // Given: node 3 is the local node, self-elected as leader
+    var election = LeaderElection.init(3);
+    _ = election.checkMasterDown(5_000_000_000); // self-elects
+    try std.testing.expect(election.isLocalNodeLeader());
+
+    // When: node 1 comes back and sends a heartbeat
+    const result = election.onBrokerHeartbeat(1, 6_000_000_000);
+
+    // Then: node 1 preempts node 3
+    try std.testing.expectEqual(@as(?u8, 1), election.current_leader);
+    try std.testing.expect(!election.isLocalNodeLeader());
+    try std.testing.expect(result.changed);
+}
+
+test "single-node cluster self-elects on master-down" {
     // Given: only node 1, no peers
-    var elected_leader: ?u8 = null;
-    var election = LeaderElection.init(1, ...);
+    var election = LeaderElection.init(1);
 
-    election.triggerElection();
-    const future_ns = std.time.ns_per_s * 10;
-    _ = election.checkElectionResult(future_ns);
+    // When: master-down timer expires (no heartbeats from anyone)
+    const result = election.checkMasterDown(5_000_000_000);
 
     // Then: node 1 is the leader
     try std.testing.expectEqual(@as(?u8, 1), election.current_leader);
     try std.testing.expect(election.isLocalNodeLeader());
+    try std.testing.expect(result.changed);
+}
+
+test "peer disconnection clears leader and triggers re-election" {
+    // Given: node 1 was the leader
+    var election = LeaderElection.init(2);
+    _ = election.onBrokerHeartbeat(1, 1_000_000_000);
+
+    // When: node 1 disconnects
+    const result = election.onPeerDisconnected(1, 2_000_000_000);
+
+    // Then: leader is cleared, change flagged
+    try std.testing.expectEqual(@as(?u8, null), election.current_leader);
+    try std.testing.expect(result.changed);
+
+    // And: next checkMasterDown causes self-election
+    const result2 = election.checkMasterDown(2_000_000_000);
+    try std.testing.expectEqual(@as(?u8, 2), result2.leader);
+    try std.testing.expect(result2.changed);
+}
+
+test "heartbeat resets master-down timer" {
+    // Given: node 2 is the local node, node 1 is the leader
+    var election = LeaderElection.init(2);
+    _ = election.onBrokerHeartbeat(1, 1_000_000_000);
+
+    // When: heartbeat received just before timeout
+    _ = election.onBrokerHeartbeat(1, 3_500_000_000);
+
+    // Then: master-down timer reset — no election at t=4s
+    const result = election.checkMasterDown(4_000_000_000);
+    try std.testing.expect(!result.changed);
+    try std.testing.expectEqual(@as(?u8, 1), election.current_leader);
 }
 ```
 
@@ -2242,7 +2426,7 @@ test "snapshot merge adds missing and removes stale instances" {
 test "addNode and removeNode" {
     var nm = NodeMembership.init(1, padHostPort("localhost:40456"));
 
-    nm.addNode(2, padHostPort("host2:40456"));
+    nm.addNode(2, padHostPort("host2:40456"), null);
     try std.testing.expect(nm.hasNode(2));
     try std.testing.expectEqual(@as(u16, 2), nm.count);
 
@@ -2253,7 +2437,7 @@ test "addNode and removeNode" {
 
 test "electLeader sets leader flag" {
     var nm = NodeMembership.init(1, padHostPort("localhost:40456"));
-    nm.addNode(2, padHostPort("host2:40456"));
+    nm.addNode(2, padHostPort("host2:40456"), null);
 
     nm.electLeader(2);
     try std.testing.expectEqual(@as(?u8, 2), nm.getLeader());
@@ -2262,65 +2446,95 @@ test "electLeader sets leader flag" {
 
 test "findHighestPriorityNodeId returns lowest" {
     var nm = NodeMembership.init(3, padHostPort("localhost:40456"));
-    nm.addNode(1, padHostPort("host1:40456"));
-    nm.addNode(5, padHostPort("host5:40456"));
+    nm.addNode(1, padHostPort("host1:40456"), null);
+    nm.addNode(5, padHostPort("host5:40456"), null);
 
     try std.testing.expectEqual(@as(u8, 1), nm.findHighestPriorityNodeId());
 }
+
+test "merged connection state on Node" {
+    var nm = NodeMembership.init(1, padHostPort("localhost:40456"));
+    nm.addNode(2, padHostPort("host2:40456"), null);
+
+    // Initially disconnected
+    const node = nm.getNode(2).?;
+    try std.testing.expectEqual(ConnectionState.disconnected, node.connection_state);
+
+    // Mark setup sent
+    node.markSetupSent(1_000_000_000);
+    try std.testing.expectEqual(ConnectionState.setup_sent, node.connection_state);
+    try std.testing.expectEqual(@as(u32, 1), node.setup_attempt_count);
+
+    // Mark connected
+    node.markConnected(2_000_000_000);
+    try std.testing.expectEqual(ConnectionState.connected, node.connection_state);
+    try std.testing.expectEqual(@as(u32, 0), node.setup_attempt_count);
+}
 ```
 
-### 12.2 Integration Tests
+### 13.2 Integration Tests
 
 Integration tests run two broker processes (or two broker instances in separate
 threads with real UDP sockets on `127.0.0.1`):
 
 | Test | Scenario | Assertion |
 |---|---|---|
-| 2-broker connect + election | Start A (nodeId=1), then B (nodeId=2). Wait for SETUP handshake. | Both brokers have `current_leader == 1` within 10s. |
+| 2-broker connect + election | Start A (nodeId=1), then B (nodeId=2). Wait for heartbeat exchange. | Both brokers have `current_leader == 1` within 3s. |
 | Service visibility across brokers | Register "pricing" on broker A. Wait for `ServiceAdded` propagation. | Broker B's registry contains "pricing" with A's nodeId. |
-| Broker disconnect re-election | Start A+B. Kill A. Wait for liveness timeout. | B detects A gone, re-elects self as leader. |
+| Broker disconnect re-election | Start A+B. Kill A. Wait for master-down timeout. | B detects A gone, self-elects as leader within 3s. |
+| Preemption on rejoin | A+B running, A is leader. Kill A, B self-elects. Restart A. | A preempts B within 1s of first heartbeat. |
 | Service leader re-evaluation | Register "pricing" on A and B. A is leader (lower serviceId). Kill A. | B's "pricing" instance becomes the new service leader. |
-| State snapshot on rejoin | A+B running with services. Disconnect B, then reconnect. | B receives snapshot from A, state converges. |
+| State snapshot on peer join | A+B running with services. Disconnect B, then reconnect. | B receives snapshot from A, state converges. |
 
-### 12.3 Testing Tips
+### 13.3 Testing Tips
 
-1. **Use short timeouts in tests.** Override `IMAGE_LIVENESS_TIMEOUT_NS` and
-   `ELECTION_WINDOW_NS` to ~100ms for integration tests. This keeps test suites fast.
+1. **Use short timeouts in tests.** Override `MASTER_DOWN_INTERVAL_NS` and
+   `HEARTBEAT_INTERVAL_NS` to ~100ms for integration tests. This keeps test suites
+   fast.
 
-2. **Test election with all orderings.** The Bully algorithm's correctness depends on
-   messages arriving within the election window regardless of order. Shuffle
-   `InitiateElection` and `NodeAcknowledgment` arrival order in unit tests.
+2. **Test VRRP-style election with all orderings.** Send heartbeats from multiple
+   nodes in different orders. Assert that the lowest nodeId always wins regardless
+   of arrival order.
 
-3. **Mock the broadcast function.** In unit tests, replace `broadcast_admin_fn` with a
+3. **Test preemption.** Start with a higher-nodeId leader, then introduce heartbeats
+   from a lower nodeId. Assert the leader changes immediately on the next heartbeat.
+
+4. **Mock the broadcast function.** In unit tests, replace `broadcast_admin_fn` with a
    function that records all outbound messages into an `ArrayList`. Assert on the
    sequence and content of messages sent.
 
-4. **Test idempotent merges.** Send the same `ServiceAdded` twice. Assert the registry
+5. **Test return values, not callbacks.** Since `LeaderElection` uses return values
+   instead of callbacks, unit tests are simpler: call a method, inspect the
+   `Result` struct. No need for mock callback setup or `expectCall` assertions.
+
+6. **Test idempotent merges.** Send the same `ServiceAdded` twice. Assert the registry
    contains exactly one entry (not two). Send a `ClusterStateSnapshot` that matches
    the current state. Assert nothing changed.
 
-5. **Single-node cluster is a degenerate case.** Verify that `ClusterEventHandler.doWork()`
-   returns 0 immediately when no peers are configured. No heartbeats sent, no elections
-   triggered, no admin commands processed.
+7. **Single-node cluster is a degenerate case.** Verify that `ClusterEventHandler.doWork()`
+   returns 0 immediately when no peers are configured. No heartbeats sent, no
+   elections triggered, no admin commands processed.
 
 ---
 
-## 13. File Structure
+## 14. File Structure
 
 ```
 src/
   cluster/
     cluster_manager.zig           # Read-only facade for cluster queries
     cluster_event_handler.zig     # Central coordinator (broker-agent thread)
-    leader_election.zig           # Bully algorithm — broker leader election
-    node_membership.zig           # Node tracking — u8-indexed flat array
+    leader_election.zig           # VRRP-style leader election via heartbeat priority
+    node_membership.zig           # Node tracking — u8-indexed flat array (includes connection state)
     cluster_state.zig             # State sync — snapshot + incremental updates
     service_leader_election.zig   # Per-service leader election manager
     admin_messages.zig            # Wire format: AdminMessageHeader + body structs
     admin_dispatch.zig            # Receiver-side dispatch → command queue
-    peer_connection.zig           # Per-peer connection state + lifecycle
-    broker_heartbeat.zig          # Periodic admin heartbeat sender
+    broker_heartbeat.zig          # Periodic admin heartbeat sender (also drives election)
 ```
+
+**Removed files (compared to old Bully-based design):**
+- `peer_connection.zig` — connection state merged into `Node` in `node_membership.zig`.
 
 **Dependency graph (within the cluster subsystem):**
 
@@ -2333,11 +2547,10 @@ admin_dispatch.zig           ◄── receiver event loop
        ▼ (command queue)
 cluster_event_handler.zig    ◄── broker-agent event loop (top-level coordinator)
        │
-       ├── leader_election.zig
-       ├── node_membership.zig
+       ├── leader_election.zig         (returns Result values, no callbacks)
+       ├── node_membership.zig         (includes Node with connection state)
        ├── cluster_state.zig
        ├── service_leader_election.zig
-       ├── peer_connection.zig
        └── broker_heartbeat.zig
 
 cluster_manager.zig          ◄── read-only facade (used by message routing, control plane)
@@ -2351,7 +2564,8 @@ cluster_manager.zig          ◄── read-only facade (used by message routing
 |---|---|
 | `cluster_event_handler.zig` | `threading/cmd_queue.zig` (doc 10), `control/control_message_processor.zig` (doc 09), `registry/service_registry.zig` (doc 09) |
 | `admin_dispatch.zig` | `threading/cmd_queue.zig` (doc 10) |
-| `peer_connection.zig` | `platform/clock.zig` (doc 01) |
+| `node_membership.zig` | `std` only — no internal dependencies |
+| `leader_election.zig` | `platform/clock.zig` (doc 01) — only for `init()` default deadline |
 | `admin_messages.zig` | `std` only — no internal dependencies |
 | `broker_heartbeat.zig` | `platform/clock.zig` (doc 01) |
 

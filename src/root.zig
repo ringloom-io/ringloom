@@ -117,7 +117,15 @@ comptime {
     _ = @import("control/service_leader_election.zig");
     _ = @import("control/control_loop.zig");
 
-    // Cluster management (task 11 stub)
+    // Cluster management (task 11)
+    _ = @import("cluster/admin_messages.zig");
+    _ = @import("cluster/leader_election.zig");
+    _ = @import("cluster/node_membership.zig");
+    _ = @import("cluster/cluster_state.zig");
+    _ = @import("cluster/service_leader_election.zig");
+    _ = @import("cluster/admin_dispatch.zig");
+    _ = @import("cluster/broker_heartbeat.zig");
+    _ = @import("cluster/cluster_event_handler.zig");
     _ = @import("cluster/cluster_manager.zig");
 
     // Command queue (task 09)

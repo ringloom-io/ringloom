@@ -615,7 +615,7 @@ const TestFixture = struct {
         @memset(&f.values_buf, 0);
         @memset(&f.meta_buf, 0);
         f.counters_mgr = CountersManager.init(&f.values_buf, &f.meta_buf);
-        f.cluster_mgr = ClusterManager.init(1);
+        f.cluster_mgr = ClusterManager.initSingleNode(1);
         f.cmd_queue = CommandQueue.init(&f.cmd_buf);
         @memset(&f.rb_buf, 0);
         f.rb = RingBuffer.init(&f.rb_buf, false, null, null) catch unreachable;
