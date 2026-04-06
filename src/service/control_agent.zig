@@ -2,11 +2,12 @@
 //! messages from the broker, and periodically writes heartbeats.
 
 const std = @import("std");
-const platform = @import("../platform.zig");
-const memory = @import("../memory.zig");
-const ring_buffer = @import("../concurrent/ring_buffer.zig");
-const constants = @import("../memory/constants.zig");
-const control_encoding = @import("../message/control_encoding.zig");
+const brz_common = @import("brz_common");
+const platform = brz_common.platform;
+const memory = brz_common.memory;
+const ring_buffer = brz_common.concurrent.ring_buffer;
+const constants = brz_common.memory.constants;
+const control_encoding = brz_common.message.control_encoding;
 const ServiceClientRegistry = @import("service_client_registry.zig").ServiceClientRegistry;
 
 const RingBuffer = ring_buffer.RingBuffer;

@@ -3,7 +3,7 @@
 //! Each instance may be on the local host (with an IpcProducer for direct
 //! shared-memory writes) or a remote host (messages routed via the broker).
 
-const IpcProducer = @import("../ipc/ipc_producer.zig").IpcProducer;
+const IpcProducer = @import("ipc/ipc_producer.zig").IpcProducer;
 
 pub const ServiceInstance = struct {
     /// Unique ID assigned by the broker at registration time.

@@ -5,10 +5,11 @@
 //! message handlers.
 
 const std = @import("std");
-const platform = @import("../platform.zig");
-const memory = @import("../memory.zig");
-const ring_buffer = @import("../concurrent/ring_buffer.zig");
-const constants = @import("../memory/constants.zig");
+const brz_common = @import("brz_common");
+const platform = brz_common.platform;
+const memory = brz_common.memory;
+const ring_buffer = brz_common.concurrent.ring_buffer;
+const constants = brz_common.memory.constants;
 const MessageConsumer = @import("message_consumer.zig").MessageConsumer;
 const control_agent_mod = @import("control_agent.zig");
 const ControlAgent = control_agent_mod.ControlAgent;

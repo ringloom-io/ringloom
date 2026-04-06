@@ -3,8 +3,9 @@
 //! Delegates each message to the application's registered handler.
 
 const std = @import("std");
-const RingBuffer = @import("../concurrent/ring_buffer.zig").RingBuffer;
-const constants = @import("../memory/constants.zig");
+const brz_common = @import("brz_common");
+const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
+const constants = brz_common.memory.constants;
 
 /// Default number of messages to read per poll cycle.
 const read_limit: u32 = 256;

@@ -5,13 +5,14 @@
 //! path depending on the target instance's node_id.
 
 const std = @import("std");
-const IpcProducer = @import("../ipc/ipc_producer.zig").IpcProducer;
+const brz_common = @import("brz_common");
+const IpcProducer = @import("ipc/ipc_producer.zig").IpcProducer;
 const ServiceInstance = @import("service_instance.zig").ServiceInstance;
 const load_balancer = @import("load_balancer.zig");
-const message_header = @import("../message/message_header.zig");
-const memory = @import("../memory.zig");
-const constants = @import("../memory/constants.zig");
-const RingBuffer = @import("../concurrent/ring_buffer.zig").RingBuffer;
+const message_header = brz_common.message.message_header;
+const memory = brz_common.memory;
+const constants = brz_common.memory.constants;
+const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const MessageHeader = message_header.MessageHeader;
