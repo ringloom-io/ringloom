@@ -127,20 +127,16 @@ test "factory loads config from explicit path" {
         .data = config_text,
     });
 
-    const cwd = std.fs.cwd();
-    const path = try std.fs.path.join(testing.allocator, &.{
-        ".zig-cache",
-    });
-    defer testing.allocator.free(path);
-
-    _ = cwd;
+    // Get absolute path to the temp directory so loadFromFile can find the file.
+    const tmp_abs = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_abs);
 
     var factory = BrokerApplicationFactory.init(testing.allocator);
 
     const file_path = try std.fmt.allocPrint(
         testing.allocator,
         "{s}/{s}",
-        .{ tmp.sub_path, "broker.properties" },
+        .{ tmp_abs, "broker.properties" },
     );
     defer testing.allocator.free(file_path);
 

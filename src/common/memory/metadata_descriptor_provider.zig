@@ -128,9 +128,10 @@ test "MetadataDescriptorProvider singleton lifecycle" {
 
     const provider = MetadataDescriptorProvider.getInstance();
 
-    // Verify buffer access.
-    try testing.expectEqual(@as(usize, 4096), provider.getControlBuffer().len);
-    try testing.expectEqual(@as(usize, 4096), provider.getSendBuffer().len);
+    // Verify buffer access (includes ring buffer trailer).
+    const trailer = constants.ring_buffer_trailer_length;
+    try testing.expectEqual(@as(usize, 4096 + trailer), provider.getControlBuffer().len);
+    try testing.expectEqual(@as(usize, 4096 + trailer), provider.getSendBuffer().len);
 
     // Verify heartbeat.
     provider.updateHeartbeat();

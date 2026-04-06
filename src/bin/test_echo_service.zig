@@ -12,14 +12,6 @@ const BrzEngine = brz_service.BrzEngine;
 const ServiceConfig = brz_service.ServiceConfig;
 const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 
-// ── I/O helpers (Zig 0.15 compatible) ─────────────────────────────────
-
-const FdWriter = std.io.GenericWriter(std.posix.fd_t, std.posix.WriteError, std.posix.write);
-
-fn fdWriter(fd: std.posix.fd_t) FdWriter {
-    return .{ .context = fd };
-}
-
 // ── Mutable file-level state (fine for a single-threaded test binary) ─
 
 var received_count: u64 = 0;
@@ -30,8 +22,11 @@ var reply_delay_ms: u64 = 0;
 fn messageHandler(_: i32, payload: []const u8) void {
     received_count += 1;
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
+    var buf: [512]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&buf);
+    const stdout = &stdout_w.interface;
     stdout.print("echo: received msg {d}, len={d}\n", .{ received_count, payload.len }) catch {};
+    stdout.flush() catch {};
 
     if (reply_delay_ms > 0) {
         std.Thread.sleep(reply_delay_ms * std.time.ns_per_ms);
@@ -43,7 +38,7 @@ fn messageHandler(_: i32, payload: []const u8) void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -56,12 +51,17 @@ pub fn main() !void {
     max_messages = parseU64Arg(args, "--max-messages", 0);
     reply_delay_ms = parseU64Arg(args, "--reply-delay-ms", 0);
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
-    const stderr = fdWriter(std.posix.STDERR_FILENO);
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_w.interface;
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    const stderr = &stderr_w.interface;
 
     try stderr.print("echo: starting with storage_path={s}, group={s}, name={s}\n", .{
         storage_path, group, service_name,
     });
+    try stderr.flush();
 
     const engine = BrzEngine.start(allocator, ServiceConfig{
         .storage_path = storage_path,
@@ -69,12 +69,14 @@ pub fn main() !void {
         .service_name = service_name,
     }) catch |err| {
         try stderr.print("echo: failed to start engine: {}\n", .{err});
+        try stderr.flush();
         std.process.exit(1);
     };
 
     engine.setMessageHandler(&messageHandler);
 
     try stdout.print("service ready: name={s}\n", .{service_name});
+    try stdout.flush();
 
     // Main loop: sleep 100ms, check shutdown flag.
     while (!shutdown_flag) {
@@ -82,10 +84,12 @@ pub fn main() !void {
     }
 
     try stdout.print("echo: total_received={d}\n", .{received_count});
+    try stdout.flush();
 
     engine.stop();
 
     try stderr.print("echo: shutdown complete\n", .{});
+    try stderr.flush();
 }
 
 // ── Argument parsing helpers ──────────────────────────────────────────

@@ -51,7 +51,7 @@ pub const ConfigLoader = struct {
 
     /// Parse properties from a string and build a validated BrokerConfig.
     pub fn parseAndBuild(self: *const ConfigLoader, content: []const u8) ConfigError!BrokerConfig {
-        var props = parseProperties(content) catch
+        var props = parseProperties(self.allocator, content) catch
             return ConfigError.IoError;
         defer props.deinit();
 
@@ -202,9 +202,10 @@ fn parsePeerEndpoints(
 }
 
 fn parseProperties(
+    allocator: std.mem.Allocator,
     content: []const u8,
 ) !std.StringHashMap([]const u8) {
-    var map = std.StringHashMap([]const u8).init(std.heap.page_allocator);
+    var map = std.StringHashMap([]const u8).init(allocator);
 
     var line_iter = std.mem.splitScalar(u8, content, '\n');
     while (line_iter.next()) |raw_line| {

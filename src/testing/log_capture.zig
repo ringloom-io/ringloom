@@ -12,7 +12,6 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
-const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
 const process_runner = @import("process_runner.zig");
@@ -20,14 +19,6 @@ const ProcessHandle = process_runner.ProcessHandle;
 const ProcessState = process_runner.ProcessState;
 const temp_env = @import("temp_env.zig");
 const TempEnv = temp_env.TempEnv;
-
-// ── I/O helpers (Zig 0.15 — no std.io.getStdErr) ────────────────────
-
-const FdWriter = std.io.GenericWriter(posix.fd_t, posix.WriteError, posix.write);
-
-fn fdWriter(fd: posix.fd_t) FdWriter {
-    return .{ .context = fd };
-}
 
 /// Accumulates raw byte output and provides search / tail operations.
 pub const LogCapture = struct {
@@ -153,7 +144,9 @@ pub fn dumpFailureDiagnostics(
     processes: []const *ProcessHandle,
     env: *const TempEnv,
 ) void {
-    const stderr = fdWriter(2);
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    const stderr = &stderr_w.interface;
 
     stderr.print(
         "\n╔══════════════════════════════════════════════════════════╗\n" ++
@@ -165,6 +158,7 @@ pub fn dumpFailureDiagnostics(
     stderr.print("  Base path : {s}\n", .{env.base_path}) catch return;
     stderr.print("  Storage   : {s}\n", .{env.storage_path}) catch return;
     stderr.print("  Logs      : {s}\n\n", .{env.logs_path}) catch return;
+    stderr.flush() catch {};
 
     // ── Per-process diagnostics ──────────────────────────────────
     for (processes) |handle| {
@@ -179,21 +173,26 @@ pub fn dumpFailureDiagnostics(
 
         stderr.print("   Stdout    : {s}\n", .{handle.stdout_path}) catch return;
         stderr.print("   Stderr    : {s}\n", .{handle.stderr_path}) catch return;
+        stderr.flush() catch {};
 
         // Try to read the last 50 lines of the stdout log file.
         dumpTailOfFile(allocator, stderr, handle.stdout_path, 50, "stdout");
         dumpTailOfFile(allocator, stderr, handle.stderr_path, 20, "stderr");
 
         stderr.print("\n", .{}) catch return;
+        stderr.flush() catch {};
     }
 
     // ── Storage directory listing ────────────────────────────────
     stderr.print("── Storage directory listing ──\n", .{}) catch return;
+    stderr.flush() catch {};
     listDirectoryRecursive(stderr, env.storage_path, 0) catch {
         stderr.print("   (unable to list storage directory)\n", .{}) catch return;
     };
+    stderr.flush() catch {};
 
     stderr.print("\n── End of failure diagnostics ──\n\n", .{}) catch return;
+    stderr.flush() catch {};
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────

@@ -64,8 +64,14 @@ pub const BrokerMetadataFile = struct {
         if (!constants.isPowerOfTwo(messages_buffer_length))
             return error.MessagesBufferNotPowerOfTwo;
 
+        // The ring buffer needs data_capacity + trailer. The caller specifies the
+        // data capacity (must be power-of-two); we add the trailer here.
+        const trailer = constants.ring_buffer_trailer_length;
+        const ctrl_region = control_buffer_length + trailer;
+        const msgs_region = messages_buffer_length + trailer;
+
         const total_size = constants.alignUp(
-            constants.metadata_header_length + control_buffer_length + messages_buffer_length,
+            constants.metadata_header_length + ctrl_region + msgs_region,
             constants.page_size,
         );
 
@@ -90,12 +96,12 @@ pub const BrokerMetadataFile = struct {
         var self = BrokerMetadataFile{
             .mapped_bytes = mapped,
             .header = @ptrCast(@alignCast(mapped.ptr)),
-            .control_buffer = mapped[constants.metadata_header_length..][0..control_buffer_length],
-            .send_buffer = mapped[constants.metadata_header_length + control_buffer_length ..][0..messages_buffer_length],
+            .control_buffer = mapped[constants.metadata_header_length..][0..ctrl_region],
+            .send_buffer = mapped[constants.metadata_header_length + ctrl_region ..][0..msgs_region],
             .fd = fd,
         };
 
-        // Write the immutable header fields.
+        // Write the immutable header fields — store data capacity (without trailer).
         self.header.control_buffer_length = @intCast(control_buffer_length);
         self.header.messages_buffer_length = @intCast(messages_buffer_length);
         self.header.service_id = constants.broker_service_id;
@@ -141,8 +147,12 @@ pub const BrokerMetadataFile = struct {
         if (!constants.isPowerOfTwo(msgs_len))
             return error.MessagesBufferNotPowerOfTwo;
 
+        const trailer = constants.ring_buffer_trailer_length;
+        const ctrl_region = ctrl_len + trailer;
+        const msgs_region = msgs_len + trailer;
+
         const expected = constants.alignUp(
-            constants.metadata_header_length + ctrl_len + msgs_len,
+            constants.metadata_header_length + ctrl_region + msgs_region,
             constants.page_size,
         );
         if (file_size < expected)
@@ -151,8 +161,8 @@ pub const BrokerMetadataFile = struct {
         return BrokerMetadataFile{
             .mapped_bytes = mapped,
             .header = header,
-            .control_buffer = mapped[constants.metadata_header_length..][0..ctrl_len],
-            .send_buffer = mapped[constants.metadata_header_length + ctrl_len ..][0..msgs_len],
+            .control_buffer = mapped[constants.metadata_header_length..][0..ctrl_region],
+            .send_buffer = mapped[constants.metadata_header_length + ctrl_region ..][0..msgs_region],
             .fd = fd,
         };
     }
@@ -239,11 +249,12 @@ pub const BrokerMetadataFile = struct {
     }
 
     fn ensureDirectoryExists(file_path: []const u8) !void {
-        const dir = std.fs.path.dirname(file_path) orelse return error.InvalidPath;
-        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        const dir_path = std.fs.path.dirname(file_path) orelse return error.InvalidPath;
+        // Use makePath to create all intermediate directories.
+        var root_dir = std.fs.openDirAbsolute("/", .{}) catch return error.FileNotFound;
+        defer root_dir.close();
+        const relative = if (dir_path.len > 0 and dir_path[0] == '/') dir_path[1..] else dir_path;
+        root_dir.makePath(relative) catch return error.FileNotFound;
     }
 };
 
@@ -280,9 +291,10 @@ test "create broker metadata file and verify layout" {
     try testing.expect(file.header.pid > 0);
     try testing.expect(file.header.start_timestamp_ms > 0);
 
-    // Verify buffer slice sizes.
-    try testing.expectEqual(@as(usize, 64 * 1024), file.control_buffer.len);
-    try testing.expectEqual(@as(usize, 1024 * 1024), file.send_buffer.len);
+    // Verify buffer slice sizes (include ring buffer trailer).
+    const trailer = constants.ring_buffer_trailer_length;
+    try testing.expectEqual(@as(usize, 64 * 1024 + trailer), file.control_buffer.len);
+    try testing.expectEqual(@as(usize, 1024 * 1024 + trailer), file.send_buffer.len);
 
     // Verify control buffer starts at offset 512.
     const control_offset = @intFromPtr(file.control_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
@@ -290,7 +302,7 @@ test "create broker metadata file and verify layout" {
 
     // Verify send buffer starts right after control buffer.
     const send_offset = @intFromPtr(file.send_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
-    try testing.expectEqual(@as(usize, 512 + 64 * 1024), send_offset);
+    try testing.expectEqual(@as(usize, 512 + 64 * 1024 + trailer), send_offset);
 
     // Verify nextServiceId initialized to 1.
     try testing.expectEqual(@as(i32, 1), file.loadNextServiceId());

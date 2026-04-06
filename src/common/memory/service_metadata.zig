@@ -96,11 +96,17 @@ pub const ServiceMetadataFile = struct {
         else
             0;
 
+        // Ring buffers need data_capacity + trailer. The caller specifies data
+        // capacity (power-of-two); we add the trailer here.
+        const rb_trailer = constants.ring_buffer_trailer_length;
+        const ctrl_region = opts.control_buffer_length + rb_trailer;
+        const msgs_region = opts.messages_buffer_length + rb_trailer;
+
         const total_size = constants.alignUp(
             constants.metadata_header_length +
                 blocking_extra +
-                opts.control_buffer_length +
-                opts.messages_buffer_length,
+                ctrl_region +
+                msgs_region,
             constants.page_size,
         );
 
@@ -133,12 +139,12 @@ pub const ServiceMetadataFile = struct {
                 @ptrCast(@alignCast(mapped.ptr + constants.metadata_header_length))
             else
                 null,
-            .control_buffer = mapped[buffers_offset..][0..opts.control_buffer_length],
-            .messages_buffer = mapped[buffers_offset + opts.control_buffer_length ..][0..opts.messages_buffer_length],
+            .control_buffer = mapped[buffers_offset..][0..ctrl_region],
+            .messages_buffer = mapped[buffers_offset + ctrl_region ..][0..msgs_region],
             .fd = fd,
         };
 
-        // Write immutable header fields.
+        // Write immutable header fields — store data capacity (without trailer).
         self.header.control_buffer_length = @intCast(opts.control_buffer_length);
         self.header.messages_buffer_length = @intCast(opts.messages_buffer_length);
         self.header.service_id = opts.service_id;
@@ -200,8 +206,12 @@ pub const ServiceMetadataFile = struct {
         const blocking_extra: usize = if (is_blocking) constants.blocking_trailer_length else 0;
         const buffers_offset = constants.metadata_header_length + blocking_extra;
 
+        const trailer = constants.ring_buffer_trailer_length;
+        const ctrl_region = ctrl_len + trailer;
+        const msgs_region = msgs_len + trailer;
+
         const expected = constants.alignUp(
-            buffers_offset + ctrl_len + msgs_len,
+            buffers_offset + ctrl_region + msgs_region,
             constants.page_size,
         );
         if (file_size < expected)
@@ -214,8 +224,8 @@ pub const ServiceMetadataFile = struct {
                 @ptrCast(@alignCast(mapped.ptr + constants.metadata_header_length))
             else
                 null,
-            .control_buffer = mapped[buffers_offset..][0..ctrl_len],
-            .messages_buffer = mapped[buffers_offset + ctrl_len ..][0..msgs_len],
+            .control_buffer = mapped[buffers_offset..][0..ctrl_region],
+            .messages_buffer = mapped[buffers_offset + ctrl_region ..][0..msgs_region],
             .fd = fd,
         };
     }
@@ -287,11 +297,12 @@ pub const ServiceMetadataFile = struct {
     }
 
     fn ensureDirectoryExists(file_path: []const u8) !void {
-        const dir = std.fs.path.dirname(file_path) orelse return error.InvalidPath;
-        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        const dir_path = std.fs.path.dirname(file_path) orelse return error.InvalidPath;
+        // Use makePath to create all intermediate directories.
+        var root_dir = std.fs.openDirAbsolute("/", .{}) catch return error.FileNotFound;
+        defer root_dir.close();
+        const relative = if (dir_path.len > 0 and dir_path[0] == '/') dir_path[1..] else dir_path;
+        root_dir.makePath(relative) catch return error.FileNotFound;
     }
 };
 
@@ -337,9 +348,10 @@ test "create service metadata file without blocking — verify offsets" {
     const ctrl_offset = @intFromPtr(file.control_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
     try testing.expectEqual(@as(usize, 512), ctrl_offset);
 
-    // Messages buffer starts right after control buffer.
+    // Messages buffer starts right after control buffer (including ring buffer trailer).
+    const rb_trailer = constants.ring_buffer_trailer_length;
     const msgs_offset = @intFromPtr(file.messages_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
-    try testing.expectEqual(@as(usize, 512 + 64 * 1024), msgs_offset);
+    try testing.expectEqual(@as(usize, 512 + 64 * 1024 + rb_trailer), msgs_offset);
 }
 
 test "create service metadata file with blocking — verify offsets include trailer" {
@@ -369,9 +381,10 @@ test "create service metadata file with blocking — verify offsets include trai
     const ctrl_offset = @intFromPtr(file.control_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
     try testing.expectEqual(@as(usize, 512 + 384), ctrl_offset);
 
-    // Messages buffer starts at 896 + 64 KB.
+    // Messages buffer starts at 896 + 64 KB + ring buffer trailer.
+    const rb_trailer = constants.ring_buffer_trailer_length;
     const msgs_offset = @intFromPtr(file.messages_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
-    try testing.expectEqual(@as(usize, 512 + 384 + 64 * 1024), msgs_offset);
+    try testing.expectEqual(@as(usize, 512 + 384 + 64 * 1024 + rb_trailer), msgs_offset);
 
     // Blocking trailer should have the default timeout.
     const trailer = file.blocking_trailer.?;

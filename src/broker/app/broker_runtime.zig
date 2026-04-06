@@ -55,6 +55,11 @@ pub const BrokerRuntime = struct {
 
     cluster_manager: ?ClusterManager,
     routing_registry: ?RoutingRegistry,
+
+    // Ring buffers stored as fields so event loop pointers remain valid.
+    control_rb: ?RingBuffer,
+    send_rb: ?RingBuffer,
+
     control_loop: ?ControlLoop,
     sender_loop: ?SenderEventLoop,
     receiver_loop: ?ReceiverEventLoop,
@@ -65,6 +70,9 @@ pub const BrokerRuntime = struct {
     const Self = @This();
 
     /// Initialize broker-owned resources but do not start worker threads yet.
+    ///
+    /// Event loops and threads are created in `start()` to avoid dangling
+    /// self-referential pointers (init returns by value).
     pub fn init(allocator: std.mem.Allocator, config: BrokerConfig) !Self {
         var self = Self{
             .allocator = allocator,
@@ -81,6 +89,8 @@ pub const BrokerRuntime = struct {
             .receiver_cmd_queue = null,
             .cluster_manager = null,
             .routing_registry = null,
+            .control_rb = null,
+            .send_rb = null,
             .control_loop = null,
             .sender_loop = null,
             .receiver_loop = null,
@@ -103,7 +113,6 @@ pub const BrokerRuntime = struct {
             @enumFromInt(std.math.log2(@as(usize, platform.constants.cache_line_pad))),
             config.counter_values_buffer_size,
         );
-        errdefer allocator.free(values_buffer);
         @memset(values_buffer, 0);
         self.counters_values_buffer = values_buffer;
 
@@ -111,22 +120,18 @@ pub const BrokerRuntime = struct {
             u8,
             config.counter_metadata_buffer_size,
         );
-        errdefer allocator.free(metadata_buffer);
         @memset(metadata_buffer, 0);
         self.counters_metadata_buffer = metadata_buffer;
 
         self.counters = CountersManager.init(values_buffer, metadata_buffer);
 
         const control_cmd_buffer = try allocator.alloc(Command, commandQueueCapacity());
-        errdefer allocator.free(control_cmd_buffer);
         self.control_cmd_buffer = control_cmd_buffer;
 
         const sender_cmd_buffer = try allocator.alloc(Command, commandQueueCapacity());
-        errdefer allocator.free(sender_cmd_buffer);
         self.sender_cmd_buffer = sender_cmd_buffer;
 
         const receiver_cmd_buffer = try allocator.alloc(Command, commandQueueCapacity());
-        errdefer allocator.free(receiver_cmd_buffer);
         self.receiver_cmd_buffer = receiver_cmd_buffer;
 
         self.control_cmd_queue = CommandQueue.init(control_cmd_buffer);
@@ -136,42 +141,53 @@ pub const BrokerRuntime = struct {
         self.cluster_manager = ClusterManager.initSingleNode(config.node_id);
         self.routing_registry = RoutingRegistry.init();
 
-        var control_rb = try RingBuffer.init(
+        self.control_rb = try RingBuffer.init(
             @alignCast(self.broker_metadata.?.getControlBuffer()),
             false,
             null,
             null,
         );
 
-        var send_rb = try RingBuffer.init(
+        self.send_rb = try RingBuffer.init(
             @alignCast(self.broker_metadata.?.getSendBuffer()),
             false,
             null,
             null,
         );
 
+        return self;
+    }
+
+    /// Create event loops and start broker worker threads.
+    ///
+    /// Event loops are created here (not in init) because `self` is now at its
+    /// final address, so internal pointers (&self.control_rb, &self.counters, etc.)
+    /// remain valid.
+    pub fn start(self: *Self) !void {
+        if (self.started) return error.AlreadyStarted;
+
         self.control_loop = ControlLoop.init(.{
-            .control_rb = &control_rb,
+            .control_rb = &self.control_rb.?,
             .cmd_queue = &self.control_cmd_queue.?,
             .cluster_manager = &self.cluster_manager.?,
             .counters = &self.counters.?,
-            .local_node_id = config.node_id,
-            .storage_path = config.storage_path,
-            .group = config.group_name,
-            .allocator = allocator,
+            .local_node_id = self.config.node_id,
+            .storage_path = self.config.storage_path,
+            .group = self.config.group_name,
+            .allocator = self.allocator,
         });
 
         self.sender_loop = try SenderEventLoop.init(
-            &send_rb,
+            &self.send_rb.?,
             &self.counters.?,
-            config.node_id,
-            allocator,
+            self.config.node_id,
+            self.allocator,
         );
 
         self.receiver_loop = ReceiverEventLoop.init(
             &self.routing_registry.?,
             &self.counters.?,
-            config.node_id,
+            self.config.node_id,
         );
 
         self.broker_threads = BrokerThreads.init(
@@ -190,21 +206,10 @@ pub const BrokerRuntime = struct {
                 .doWorkFn = &receiverDoWorkFn,
                 .onCloseFn = &receiverOnCloseFn,
             },
-            idleStrategyFromConfig(config.idle_strategy_name),
-            idleStrategyFromConfig(config.idle_strategy_name),
-            idleStrategyFromConfig(config.idle_strategy_name),
+            idleStrategyFromConfig(self.config.idle_strategy_name),
+            idleStrategyFromConfig(self.config.idle_strategy_name),
+            idleStrategyFromConfig(self.config.idle_strategy_name),
         );
-
-        return self;
-    }
-
-    /// Start broker worker threads according to the configured threading model.
-    ///
-    /// For now, this runtime uses the dedicated three-thread broker model already
-    /// implemented by `BrokerThreads`.
-    pub fn start(self: *Self) !void {
-        if (self.started) return error.AlreadyStarted;
-        if (self.broker_threads == null) return error.NotInitialized;
 
         try self.broker_threads.?.start();
         self.started = true;
@@ -237,6 +242,9 @@ pub const BrokerRuntime = struct {
         self.routing_registry = null;
         self.cluster_manager = null;
         self.broker_threads = null;
+
+        self.control_rb = null;
+        self.send_rb = null;
 
         self.control_cmd_queue = null;
         self.sender_cmd_queue = null;
@@ -303,10 +311,7 @@ fn senderDoWorkFn(ctx: *anyopaque) u32 {
     return loop.doWork();
 }
 
-fn senderOnCloseFn(ctx: *anyopaque) void {
-    const loop: *SenderEventLoop = @ptrCast(@alignCast(ctx));
-    loop.deinit();
-}
+fn senderOnCloseFn(_: *anyopaque) void {}
 
 fn receiverDoWorkFn(ctx: *anyopaque) u32 {
     const loop: *ReceiverEventLoop = @ptrCast(@alignCast(ctx));
@@ -333,13 +338,12 @@ test "BrokerRuntime init and deinit without start" {
     var runtime = try BrokerRuntime.init(allocator, config);
     defer runtime.deinit();
 
-    // Then
+    // Then — init creates metadata, counters, ring buffers; event loops are deferred to start()
     try std.testing.expect(!runtime.isRunning());
     try std.testing.expect(runtime.broker_metadata != null);
     try std.testing.expect(runtime.counters != null);
-    try std.testing.expect(runtime.control_loop != null);
-    try std.testing.expect(runtime.sender_loop != null);
-    try std.testing.expect(runtime.receiver_loop != null);
+    try std.testing.expect(runtime.control_rb != null);
+    try std.testing.expect(runtime.send_rb != null);
 }
 
 test "BrokerRuntime start and shutdown" {

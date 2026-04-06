@@ -19,7 +19,7 @@ const MessageHeader = message_header.MessageHeader;
 
 pub const ServiceClient = struct {
     service_name: []const u8,
-    instances: std.ArrayListUnmanaged(ServiceInstance),
+    instances: std.ArrayList(ServiceInstance),
     allocator: std.mem.Allocator,
     balancer: load_balancer.ClientLoadBalancer,
 
@@ -46,7 +46,7 @@ pub const ServiceClient = struct {
     ) Self {
         return .{
             .service_name = service_name,
-            .instances = .{},
+            .instances = .empty,
             .allocator = allocator,
             .balancer = .{ .round_robin = .{} },
             .broker_meta = broker_meta,

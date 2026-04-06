@@ -18,14 +18,6 @@ const ServiceConfig = brz_service.ServiceConfig;
 const ServiceClient = brz_service.ServiceClient;
 const Clock = brz_common.Clock;
 
-// ── I/O helpers (Zig 0.15 — no std.io.getStdOut) ────────────────────
-
-const FdWriter = std.io.GenericWriter(std.posix.fd_t, std.posix.WriteError, std.posix.write);
-
-fn fdWriter(fd: std.posix.fd_t) FdWriter {
-    return .{ .context = fd };
-}
-
 // ── Arg Parsing Helpers ──────────────────────────────────────────────
 
 fn parseStringArg(args: []const []const u8, flag: []const u8, default: []const u8) []const u8 {
@@ -61,12 +53,16 @@ fn parseOptionalStringArg(args: []const []const u8, flag: []const u8) ?[]const u
 // ── Main ─────────────────────────────────────────────────────────────
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
-    const stderr = fdWriter(std.posix.STDERR_FILENO);
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_w.interface;
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    const stderr = &stderr_w.interface;
 
     // ── Parse CLI args ───────────────────────────────────────────────
 
@@ -92,6 +88,7 @@ pub fn main() !void {
 
     const engine = BrzEngine.start(allocator, config) catch |err| {
         try stderr.print("ping: failed to start engine: {}\n", .{err});
+        try stderr.flush();
         std.process.exit(1);
     };
     defer engine.stop();
@@ -100,10 +97,12 @@ pub fn main() !void {
 
     const client = engine.createClient(target_service) catch |err| {
         try stderr.print("ping: failed to create client for '{s}': {}\n", .{ target_service, err });
+        try stderr.flush();
         std.process.exit(1);
     };
 
     try stdout.print("service ready: name={s}\n", .{service_name});
+    try stdout.flush();
 
     // ── Wait for service discovery to propagate ──────────────────────
 
@@ -130,6 +129,7 @@ pub fn main() !void {
 
     if (warmup_count > 0) {
         try stdout.print("ping: warmup complete, sent={d}, failed={d}\n", .{ warmup_sent, warmup_failed });
+        try stdout.flush();
     }
 
     // Small pause between warmup and measurement.
@@ -177,6 +177,7 @@ pub fn main() !void {
     try stdout.print("ping: sent={d}, failed={d}, elapsed_ms={d}\n", .{ sent, failed, elapsed_ms });
     try stdout.print("ping: throughput={d} msgs/s, {d} bytes/s\n", .{ throughput_msgs_per_sec, throughput_bytes_per_sec });
     try stdout.print("ping: message_size={d}, target={s}\n", .{ message_size, target_service });
+    try stdout.flush();
 
     // ── Write JSON results file (optional) ───────────────────────────
 
@@ -197,10 +198,12 @@ pub fn main() !void {
             target_service,
         ) catch |err| {
             try stderr.print("ping: failed to write result file '{s}': {}\n", .{ path, err });
+            try stderr.flush();
         };
     }
 
     try stdout.print("ping: shutdown complete\n", .{});
+    try stdout.flush();
 }
 
 fn writeResultsJson(
@@ -221,7 +224,9 @@ fn writeResultsJson(
     const file = try std.fs.cwd().createFile(path, .{});
     defer file.close();
 
-    const writer: FdWriter = .{ .context = file.handle };
+    var write_buf: [4096]u8 = undefined;
+    var file_w = file.writer(&write_buf);
+    const writer = &file_w.interface;
     try writer.print(
         \\{{
         \\  "service_name": "{s}",
@@ -252,4 +257,5 @@ fn writeResultsJson(
         start_time_ms,
         end_time_ms,
     });
+    try writer.flush();
 }

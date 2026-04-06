@@ -84,16 +84,11 @@ pub const ControlAgent = struct {
     pub fn onCloseFn(_: *anyopaque) void {}
 
     fn pollControlMessages(self: *Self) u32 {
+        // Set file-level context so the bare function pointer handler can
+        // reach this agent instance. Safe because ControlAgent runs on a
+        // single dedicated thread.
+        dispatch_agent_ptr = self;
         return self.control_rb.read(&dispatchWrapper, constants.control_read_limit);
-    }
-
-    fn dispatchWrapper(msg_type_id: i32, payload: []const u8) void {
-        // Note: In a real implementation, this would reference the agent through
-        // thread-local or context pointer. For now, we dispatch based on template_id
-        // in the payload. The ControlAgent is responsible for setting up the handler
-        // context before polling.
-        _ = msg_type_id;
-        _ = payload;
     }
 
     /// Dispatch a single control message based on its template ID.
@@ -135,6 +130,16 @@ pub const ControlAgent = struct {
         return (now - self.last_heartbeat_ns) >= heartbeat_write_interval_ns;
     }
 };
+
+// File-level state for the dispatch handler — set before each read() call.
+// Safe: ControlAgent runs on a single dedicated thread.
+var dispatch_agent_ptr: ?*ControlAgent = null;
+
+fn dispatchWrapper(_: i32, payload: []const u8) void {
+    if (dispatch_agent_ptr) |agent| {
+        agent.dispatchControlMessage(payload);
+    }
+}
 
 // ── Free Functions for Registration ───────────────────────────────────
 

@@ -42,9 +42,10 @@ pub const PeriodicMonitoringDump = struct {
         self.next_dump_ns = now + self.interval_ns;
 
         const snapshot = MonitoringSnapshot.take(self.node_id, self.counters, self.error_log);
-        const FdWriter = std.io.GenericWriter(std.posix.fd_t, std.posix.WriteError, std.posix.write);
-        const stderr_writer: FdWriter = .{ .context = std.posix.STDERR_FILENO };
-        snapshot.dump(stderr_writer) catch {};
+        var dump_buf: [4096]u8 = undefined;
+        var stderr_w = std.fs.File.stderr().writer(&dump_buf);
+        snapshot.dump(&stderr_w.interface) catch {};
+        stderr_w.interface.flush() catch {};
 
         return 1;
     }

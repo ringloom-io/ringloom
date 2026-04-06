@@ -19,14 +19,6 @@ const BrzEngine = brz_service.BrzEngine;
 const ServiceConfig = brz_service.ServiceConfig;
 const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 
-// ── FdWriter — Zig 0.15 compatible stdout/stderr ─────────────────────
-
-const FdWriter = std.io.GenericWriter(std.posix.fd_t, std.posix.WriteError, std.posix.write);
-
-fn fdWriter(fd: std.posix.fd_t) FdWriter {
-    return .{ .context = fd };
-}
-
 // ── Mutable file-level state for the function-pointer message handler ─
 
 var received_count: u64 = 0;
@@ -35,11 +27,15 @@ var crash_after_messages: u64 = 0;
 fn messageHandler(_: i32, payload: []const u8) void {
     received_count += 1;
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
+    var buf: [512]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&buf);
+    const stdout = &stdout_w.interface;
     stdout.print("crashy: received msg {d}, len={d}\n", .{ received_count, payload.len }) catch {};
+    stdout.flush() catch {};
 
     if (crash_after_messages > 0 and received_count >= crash_after_messages) {
         stdout.print("crashy: crashing after {d} messages (no cleanup)\n", .{received_count}) catch {};
+        stdout.flush() catch {};
         // Abrupt exit — deliberately skip engine.stop().
         std.process.exit(1);
     }
@@ -70,7 +66,7 @@ fn parseIntArg(comptime T: type, args: []const []const u8, flag: []const u8, def
 // ── Entry point ───────────────────────────────────────────────────────
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -83,10 +79,15 @@ pub fn main() !void {
     const crash_after_ms: u64 = parseIntArg(u64, args, "--crash-after-ms", 2000);
     crash_after_messages = parseIntArg(u64, args, "--crash-after-messages", 0);
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
-    const stderr = fdWriter(std.posix.STDERR_FILENO);
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_w.interface;
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    const stderr = &stderr_w.interface;
 
     try stdout.print("crashy: starting service name={s} group={s}\n", .{ service_name, group });
+    try stdout.flush();
 
     const config = ServiceConfig{
         .storage_path = storage_path,
@@ -96,6 +97,7 @@ pub fn main() !void {
 
     const engine = BrzEngine.start(allocator, config) catch |err| {
         try stderr.print("crashy: failed to start engine: {}\n", .{err});
+        try stderr.flush();
         std.process.exit(2);
     };
     // NOTE: we deliberately do NOT defer engine.stop() — the whole point of
@@ -105,11 +107,13 @@ pub fn main() !void {
 
     try stdout.print("service ready: name={s}\n", .{service_name});
     try stdout.print("crashy: service_id={d}, node_id={d}\n", .{ engine.service_id, engine.node_id });
+    try stdout.flush();
 
     if (crash_after_messages > 0) {
         // Message-count-based crash: sit in a polling loop until the handler
         // calls std.process.exit(1).
         try stdout.print("crashy: will crash after {d} messages\n", .{crash_after_messages});
+        try stdout.flush();
 
         while (true) {
             std.Thread.sleep(100 * std.time.ns_per_ms);
@@ -117,12 +121,14 @@ pub fn main() !void {
     } else {
         // Time-based crash (the default path).
         try stdout.print("crashy: will crash after {d} ms\n", .{crash_after_ms});
+        try stdout.flush();
 
         if (crash_after_ms > 0) {
             std.Thread.sleep(crash_after_ms * std.time.ns_per_ms);
         }
 
         try stdout.print("crashy: crashing now (no cleanup)\n", .{});
+        try stdout.flush();
         std.process.exit(1);
     }
 }

@@ -17,14 +17,6 @@ const ServiceConfig = brz_service.ServiceConfig;
 const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 const Clock = brz_common.platform.Clock;
 
-// ── I/O helpers (Zig 0.15 compatible) ────────────────────────────────
-
-const FdWriter = std.io.GenericWriter(std.posix.fd_t, std.posix.WriteError, std.posix.write);
-
-fn fdWriter(fd: std.posix.fd_t) FdWriter {
-    return .{ .context = fd };
-}
-
 // ── Mutable file-level state (acceptable for test binaries) ──────────
 
 var received_leader_changes: u64 = 0;
@@ -42,11 +34,14 @@ fn messageHandler(_: i32, payload: []const u8) void {
     // log the raw length.
     received_leader_changes += 1;
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
+    var buf: [512]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&buf);
+    const stdout = &stdout_w.interface;
     stdout.print("leader-test: received control msg #{d}, len={d}\n", .{
         received_leader_changes,
         payload.len,
     }) catch {};
+    stdout.flush() catch {};
 }
 
 // ── Arg parsing helpers ──────────────────────────────────────────────
@@ -74,7 +69,7 @@ fn parseIntArg(comptime T: type, args: []const []const u8, flag: []const u8, def
 // ── Entry point ──────────────────────────────────────────────────────
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -88,8 +83,12 @@ pub fn main() !void {
     const service_name = parseStringArg(args, "--service-name", "leader-test");
     const max_runtime_ms: u64 = parseIntArg(u64, args, "--max-runtime-ms", 30000);
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
-    const stderr = fdWriter(std.posix.STDERR_FILENO);
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_w.interface;
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    const stderr = &stderr_w.interface;
 
     try stdout.print("leader-test: starting service_name={s} group={s} storage_path={s} max_runtime_ms={d}\n", .{
         service_name,
@@ -97,6 +96,7 @@ pub fn main() !void {
         storage_path,
         max_runtime_ms,
     });
+    try stdout.flush();
 
     // ── Start BrzEngine with leader election enabled ─────────────────
 
@@ -109,6 +109,7 @@ pub fn main() !void {
 
     const engine = BrzEngine.start(allocator, config) catch |err| {
         try stderr.print("leader-test: failed to start engine: {any}\n", .{err});
+        try stderr.flush();
         std.process.exit(1);
     };
 
@@ -117,6 +118,7 @@ pub fn main() !void {
         engine.service_id,
         engine.node_id,
     });
+    try stdout.flush();
 
     // ── Set message handler ──────────────────────────────────────────
 
@@ -136,6 +138,7 @@ pub fn main() !void {
         // Check max runtime.
         if (elapsed >= max_runtime_i64) {
             try stdout.print("leader-test: max runtime reached ({d}ms), shutting down\n", .{max_runtime_ms});
+            try stdout.flush();
             break;
         }
 
@@ -151,6 +154,7 @@ pub fn main() !void {
                 received_leader_changes,
                 elapsed,
             });
+            try stdout.flush();
         }
 
         // Sleep 100ms between iterations.
@@ -160,6 +164,8 @@ pub fn main() !void {
     // ── Shutdown ─────────────────────────────────────────────────────
 
     try stdout.print("leader-test: shutting down, total_leader_changes={d}\n", .{received_leader_changes});
+    try stdout.flush();
     engine.stop();
     try stdout.print("leader-test: stopped cleanly\n", .{});
+    try stdout.flush();
 }

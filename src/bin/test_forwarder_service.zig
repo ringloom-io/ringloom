@@ -13,14 +13,6 @@ const ServiceConfig = brz_service.ServiceConfig;
 const ServiceClient = brz_service.ServiceClient;
 const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 
-// ── I/O helpers (Zig 0.15 compatible) ────────────────────────────────
-
-const FdWriter = std.io.GenericWriter(std.posix.fd_t, std.posix.WriteError, std.posix.write);
-
-fn fdWriter(fd: std.posix.fd_t) FdWriter {
-    return .{ .context = fd };
-}
-
 // ── Mutable file-level state (acceptable for a test binary) ──────────
 
 var state = State{};
@@ -39,13 +31,16 @@ const State = struct {
 fn onMessage(_: i32, payload: []const u8) void {
     state.received += 1;
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
+    var buf: [512]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&buf);
+    const stdout = &stdout_w.interface;
     stdout.print("forwarder: received msg {d}, len={d}\n", .{ state.received, payload.len }) catch {};
 
     if (state.client) |client| {
         client.send(payload) catch {
             state.forward_errors += 1;
             stdout.print("forwarder: forward error on msg {d}\n", .{state.received}) catch {};
+            stdout.flush() catch {};
             return;
         };
         state.forwarded += 1;
@@ -53,6 +48,8 @@ fn onMessage(_: i32, payload: []const u8) void {
         state.forward_errors += 1;
         stdout.print("forwarder: no client available, dropping msg {d}\n", .{state.received}) catch {};
     }
+
+    stdout.flush() catch {};
 
     if (state.max_messages > 0 and state.received >= state.max_messages) {
         state.shutdown = true;
@@ -84,12 +81,16 @@ fn parseIntArg(comptime T: type, args: []const []const u8, flag: []const u8, def
 // ── Entry point ──────────────────────────────────────────────────────
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
-    const stderr = fdWriter(std.posix.STDERR_FILENO);
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_w.interface;
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    const stderr = &stderr_w.interface;
 
     // ── Parse command-line arguments ─────────────────────────────────
 
@@ -114,6 +115,7 @@ pub fn main() !void {
 
     const engine = BrzEngine.start(allocator, config) catch |err| {
         try stderr.print("forwarder: failed to start engine: {}\n", .{err});
+        try stderr.flush();
         std.process.exit(1);
     };
 
@@ -121,6 +123,7 @@ pub fn main() !void {
 
     const client = engine.createClient(target_service) catch |err| {
         try stderr.print("forwarder: failed to create client for '{s}': {}\n", .{ target_service, err });
+        try stderr.flush();
         engine.stop();
         std.process.exit(1);
     };
@@ -130,6 +133,7 @@ pub fn main() !void {
 
     try stdout.print("service ready: name={s}\n", .{service_name});
     try stdout.print("forwarder: forwarding to target={s}, max_messages={d}\n", .{ target_service, max_messages });
+    try stdout.flush();
 
     // ── Register message handler ─────────────────────────────────────
 
@@ -148,6 +152,7 @@ pub fn main() !void {
         state.forwarded,
         state.forward_errors,
     });
+    try stdout.flush();
 
     // ── Graceful shutdown ────────────────────────────────────────────
 

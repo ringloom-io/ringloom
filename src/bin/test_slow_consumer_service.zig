@@ -12,14 +12,6 @@ const BrzEngine = brz_service.BrzEngine;
 const ServiceConfig = brz_service.ServiceConfig;
 const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 
-// ── I/O helpers (Zig 0.15 compatible) ────────────────────────────────
-
-const FdWriter = std.io.GenericWriter(std.posix.fd_t, std.posix.WriteError, std.posix.write);
-
-fn fdWriter(fd: std.posix.fd_t) FdWriter {
-    return .{ .context = fd };
-}
-
 // ── Mutable file-level state (acceptable for a test binary) ──────────
 
 var received_count: u64 = 0;
@@ -30,8 +22,11 @@ var delay_per_message_ms: u64 = 100;
 fn messageHandler(_: i32, payload: []const u8) void {
     received_count += 1;
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
+    var buf: [512]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&buf);
+    const stdout = &stdout_w.interface;
     stdout.print("slow-consumer: received msg {d}, len={d}\n", .{ received_count, payload.len }) catch {};
+    stdout.flush() catch {};
 
     // Artificial delay — the whole point of this service.
     if (delay_per_message_ms > 0) {
@@ -68,7 +63,7 @@ fn parseU64Arg(args: []const []const u8, flag: []const u8, default: u64) u64 {
 // ── Entry point ──────────────────────────────────────────────────────
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -81,13 +76,18 @@ pub fn main() !void {
     delay_per_message_ms = parseU64Arg(args, "--delay-per-message-ms", 100);
     max_messages = parseU64Arg(args, "--max-messages", 0);
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
-    const stderr = fdWriter(std.posix.STDERR_FILENO);
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_w.interface;
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    const stderr = &stderr_w.interface;
 
     try stdout.print("slow-consumer: starting with delay_per_message_ms={d}, max_messages={d}\n", .{
         delay_per_message_ms,
         max_messages,
     });
+    try stdout.flush();
 
     // ── Start engine ─────────────────────────────────────────────────
 
@@ -97,6 +97,7 @@ pub fn main() !void {
         .service_name = service_name,
     }) catch |err| {
         try stderr.print("slow-consumer: failed to start engine: {}\n", .{err});
+        try stderr.flush();
         std.process.exit(1);
     };
 
@@ -105,6 +106,7 @@ pub fn main() !void {
         engine.service_id,
         engine.node_id,
     });
+    try stdout.flush();
 
     // ── Install handler ──────────────────────────────────────────────
 
@@ -119,8 +121,10 @@ pub fn main() !void {
     // ── Shutdown ─────────────────────────────────────────────────────
 
     try stdout.print("slow-consumer: total_received={d}\n", .{received_count});
+    try stdout.flush();
 
     engine.stop();
 
     try stdout.print("slow-consumer: stopped\n", .{});
+    try stdout.flush();
 }

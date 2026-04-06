@@ -11,7 +11,7 @@ const ExitCode = enum(u8) {
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
 
     const allocator = gpa.allocator();
@@ -77,14 +77,10 @@ fn parseConfigPath(args: []const []const u8) !?[]const u8 {
     return null;
 }
 
-const FdWriter = std.io.GenericWriter(std.posix.fd_t, std.posix.WriteError, std.posix.write);
-
-fn fdWriter(fd: std.posix.fd_t) FdWriter {
-    return .{ .context = fd };
-}
-
 fn printHelp() !void {
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
+    var buf: [4096]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&buf);
+    const stdout = &stdout_w.interface;
     try stdout.writeAll(
         \\BRZ Broker — high-performance IPC framework
         \\
@@ -97,11 +93,15 @@ fn printHelp() !void {
         \\  --version, -v     Show version information
         \\
     );
+    try stdout.flush();
 }
 
 fn printVersion() !void {
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
+    var buf: [4096]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&buf);
+    const stdout = &stdout_w.interface;
     try stdout.writeAll("BRZ Broker v0.0.0\n");
+    try stdout.flush();
 }
 
 test "main module compiles" {
