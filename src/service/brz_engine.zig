@@ -196,10 +196,10 @@ fn createServiceMetadata(allocator: std.mem.Allocator, config: ServiceConfig) !s
     service_id: i32,
     node_id: i16,
 } {
-    _ = allocator;
-
     // 1. Open the broker's metadata file (must already exist).
-    const broker_meta = try BrokerMetadataFile.open(
+    const broker_meta = try allocator.create(BrokerMetadataFile);
+    errdefer allocator.destroy(broker_meta);
+    broker_meta.* = try BrokerMetadataFile.open(
         config.storage_path,
         config.group,
     );
@@ -211,7 +211,9 @@ fn createServiceMetadata(allocator: std.mem.Allocator, config: ServiceConfig) !s
     const node_id = broker_meta.header.node_id;
 
     // 4. Create the service's metadata file.
-    const service_meta = try ServiceMetadataFile.create(.{
+    const service_meta = try allocator.create(ServiceMetadataFile);
+    errdefer allocator.destroy(service_meta);
+    service_meta.* = try ServiceMetadataFile.create(.{
         .storage_path = config.storage_path,
         .group = config.group,
         .service_name = config.service_name,
