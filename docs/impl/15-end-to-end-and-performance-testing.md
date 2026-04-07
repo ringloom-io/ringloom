@@ -85,12 +85,12 @@ BRZ is fundamentally a **multi-process distributed IPC system**:
 - the broker is a standalone process
 - each service is a standalone process
 - same-host communication uses shared memory
-- cross-host communication uses UDP between brokers
+- cross-host communication uses TCP between brokers
 - lifecycle correctness depends on process startup, shutdown, crashes, heartbeats,
   metadata files, and inter-process timing
 
 Because of that, the test strategy must validate the system at the same level it runs in
-production: **separate OS processes with real shared-memory files and real UDP sockets**.
+production: **separate OS processes with real shared-memory files and real TCP connections**.
 
 This document introduces a dedicated testing layer with two major purposes:
 
@@ -108,7 +108,7 @@ The result should be a testing system that answers questions like:
 
 - Does `brz-broker` actually start the broker event loops?
 - Can two services on the same host communicate without broker hot-path involvement?
-- Can two brokers route messages across UDP correctly?
+- Can two brokers route messages across TCP correctly?
 - Does a dead service get removed after heartbeat timeout?
 - What is the p50/p99 latency for local IPC and cross-host routing?
 - What throughput can the broker sustain before backpressure appears?
@@ -125,7 +125,7 @@ The result should be a testing system that answers questions like:
 
 2. Exercise the real transport mechanisms:
    - shared memory
-   - UDP sockets
+   - TCP connections
    - metadata files
    - heartbeats and timeouts
 
@@ -383,9 +383,9 @@ For each scenario, the harness should generate:
 
 Use deterministic local ports where possible, for example:
 
-- broker 1 UDP port: `19001`
-- broker 2 UDP port: `19002`
-- broker 3 UDP port: `19003`
+- broker 1 TCP port: `19001`
+- broker 2 TCP port: `19002`
+- broker 3 TCP port: `19003`
 
 For parallel test execution, either:
 
@@ -405,7 +405,7 @@ A broker is considered ready when all of the following are true:
 1. process is alive
 2. broker metadata file exists
 3. control buffer is initialized
-4. UDP socket bind completed
+4. TCP socket listen completed
 5. startup log contains a readiness marker such as:
    - `broker started`
    - `control loop running`
@@ -476,8 +476,8 @@ Each broker config should include at least:
 - `broker.storage.path`
 - `broker.control.buffer.size`
 - `broker.messages.buffer.size`
-- `broker.recv.log.buffer.size`
-- `broker.retransmit.buffer.size`
+- `broker.tcp.send.buffer.size`
+- `broker.tcp.recv.buffer.size`
 - `broker.threading.mode`
 - `broker.idle.strategy`
 
@@ -499,7 +499,7 @@ Scenarios should be able to override:
 
 - heartbeat timeout
 - buffer sizes
-- MTU
+- max frame length
 - threading mode
 - idle strategy
 - leader election enabled
@@ -511,9 +511,9 @@ Use small but safe values:
 
 - control buffer: `64 KB`
 - messages buffer: `1 MB`
-- recv log: `4 MB`
-- retransmit: `4 MB`
-- MTU: `1408`
+- TCP send buffer: `256 KB`
+- TCP recv buffer: `256 KB`
+- max frame length: `65536`
 - threading mode: `DEDICATED`
 - idle strategy: `backoff`
 
@@ -750,7 +750,7 @@ Verify subscription and instance update flow.
 
 ### Purpose
 
-Validate real UDP routing between brokers.
+Validate real TCP routing between brokers.
 
 ### Topology
 
@@ -775,27 +775,26 @@ Validate real UDP routing between brokers.
 - all N messages succeed
 - remote routing headers are correct
 - both brokers remain healthy
-- no unexpected retransmit or loss behavior in the happy path
+- no unexpected connection drops or timeouts in the happy path
 
-## 10.6 Fragmentation and Reassembly
+## 10.6 Large Frame Handling
 
 ### Purpose
 
-Validate messages larger than one MTU.
+Validate messages up to `max_frame_length`.
 
 ### Steps
 
 1. Start two brokers or one broker depending on path under test
 2. Start sender and receiver services
-3. Send payload larger than `mtu_length`
-4. Receiver reassembles and validates payload checksum
+3. Send payloads of various sizes up to `max_frame_length`
+4. Receiver validates payload checksum
 
 ### Assertions
 
 - full payload arrives intact
-- fragment count matches expectation
-- no partial delivery
 - no corruption
+- frames exceeding `max_frame_length` are rejected by sender
 
 ### Suggested payload sizes
 
@@ -1032,7 +1031,7 @@ Measure:
 
 - end-to-end messages/sec
 - broker send/receive counters
-- retransmit count should remain near zero in happy path
+- no connection drops or queue overflow in happy path
 
 Suggested message sizes:
 
@@ -1129,7 +1128,7 @@ JSON per benchmark run:
     "messages_sent": 100000,
     "messages_received": 100000,
     "send_failures": 0,
-    "retransmits": 0
+    "tcp_reconnects": 0
   }
 }
 ```

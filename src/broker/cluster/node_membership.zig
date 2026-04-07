@@ -23,7 +23,7 @@ pub const Node = struct {
     id: u8,
     /// "host:port" string, null-padded to 22 bytes.
     host_and_port: [22]u8,
-    /// Resolved UDP address for this peer. Null for the local node.
+    /// Resolved address for this peer. Null for the local node.
     address: ?std.net.Address = null,
     /// True if this is the local broker.
     is_local: bool,

@@ -281,6 +281,7 @@ pub const BrokerApplication = struct {
             &routing_registry,
             &counters,
             self.config.node_id,
+            self.allocator,
         );
 
         self.broker_metadata = broker_metadata;

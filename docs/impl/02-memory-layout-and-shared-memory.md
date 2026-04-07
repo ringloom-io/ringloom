@@ -41,7 +41,6 @@ There are three types of memory-mapped regions:
 |--------|---------|-----------|--------|---------|
 | **Broker metadata file** | File on `/dev/shm` | All local services (MPSC) | Broker | Control messages (register, subscribe, heartbeat) and outbound cross-host messages |
 | **Service metadata file** | File on `/dev/shm` | Broker + peer services (MPSC) | Owning service | Control responses (registration ack, service instances, leader changed) and application messages |
-| **Receive log buffer** | Anonymous mmap or heap | Single receiver thread | Router + control loop | Assembling inbound UDP data from a peer broker |
 
 All files are stored at `<storage_path>/<group>/services/`. The default storage path
 is `/dev/shm` on Linux (tmpfs — backed by RAM, survives across process restarts until
@@ -95,7 +94,6 @@ pub const ring_buffer_record_header_length: usize = 8;
 pub const default_control_buffer_length: usize = 64 * 1024; // 64 KB
 pub const default_send_buffer_length: usize = 1024 * 1024; // 1 MB
 pub const default_messages_buffer_length: usize = 1024 * 1024; // 1 MB
-pub const default_recv_log_buffer_length: usize = 4 * 1024 * 1024; // 4 MB
 
 /// Broker is always service ID 0.
 pub const broker_service_id: i32 = 0;
@@ -871,11 +869,18 @@ does not require filesystem access.
 
 ## 5. Receive Log Buffer Layout
 
+> **Note:** The receive log buffer was used with the previous UDP transport for
+> assembling inbound packets and detecting gaps. With the TCP transport, TCP handles
+> reliability and ordering natively. The receive log buffer is **no longer part of the
+> active architecture**. This section is retained for historical reference only. Inbound
+> TCP data is now read through `brz_tcp`'s framing layer (doc 04) and routed directly
+> to service ring buffers by the receiver event loop (doc 06).
+
 ### 5.1 Binary Layout
 
-One receive log buffer exists per connected peer broker. Unlike the metadata files,
-these are typically allocated as anonymous memory (not file-backed) since they are
-only accessed by the local broker process. File-backing can be enabled for debugging.
+One receive log buffer existed per connected peer broker. Unlike the metadata files,
+these were typically allocated as anonymous memory (not file-backed) since they were
+only accessed by the local broker process.
 
 ```
 Offset 0                                         log_buffer_length bytes

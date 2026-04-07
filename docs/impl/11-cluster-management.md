@@ -1,8 +1,8 @@
 # 11 — Cluster Management
 
 > **Prerequisites:** [09 — Control Plane](09-control-plane.md) (service registration,
-> heartbeats, control ring buffer protocol), [04 — UDP Transport & io_uring](04-udp-transport-and-io-uring.md)
-> (DATA/SM/SETUP frames, `io_uring` send/recv, wire protocol), [10 — Threading Model](10-threading-model.md)
+> heartbeats, control ring buffer protocol), [04 — TCP Transport Library](04-tcp-transport-library.md)
+> (`brz_tcp` I/O engine, connection management, message framing), [10 — Threading Model](10-threading-model.md)
 > (event loops, duty cycles, inter-loop command queues).
 >
 > **Depended on by:** [12 — Configuration & Monitoring](12-configuration-and-monitoring.md)
@@ -29,7 +29,7 @@ packages (`ClusterManager`, `LeaderElection`, `NodeMembership`, `ClusterEventHan
 4. **Snapshot on peer join only** — `ClusterStateSnapshot` is sent when a new peer
    connects, not on every leader change. Incremental updates handle the steady state.
 
-As with the rest of the Zig rewrite, Aeron is replaced with the custom UDP transport
+As with the rest of the Zig rewrite, Aeron is replaced with the custom TCP transport
 from doc 04 and SBE flyweights with `packed struct` overlays.
 
 ---
@@ -74,7 +74,7 @@ from doc 04 and SBE flyweights with `packed struct` overlays.
 
 A BRZ cluster consists of N broker processes, each running on a separate host, each
 identified by a unique `nodeId` (a `u8`, range 0–255). Brokers communicate over
-UDP using the wire protocol from doc 04. Every broker maintains a full replica of the
+TCP using the wire protocol from doc 04. Every broker maintains a full replica of the
 cluster's service registry — which services are running on which nodes — and converges
 to a consistent view through an eventually-consistent state synchronization protocol.
 
@@ -94,7 +94,7 @@ broker-agent via the inter-loop command queue (see doc 10). This eliminates the 
 for any synchronization on cluster data structures.
 
 **Single-node cluster shortcut:** If `broker.member.host.ports` is empty (no peers
-configured), the broker auto-elects itself as leader on startup. No SETUP frames,
+configured), the broker auto-elects itself as leader on startup. No TCP handshakes,
 no election messages, no admin heartbeats. All code paths in this document are
 effectively no-ops in the single-node case.
 
@@ -110,19 +110,19 @@ using the SETUP → SM handshake from doc 04:
 ```
 Broker A (nodeId=1)                        Broker B (nodeId=2)
      │                                          │
-     │  SETUP {nodeId=1, logBufLen=2MB,          │
-     │         mtu=1408, initialSeq=0}           │
+     │  TCP connect + Handshake {                │
+     │    magic=0x42525A00, version=1,           │
+     │    source=1, target=2, dir=SEND,          │
+     │    epoch=1, group_hash=0xABCD}            │
      ├──────────────────────────────────────────►│
-     │                                           │  Allocate receive log buffer
-     │                                           │  for nodeId=1
+     │                                           │  Validate handshake
+     │                                           │  Register incoming connection
      │                                           │
-     │         SM {nodeId=2,                      │
-     │             consumption_pos=0,             │
-     │             window=recv_log_len/2}         │
+     │  TCP accept + Handshake {                 │
+     │    source=2, target=1, dir=SEND, ...}     │
      │◄──────────────────────────────────────────┤
      │                                           │
-     │  Connection established                    │
-     │  send_limit = 0 + window                   │
+     │  Both directions established               │
      │                                           │
      │  ─── admin + message traffic flows ───     │
 ```
@@ -130,18 +130,16 @@ Broker A (nodeId=1)                        Broker B (nodeId=2)
 **Steps (executed on the broker-agent thread at startup):**
 
 1. Read peer endpoints from config (`broker.member.host.ports`), which contains a
-   comma-separated list of `host:port` pairs.
+   comma-separated list of `id@host:port` pairs.
 2. For each peer, resolve the `std.net.Address` and register the node in
    `NodeMembership` with `connection_state = .disconnected`.
-3. Enqueue a `send_setup` command to the sender event loop (via the sender command
+3. Enqueue a `connect_peer` command to the sender event loop (via the sender command
    queue from doc 10).
-4. The sender event loop encodes a SETUP frame (see doc 04 §2.3) and submits it as an
-   `io_uring` `sendmsg` SQE.
-5. When the receiver event loop gets a SETUP from a peer, it allocates a receive log
-   buffer, records the peer's `nodeId`, and sends an initial SM back.
-6. When the sender event loop gets the SM completion, it sets `send_limit = window`,
-   marking the connection as established.
-7. The receiver event loop posts a `peer_connected` command to the broker-agent, which
+4. The sender event loop initiates a TCP connection via `brz_tcp` and sends the
+   24-byte handshake frame upon connection.
+5. When the receiver event loop accepts a TCP connection from a peer, it validates the
+   handshake (magic, protocol version, group hash, target node ID, session epoch).
+6. The receiver event loop posts a `peer_connected` command to the broker-agent, which
    updates `Node.connection_state = .connected` and triggers `ClusterStateSnapshot`
    exchange (§5.2).
 
@@ -512,7 +510,7 @@ t=5.5s   Leader preempted: A (nodeId=1). No election round needed.
 
 Admin messages use a distinct **admin channel** — a separate logical stream from the
 service message channel. In the Java reference, this is an Aeron stream with a
-different `streamId` (`broker.admin.stream.id = 100`). In our UDP transport, admin
+different `streamId` (`broker.admin.stream.id = 100`). In our TCP transport, admin
 messages are DATA frames with the `ADMIN` flag (`0x20`) set in the frame header's
 flags byte. The receiver event loop checks this flag and dispatches to the admin
 handler instead of the message router.
@@ -1388,9 +1386,9 @@ const std = @import("std");
 pub const ConnectionState = enum(u8) {
     /// No connection attempt in progress.
     disconnected,
-    /// SETUP frame sent, waiting for SM.
-    setup_sent,
-    /// SM received, traffic can flow.
+    /// TCP handshake sent, waiting for peer acceptance.
+    handshake_sent,
+    /// Handshake accepted, traffic can flow.
     connected,
 };
 
@@ -1398,7 +1396,7 @@ pub const Node = struct {
     id: u8,
     /// "host:port" string, null-padded to 22 bytes.
     host_and_port: [22]u8,
-    /// Resolved UDP address for this peer. Null for the local node.
+    /// Resolved TCP address for this peer. Null for the local node.
     address: ?std.net.Address = null,
     /// True if this is the local broker.
     is_local: bool,
@@ -2165,9 +2163,9 @@ fn handleDataFrame(self: *ReceiverEventLoop, frame: *const DataFrameHeader, payl
 
 ### 12.3 Sender Event Loop
 
-The sender event loop handles outbound admin messages by encoding them as DATA frames
-with the `ADMIN` flag set. Admin messages share the same UDP socket as application
-messages — no separate socket is needed (unlike the Java reference which uses a
+The sender event loop handles outbound admin messages by encoding them as frames
+with the `ADMIN` flag set. Admin messages share the same TCP connections as application
+messages — no separate connection is needed (unlike the Java reference which uses a
 separate Aeron stream ID). The `ADMIN` flag in the frame header is sufficient to
 distinguish the two types at the receiver.
 
@@ -2179,7 +2177,7 @@ distinguish the two types at the receiver.
                        │  (routing-agent thread)   │
                        ├───────────────────────────┤
                        │                           │
-                       │  UDP recv → DATA frame    │
+                       │  TCP read → frame         │
                        │     │                     │
                        │     ├─ ADMIN flag?        │
                        │     │   YES → decode hdr  │
@@ -2194,8 +2192,8 @@ distinguish the two types at the receiver.
                        ├───────────────────────────┤  sender_cmd   │ drain admin cmds │
                        │                           │◄──── queue ──┤ check master-down│
                        │  dequeue send commands    │               │ check liveness   │
-                       │  encode DATA+ADMIN flag   │               │ send heartbeats  │
-                       │  submit io_uring sendmsg  │               │ retry SETUPs     │
+                       │  encode + frame messages  │               │ send heartbeats  │
+                       │  submit TCP writes        │               │ reconnect peers  │
                        │                           │               │                  │
                        └───────────────────────────┘               └──────────────────┘
 ```
@@ -2475,7 +2473,7 @@ test "merged connection state on Node" {
 ### 13.2 Integration Tests
 
 Integration tests run two broker processes (or two broker instances in separate
-threads with real UDP sockets on `127.0.0.1`):
+threads with real TCP connections on `127.0.0.1`):
 
 | Test | Scenario | Assertion |
 |---|---|---|

@@ -14,56 +14,62 @@ communication between services on the same host and across hosts.
 - **Same-host communication** uses shared-memory ring buffers. Services write messages
   directly into memory-mapped regions; the broker (or peer service) reads them with no
   kernel involvement on the hot path.
-- **Cross-host communication** uses a custom UDP wire protocol. Each broker maintains
-  UDP sockets to its peers and handles fragmentation, retransmission, and flow control
-  in userspace.
+- **Cross-host communication** uses TCP connections between brokers. Each broker pair
+  communicates over a pair of unidirectional TCP connections (one for sending, one for
+  receiving). The TCP transport lives in a separate library (`brz_tcp`) with pluggable
+  I/O backends: `io_uring` on Linux, `kqueue` on macOS, and future optional kernel-bypass
+  backends (TCPDirect, F-Stack).
 - **A broker process runs on every host.** It coordinates message routing between local
   services, manages service discovery and registration, and participates in cluster-wide
   leader election and state synchronization.
 
 The architecture is inspired by [Aeron](https://github.com/real-logic/aeron) but is
-**significantly simplified**: one stream per peer (no multiplexed stream IDs), no
-command-and-control (CnC) file, no log rotation, and no pub/sub abstraction. Services
-talk to the broker; the broker talks to other brokers. That's it.
+**significantly simplified**: one TCP connection pair per peer (no multiplexed stream IDs),
+no command-and-control (CnC) file, no log rotation, no pub/sub abstraction, and no custom
+reliable transport protocol. TCP provides reliability, ordering, and flow control natively.
+Services talk to the broker; the broker talks to other brokers. That's it.
 
 ---
 
-## Key Architectural Change: io_uring
+## Key Architectural Choices
 
-On Linux, this implementation replaces the traditional `epoll` + `sendmsg`/`recvmmsg`
-approach with **io_uring** for all I/O polling and UDP socket operations.
+### TCP Instead of Custom Reliable UDP
 
-### Why io_uring?
+The previous design used a custom Aeron-like reliable UDP protocol with NAK-based
+retransmission, Status Message flow control, receive log buffers, and message fragmentation.
+This has been replaced with **plain TCP**:
 
-| Traditional (`epoll` + syscalls)            | io_uring                                        |
-|---------------------------------------------|-------------------------------------------------|
-| One syscall per `sendmsg`/`recvmsg` call    | Batch N submissions in a single `io_uring_enter` |
-| Context switch on every I/O operation       | Kernel processes submissions without context switches (shared ring) |
-| Separate readiness notification (`epoll`) and I/O (`sendmsg`) | Unified: submit I/O, get completions — one mechanism |
-| No kernel-side polling                      | `SQPOLL` mode: kernel thread polls the submission queue, zero syscalls in steady state |
+- TCP handles reliability, ordering, segmentation, and flow control in the kernel.
+- The wire protocol is reduced to **length-prefixed message framing** with a 24-byte header.
+- Removed: NAK frames, retransmit buffers, loss detection, Status Messages, receive log
+  buffers, fragment reassembly, and setup/teardown frame types.
 
-The key benefits for a broker workload:
+### Completion-Based I/O via `brz_tcp` Library
 
-1. **Fewer syscalls.** A broker sending 10 packets to different peers can submit all 10
-   as SQEs and call `io_uring_enter` once (or zero times with SQPOLL). With `sendmsg`,
-   that's 10 syscalls.
-2. **No context switch per I/O.** The kernel drains the submission queue in batch,
-   avoiding per-operation user↔kernel transitions.
-3. **Kernel-side polling (SQPOLL).** In high-throughput scenarios, a kernel thread polls
-   the SQ continuously — the broker never calls `io_uring_enter` at all.
-4. **Natural batching.** The SQ/CQ ring structure aligns perfectly with the broker's
-   duty-cycle event loop: submit everything accumulated this cycle, then drain
-   completions.
+All TCP I/O goes through the `brz_tcp` library, which provides a platform-abstracted,
+completion-based I/O engine:
 
-### Other Platforms
+| Platform | Backend | API |
+|----------|---------|-----|
+| **Linux** | `io_uring` | `IORING_OP_SEND`, `IORING_OP_RECV`, `IORING_OP_ACCEPT`, batched completions |
+| **macOS** | `kqueue` | `EVFILT_READ`/`EVFILT_WRITE`, edge-triggered, non-blocking sockets |
+| **Future** | TCPDirect | User-space TCP over Onload-capable NICs (compile-time flag) |
+| **Future** | F-Stack | FreeBSD TCP stack on DPDK (compile-time flag) |
 
-- **macOS** — `kqueue` with `EVFILT_READ`/`EVFILT_WRITE` kevent filters and standard
-  `sendmsg`/`recvmsg` calls.
-- **Windows** — IOCP (`CreateIoCompletionPort`, `WSASendTo`, `WSARecvFrom` with
-  overlapped I/O).
+The key benefits:
+1. **Fewer syscalls.** io_uring batches multiple submissions per `io_uring_enter` call.
+2. **No context switch per I/O.** Kernel drains submission queue in batch.
+3. **Unified I/O model.** TCP reads, writes, accepts, and connects all flow through the
+   same completion ring.
+4. **Pluggable backends.** The common `IoEngine` interface allows kernel-bypass backends
+   to be added without changing broker code.
 
-The io_uring integration is detailed in
-[`04-udp-transport-and-io-uring.md`](04-udp-transport-and-io-uring.md).
+### Always-Read Back-Pressure Model
+
+The receiver event loop **always reads** from all peer TCP connections. It never pauses
+socket reads. If a target service's ring buffer is full, the message is dropped and a
+counter is incremented. This prevents head-of-line blocking where one slow service blocks
+admin, heartbeat, and other service traffic from the same peer.
 
 ---
 
@@ -76,15 +82,21 @@ The documents are ordered so that each phase depends only on previous phases.
 | 1 | [`01-platform-abstraction.md`](01-platform-abstraction.md) | OS abstractions: `mmap`, clocks, threads, atomics, process synchronization (`futex`, `ulock`, `WaitOnAddress`) |
 | 2 | [`02-memory-layout-and-shared-memory.md`](02-memory-layout-and-shared-memory.md) | Metadata files, shared memory regions, memory-mapped I/O, file layout constants |
 | 3 | [`03-concurrent-data-structures.md`](03-concurrent-data-structures.md) | MPSC ring buffer, atomic counters, error log, trailer layout |
-| 4 | [`04-udp-transport-and-io-uring.md`](04-udp-transport-and-io-uring.md) | UDP wire protocol, `io_uring` integration, socket management, platform I/O backends |
-| 5 | [`05-send-path.md`](05-send-path.md) | Send ring buffer, sender event loop, message fragmentation, retransmit buffer |
-| 6 | [`06-receive-path.md`](06-receive-path.md) | Receive log buffer, packet insertion, loss detection, fragment reassembly |
-| 7 | [`07-flow-control.md`](07-flow-control.md) | Window-based flow control, status messages, back-pressure signaling |
-| 8 | [`08-service-ipc.md`](08-service-ipc.md) | Service ↔ broker IPC, same-host direct path, cross-host routed path |
-| 9 | [`09-control-plane.md`](09-control-plane.md) | Control messages, service registration, discovery, heartbeats |
-| 10 | [`10-threading-model.md`](10-threading-model.md) | Event loop architecture, idle strategies, inter-loop command passing |
-| 11 | [`11-cluster-management.md`](11-cluster-management.md) | Leader election, state synchronization, admin messages between brokers |
-| 12 | [`12-configuration-and-monitoring.md`](12-configuration-and-monitoring.md) | Configuration loading, monitoring counters, error handling patterns |
+| 4 | [`04-tcp-transport-library.md`](04-tcp-transport-library.md) | `brz_tcp` library: I/O engine interface, io_uring/kqueue backends, connection management, message framing |
+| 5 | [`05-send-path.md`](05-send-path.md) | Send ring buffer, sender event loop, per-peer write queues, TCP write mechanics |
+| 6 | [`06-receive-path.md`](06-receive-path.md) | TCP framing, receiver event loop, message routing, connection acceptance |
+| 7 | [`08-service-ipc.md`](08-service-ipc.md) | Service ↔ broker IPC, same-host direct path, cross-host routed path |
+| 8 | [`09-control-plane.md`](09-control-plane.md) | Control messages, service registration, discovery, heartbeats |
+| 9 | [`10-threading-model.md`](10-threading-model.md) | Event loop architecture, idle strategies, inter-loop command passing |
+| 10 | [`11-cluster-management.md`](11-cluster-management.md) | Leader election, state synchronization, admin messages between brokers |
+| 11 | [`12-configuration-and-monitoring.md`](12-configuration-and-monitoring.md) | Configuration loading, monitoring counters, error handling patterns |
+| 12 | [`13-library-split-and-packaging.md`](13-library-split-and-packaging.md) | Library boundaries: `brz_common`, `brz_tcp`, `brz_broker`, `brz_service` |
+| 13 | [`14-broker-executable.md`](14-broker-executable.md) | Broker main, startup sequence, signal handling |
+| 14 | [`15-e2e-testing.md`](15-e2e-testing.md) | End-to-end test framework, multi-broker test scenarios |
+
+**Note:** The previous `07-flow-control.md` has been removed. Back-pressure is now covered
+in the send path (05) and receive path (06) documents, since TCP delegates flow control to
+the kernel and the broker handles application-level back-pressure through message dropping.
 
 ---
 
@@ -123,11 +135,10 @@ path is a bug.
    strategy engages (spin → yield → park). If work was done, the loop runs again
    immediately.
 
-7. **io_uring for all network I/O on Linux (batched submissions, zero-copy where
-   possible).**
-   UDP sends, receives, and timeout management all flow through the `io_uring`
-   submission/completion rings. On other platforms, equivalent batching strategies are
-   used where the OS supports them.
+7. **Completion-based I/O via `brz_tcp` (io_uring on Linux, kqueue on macOS).**
+   TCP reads, writes, accepts, and connects all flow through the platform's async I/O
+   engine. On Linux, `io_uring` batches submissions and completions for maximum
+   throughput. On macOS, `kqueue` provides edge-triggered event notification.
 
 ---
 
@@ -173,25 +184,20 @@ first-class support for the low-level patterns this project requires.
 | Term | Definition |
 |------|------------|
 | **MPSC** | Multi-Producer, Single-Consumer. A ring buffer that supports multiple concurrent writers but exactly one reader. Producers coordinate via CAS on the tail position. |
-| **IPC** | Inter-Process Communication. Data exchange between OS processes, here via shared memory (same host) or UDP (cross host). |
+| **IPC** | Inter-Process Communication. Data exchange between OS processes, here via shared memory (same host) or TCP (cross host). |
 | **CAS** | Compare-And-Swap. An atomic CPU instruction that writes a new value only if the current value matches an expected value. The foundation of lock-free algorithms. |
 | **SHM** | Shared Memory. Memory-mapped regions (typically on `tmpfs` / `/dev/shm`) accessible by multiple processes. |
-| **MTU** | Maximum Transmission Unit. The largest packet size a network link can carry without fragmentation. Typically 1500 bytes for Ethernet; the broker fragments messages larger than one MTU. |
-| **NAK** | Negative Acknowledgement. A signal from a receiver to a sender indicating that a specific packet (or range) was not received and should be retransmitted. |
-| **SM (Status Message)** | A control message sent from receiver to sender carrying the receiver's current window position, consumption position, and receiver window length. Used for flow control. |
 | **SQE** | Submission Queue Entry. An `io_uring` structure describing an I/O operation to submit to the kernel. |
 | **CQE** | Completion Queue Entry. An `io_uring` structure describing the result of a completed I/O operation. |
 | **Flyweight** | A zero-copy accessor pattern. Instead of deserializing data into a struct, a flyweight overlays a typed view directly on the underlying buffer. Reads and writes go straight to the buffer bytes. |
 | **Duty Cycle** | One iteration of an event loop that polls all registered work sources and returns a total work count. If no work was done, the idle strategy decides whether to spin, yield, or park. |
 | **Idle Strategy** | A pluggable policy that decides what to do when an event loop iteration finds no work. Common strategies: busy-spin, yield, sleep, or kernel-level blocking (futex/ulock). |
 | **Position** | A monotonically increasing `i64` byte offset representing progress through a ring buffer or log. The actual index is `position & (capacity - 1)`. Positions never wrap or decrease. |
-| **Term** | A logical generation counter for a connection or stream. Incremented on reconnection. Used to distinguish stale packets from a previous session. |
 | **Ring Buffer Trailer** | A fixed-size region at the end of a ring buffer's backing memory containing atomic counters (head position, tail position, correlation IDs) and cache-line padding. |
 | **Blocking Mode** | A ring buffer operating mode where the producer parks (via `futex`/`ulock`/`WaitOnAddress`) when the buffer is full, and the consumer wakes it after advancing the head. Adds extra cache lines to the trailer for wait state. |
 | **nodeId** | A unique integer identifier for a broker (host) within the cluster. Assigned in configuration. Used for message routing (`targetNodeId`, `sourceNodeId`). |
 | **serviceId** | A unique integer identifier for a service instance on a given host. Assigned by the broker at registration time. Combined with `nodeId` to form a globally unique address. |
 | **templateId** | An integer identifying the type of a message (analogous to an SBE template ID). Used by message handlers to dispatch incoming messages to the correct decoder and handler function. |
+| **session_epoch** | A monotonically increasing counter included in the TCP connection handshake. Incremented on each broker restart. Used to distinguish stale connections from current ones. |
 
 ---
-
-*Next: [01 — Platform Abstraction](01-platform-abstraction.md)*

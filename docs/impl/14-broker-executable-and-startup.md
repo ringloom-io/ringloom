@@ -89,7 +89,7 @@ This document introduces a proper executable architecture with three layers:
 
 This mirrors the architecture described in `architecture.md`: the broker is a standalone
 process, while services are separate processes that communicate with it through shared
-memory and UDP.
+memory and TCP.
 
 ---
 

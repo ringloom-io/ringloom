@@ -49,13 +49,6 @@ pub const ring_buffer_record_header_length: usize = 8;
 /// Records in the ring buffer are aligned to 8 bytes.
 pub const ring_buffer_alignment: usize = 8;
 
-/// Receive log buffer metadata appended after the data region.
-/// Contains tail_position (i64) + pad + rebuild_position (i64) + pad.
-pub const recv_log_metadata_length: usize = 256;
-
-/// On-wire UDP data frame header size.
-pub const data_frame_header_length: usize = 40;
-
 // ── Protocol Constants ────────────────────────────────────────────────
 
 pub const frame_header_version: u8 = 0;
@@ -69,36 +62,41 @@ pub const control_msg_type_id: i32 = 1;
 /// Message type ID for application messages.
 pub const application_msg_type_id: i32 = 2;
 
-pub const frame_type_pad: u8 = 0x00;
-pub const frame_type_data: u8 = 0x01;
-pub const frame_type_nak: u8 = 0x02;
-pub const frame_type_sm: u8 = 0x03;
-pub const frame_type_setup: u8 = 0x04;
+pub const flag_admin: u8 = 0x20;
 
+// IPC message fragmentation flags (used by ring buffer message layer).
 pub const flag_begin: u8 = 0x80;
 pub const flag_end: u8 = 0x40;
 pub const flag_unfragmented: u8 = 0xC0; // begin | end
-pub const flag_admin: u8 = 0x20;
 
 pub const broker_service_id: i32 = 0;
 pub const broker_service_name: []const u8 = "broker";
 
+// ── TCP Protocol Constants ────────────────────────────────────────────
+
+pub const protocol_version: u8 = 1;
+pub const handshake_magic: u32 = 0x42525A00;
+pub const heartbeat_template_id: u16 = 0xFFFF;
+pub const direction_sender: u8 = 0x01;
+pub const direction_receiver: u8 = 0x02;
+pub const tcp_header_length: u32 = 24;
+pub const tcp_handshake_length: u32 = 24;
+pub const tcp_max_frame_length: u32 = 1_048_576; // 1 MB
+pub const tcp_min_frame_length: u32 = 24; // header-only = heartbeat
+
 // ── Timing Constants ──────────────────────────────────────────────────
 
-/// How often the sender emits zero-length DATA frames as heartbeats.
-pub const udp_heartbeat_interval_ns: i64 = 100 * std.time.ns_per_ms;
+/// Default TCP heartbeat interval.
+pub const default_heartbeat_interval_ms: u64 = 500;
 
-/// Status Message timeout — receiver sends SM at least this often.
-pub const sm_timeout_ns: i64 = 200 * std.time.ns_per_ms;
+/// Default TCP heartbeat timeout.
+pub const default_heartbeat_timeout_ms_tcp: u64 = 2000;
 
-/// Initial delay before sending a NAK for a gap.
-pub const nak_initial_delay_ns: i64 = 60 * std.time.ns_per_ms;
+/// Default initial reconnect delay.
+pub const default_reconnect_initial_delay_ms: u64 = 100;
 
-/// Retry delay between NAKs for the same gap.
-pub const nak_retry_delay_ns: i64 = 60 * std.time.ns_per_ms;
-
-/// How long the sender keeps a retransmitted frame alive.
-pub const retransmit_linger_ns: i64 = 10 * std.time.ns_per_us;
+/// Default maximum reconnect delay.
+pub const default_reconnect_max_delay_ms: u64 = 1000;
 
 /// Services write heartbeat timestamps at this interval.
 pub const service_heartbeat_write_interval_ms: i64 = 1000;
@@ -111,7 +109,7 @@ pub const service_heartbeat_timeout_ms: i64 = 10000;
 
 /// Default heartbeat timeout (ms) — if a service hasn't written a heartbeat
 /// within this window, it is considered dead.
-pub const default_heartbeat_timeout_ms: i64 = 10_000;
+pub const default_svc_heartbeat_timeout_ms: i64 = 10_000;
 
 /// How often the control loop checks for timed-out services.
 pub const control_loop_timeout_check_interval_ns: i64 = 1 * std.time.ns_per_s;
@@ -122,20 +120,27 @@ pub const command_drain_limit: u32 = 1;
 /// Max control messages read per duty cycle.
 pub const control_read_limit: u32 = 10;
 
-/// Max outbound UDP frames sent per duty cycle.
-pub const send_batch_limit: u32 = 10;
+/// Max messages read from the send ring buffer per duty cycle.
+pub const send_batch_limit: u32 = 64;
 
-/// Max inbound UDP frames received per duty cycle.
-pub const recv_batch_limit: u32 = 4;
+/// Heartbeat interval in nanoseconds (derived from ms).
+pub const default_heartbeat_interval_ns: i64 = @as(i64, @intCast(default_heartbeat_interval_ms)) * std.time.ns_per_ms;
+
+/// Per-peer TCP write budget per duty cycle (round-robin fairness).
+pub const write_budget_per_peer: u32 = 16;
+
+/// Per-peer TCP read budget per duty cycle (round-robin fairness).
+pub const read_budget_per_peer: u32 = 16;
 
 // ── Default Configuration Values ──────────────────────────────────────
 
-pub const default_mtu_length: usize = 1408;
 pub const default_control_buffer_length: usize = 64 * 1024; // 64 KB
 pub const default_send_buffer_length: usize = 1024 * 1024; // 1 MB
 pub const default_messages_buffer_length: usize = 1024 * 1024; // 1 MB
-pub const default_recv_log_buffer_length: usize = 4 * 1024 * 1024; // 4 MB
-pub const default_retransmit_buffer_length: usize = 4 * 1024 * 1024; // 4 MB
+pub const default_tcp_send_buffer_size: u32 = 262_144; // 256 KB
+pub const default_tcp_recv_buffer_size: u32 = 262_144; // 256 KB
+pub const default_max_frame_length: u32 = 65_536; // 64 KB
+pub const default_peer_write_queue_capacity: u32 = 4_096;
 pub const default_counter_values_buffer_length: usize = 64 * 1024; // 64 KB
 pub const default_error_log_buffer_length: usize = 256 * 1024; // 256 KB
 pub const default_max_services: u32 = 256;

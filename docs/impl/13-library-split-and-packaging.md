@@ -48,7 +48,7 @@ This document is intentionally packaging-focused. It does **not** redefine the r
 The packaging split must satisfy these goals:
 
 - **Separate broker runtime from service runtime.**
-  The broker is a standalone process. Services are separate processes that communicate with the broker through shared memory and, for cross-host traffic, through broker-to-broker UDP transport.
+  The broker is a standalone process. Services are separate processes that communicate with the broker through shared memory and, for cross-host traffic, through broker-to-broker TCP transport.
 
 - **Keep shared code reusable.**
   Ring buffers, metadata files, message headers, control message codecs, platform abstractions, and common configuration helpers should live in a shared library that both broker and services can import.
@@ -117,6 +117,7 @@ The project must be split into **three Zig libraries/modules** and **multiple ex
 | Package | Type | Purpose |
 |---|---|---|
 | `brz-common` | library/module | Shared low-level runtime used by both broker and services |
+| `brz-tcp` | library/module | TCP transport library: io_uring/kqueue I/O engine, connection management, message framing |
 | `brz-service` | library/module | Service-side engine, clients, control agent, IPC helpers |
 | `brz-broker` | library/module | Broker-side runtime, routing, transport, cluster, control loop |
 | `brz-broker` | executable | Standalone broker process launcher |
@@ -143,8 +144,9 @@ The dependency graph must be strictly acyclic:
 | Package | May depend on |
 |---|---|
 | `brz-common` | nothing internal |
+| `brz-tcp` | `brz-common` (for constants, platform abstractions) |
 | `brz-service` | `brz-common` |
-| `brz-broker` | `brz-common` |
+| `brz-broker` | `brz-common`, `brz-tcp` |
 | broker executable | `brz-broker` |
 | service executable | `brz-service`, optionally app code |
 | e2e harnesses | `brz-broker`, `brz-service`, `brz-common` |
@@ -154,9 +156,13 @@ The dependency graph must be strictly acyclic:
 
 These imports must be forbidden by convention and code review:
 
+- `brz-common` importing `brz-tcp`
 - `brz-common` importing `brz-service`
 - `brz-common` importing `brz-broker`
+- `brz-tcp` importing `brz-service`
+- `brz-tcp` importing `brz-broker`
 - `brz-service` importing `brz-broker`
+- `brz-service` importing `brz-tcp`
 - broker runtime importing service application helpers
 
 ### 3.2.2 Allowed duplication
@@ -174,7 +180,7 @@ A broker process owns:
 - broker metadata file,
 - broker control ring buffer,
 - broker send/messages ring buffer,
-- UDP transport sockets,
+- TCP transport connections (via `brz_tcp` library),
 - sender/receiver/control event loops,
 - cluster state,
 - service registry,
@@ -220,6 +226,16 @@ brz-broker/
 │   │   ├── protocol/
 │   │   ├── config/
 │   │   └── monitoring/
+│   ├── tcp/
+│   │   ├── root.zig
+│   │   ├── io_engine.zig          # Common IoEngine interface
+│   │   ├── io_uring_engine.zig    # Linux io_uring backend
+│   │   ├── kqueue_engine.zig      # macOS kqueue backend
+│   │   ├── connection.zig         # Connection state machine
+│   │   ├── handshake.zig          # Handshake protocol
+│   │   ├── framing.zig            # Length-prefixed message framing
+│   │   ├── listener.zig           # TCP listener/acceptor
+│   │   └── transport.zig          # Top-level TcpTransport API
 │   ├── service/
 │   │   ├── root.zig
 │   │   ├── engine/
@@ -234,7 +250,6 @@ brz-broker/
 │   │   ├── sender/
 │   │   ├── receiver/
 │   │   ├── cluster/
-│   │   ├── transport/
 │   │   └── config/
 │   ├── bin/
 │   │   ├── brz_broker_main.zig
@@ -315,7 +330,7 @@ These shims must be removed once all imports are updated.
 - buffers provider abstractions that are shared
 - common message header definitions
 - control message wire structs and codecs shared by both sides
-- UDP protocol frame definitions
+- TCP wire protocol frame header definitions (shared by `brz-tcp` and `brz-broker`)
 - shared config parsing utilities
 - common constants
 
@@ -435,7 +450,6 @@ The broker library should expose:
 These should remain internal to `brz-broker`:
 
 - low-level routing tables
-- retransmit internals
 - peer connection state machines
 - cluster admin dispatch internals
 - transport completion plumbing

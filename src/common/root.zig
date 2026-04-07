@@ -69,7 +69,6 @@ comptime {
     _ = @import("memory/constants.zig");
     _ = @import("memory/broker_metadata.zig");
     _ = @import("memory/service_metadata.zig");
-    _ = @import("memory/receive_log.zig");
     _ = @import("memory/service_scanner.zig");
     _ = @import("memory/metadata_descriptor_provider.zig");
     _ = @import("memory/buffers_provider.zig");
@@ -82,7 +81,6 @@ comptime {
     _ = @import("concurrent/command_queue.zig");
 
     // Protocol layer
-    _ = @import("protocol/frames.zig");
     _ = @import("protocol/frame_parser.zig");
 
     // Message layer

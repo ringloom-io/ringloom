@@ -61,9 +61,16 @@ pub const BrokerConfig = struct {
     // ── Buffer sizes (bytes — all must be power of 2 unless noted) ──
     control_buffer_size: u32 = 65_536,
     messages_buffer_size: u32 = 1_048_576,
-    recv_log_buffer_size: u32 = 4_194_304,
-    retransmit_buffer_size: u32 = 4_194_304,
-    mtu_length: u32 = 1_408,
+
+    // ── TCP transport ───────────────────────────────────────────
+    tcp_send_buffer_size: u32 = 262_144,
+    tcp_recv_buffer_size: u32 = 262_144,
+    max_frame_length: u32 = 65_536,
+    peer_write_queue_capacity: u32 = 4_096,
+    heartbeat_interval_ms: u64 = 500,
+    heartbeat_timeout_ms: u64 = 2_000,
+    reconnect_initial_delay_ms: u64 = 100,
+    reconnect_max_delay_ms: u64 = 1_000,
 
     // ── Threading ───────────────────────────────────────────────
     threading_mode: ThreadingMode = .dedicated,

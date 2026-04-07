@@ -103,14 +103,29 @@ pub const ConfigLoader = struct {
         if (props.get("broker.messages.buffer.size")) |v|
             config.messages_buffer_size = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
-        if (props.get("broker.recv.log.buffer.size")) |v|
-            config.recv_log_buffer_size = std.fmt.parseInt(u32, v, 10) catch
+        if (props.get("broker.tcp.send.buffer.size")) |v|
+            config.tcp_send_buffer_size = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
-        if (props.get("broker.retransmit.buffer.size")) |v|
-            config.retransmit_buffer_size = std.fmt.parseInt(u32, v, 10) catch
+        if (props.get("broker.tcp.recv.buffer.size")) |v|
+            config.tcp_recv_buffer_size = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
-        if (props.get("broker.mtu.length")) |v|
-            config.mtu_length = std.fmt.parseInt(u32, v, 10) catch
+        if (props.get("broker.max.frame.length")) |v|
+            config.max_frame_length = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.peer.write.queue.capacity")) |v|
+            config.peer_write_queue_capacity = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.heartbeat.interval.ms")) |v|
+            config.heartbeat_interval_ms = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.heartbeat.timeout.ms")) |v|
+            config.heartbeat_timeout_ms = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.reconnect.initial.delay.ms")) |v|
+            config.reconnect_initial_delay_ms = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.reconnect.max.delay.ms")) |v|
+            config.reconnect_max_delay_ms = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
 
         if (props.get("broker.threading.mode")) |v|
@@ -256,9 +271,14 @@ fn applyEnvOverrides(
         "broker.storage.path",
         "broker.control.buffer.size",
         "broker.messages.buffer.size",
-        "broker.recv.log.buffer.size",
-        "broker.retransmit.buffer.size",
-        "broker.mtu.length",
+        "broker.tcp.send.buffer.size",
+        "broker.tcp.recv.buffer.size",
+        "broker.max.frame.length",
+        "broker.peer.write.queue.capacity",
+        "broker.heartbeat.interval.ms",
+        "broker.heartbeat.timeout.ms",
+        "broker.reconnect.initial.delay.ms",
+        "broker.reconnect.max.delay.ms",
         "broker.threading.mode",
         "broker.idle.strategy",
         "broker.counter.values.buffer.size",
@@ -304,8 +324,6 @@ fn validate(config: *BrokerConfig) ConfigError!void {
     // ── Buffer sizes must be power of 2 (auto-align) ────────────
     config.control_buffer_size = alignToPowerOfTwo(config.control_buffer_size);
     config.messages_buffer_size = alignToPowerOfTwo(config.messages_buffer_size);
-    config.recv_log_buffer_size = alignToPowerOfTwo(config.recv_log_buffer_size);
-    config.retransmit_buffer_size = alignToPowerOfTwo(config.retransmit_buffer_size);
     config.counter_values_buffer_size = alignToPowerOfTwo(config.counter_values_buffer_size);
 
     // ── Minimum buffer sizes ────────────────────────────────────
@@ -314,8 +332,8 @@ fn validate(config: *BrokerConfig) ConfigError!void {
     if (config.messages_buffer_size < 4096)
         return ConfigError.BufferSizeTooSmall;
 
-    // ── MTU range check ─────────────────────────────────────────
-    if (config.mtu_length < 256 or config.mtu_length > 65535)
+    // ── TCP frame size range check ──────────────────────────────
+    if (config.max_frame_length < 256 or config.max_frame_length > 1_048_576)
         return ConfigError.InvalidValue;
 
     // ── Compute derived fields ──────────────────────────────────
@@ -394,7 +412,7 @@ test "default values are applied for omitted properties" {
     try std.testing.expectEqualStrings("/dev/shm", config.storage_path);
     try std.testing.expectEqual(@as(u32, 65_536), config.control_buffer_size);
     try std.testing.expectEqual(@as(u32, 1_048_576), config.messages_buffer_size);
-    try std.testing.expectEqual(@as(u32, 1_408), config.mtu_length);
+    try std.testing.expectEqual(@as(u32, 65_536), config.max_frame_length);
     try std.testing.expect(config.single_node_cluster);
 }
 
@@ -566,12 +584,12 @@ test "invalid peer format returns InvalidPeerFormat" {
     try std.testing.expectError(ConfigError.InvalidPeerFormat, result);
 }
 
-test "MTU out of range returns InvalidValue" {
+test "max_frame_length out of range returns InvalidValue" {
     // Given
     const content =
         \\broker.node.id=1
         \\broker.local.host.port=10.0.0.1:9000
-        \\broker.mtu.length=100
+        \\broker.max.frame.length=100
     ;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);

@@ -1,168 +1,182 @@
-const std = @import("std");
-const RetransmitBuffer = @import("retransmit_buffer.zig").RetransmitBuffer;
-const RetransmitHandler = @import("retransmit_handler.zig").RetransmitHandler;
+//! Per-peer sender connection state for the BRZ broker TCP send path.
+//!
+//! Each connected peer broker is represented by a PeerSender. This struct
+//! holds the TCP connection state, bounded write queue, heartbeat timing,
+//! and reconnection backoff state.
 
-/// Per-peer sender state: network address, flow-control state, per-peer
-/// sequence numbering, and retransmit buffer.
+const std = @import("std");
+const WriteQueue = @import("write_queue.zig").WriteQueue;
+const constants = @import("brz_common").platform.constants;
+
+pub const ConnectionState = enum {
+    /// Not yet connected. Waiting for reconnect timer.
+    disconnected,
+    /// TCP connect in progress (non-blocking).
+    connecting,
+    /// Connected. Handshake sent, ready to send data.
+    connected,
+};
+
+/// Per-peer sender state for TCP connections.
 pub const PeerSender = struct {
     /// The peer broker's node ID.
     node_id: u8,
 
-    /// UDP address of the peer broker.
+    /// TCP socket file descriptor for the outgoing connection.
+    socket_fd: std.posix.fd_t,
+
+    /// IP address and port of the peer broker.
     address: std.net.Address,
 
-    /// The maximum send position allowed by the receiver's flow control.
-    /// Updated when a Status Message arrives.
-    /// Invariant: sender must not advance send_position beyond send_limit.
-    send_limit: i64,
+    /// Current connection state.
+    state: ConnectionState,
 
-    /// Current send position — monotonically increasing byte offset of data
-    /// sent to this peer. Advances by the aligned frame size after each send.
-    send_position: i64,
+    /// Per-peer outbound write queue.
+    write_queue: WriteQueue,
 
-    /// Monotonic sequence number for frames sent to this peer.
-    /// Incremented once per data frame (not per heartbeat).
-    sequence_number: i64,
+    /// Whether the write path is blocked (partial write pending).
+    write_blocked: bool,
 
-    /// Circular buffer of recently sent frames, for retransmission on NAK.
-    retransmit_buffer: *RetransmitBuffer,
+    /// Byte offset into the current frame for a partial write.
+    partial_write_offset: usize,
 
-    /// Per-peer retransmit state machine (linger suppression).
-    retransmit_handler: RetransmitHandler,
+    /// Monotonic timestamp (ns) of the last data or heartbeat sent.
+    last_send_ns: i64,
 
-    /// Whether the peer has completed the SETUP / initial-SM handshake.
-    connected: bool,
+    /// Reconnection backoff state (ms).
+    reconnect_delay_ms: u64,
 
-    /// Monotonic timestamp (ns) of the last Status Message received from this peer.
-    /// Used to detect peer timeout.
-    last_sm_received_ns: i64,
-
-    /// The UDP socket file descriptor used to communicate with this peer.
-    socket_fd: std.posix.fd_t,
+    /// Monotonic timestamp (ns) of next reconnection attempt.
+    next_reconnect_ns: i64,
 
     const Self = @This();
 
     pub fn init(
         node_id: u8,
         address: std.net.Address,
-        socket_fd: std.posix.fd_t,
-        retransmit_buffer: *RetransmitBuffer,
-    ) Self {
+        allocator: std.mem.Allocator,
+    ) !Self {
         return .{
             .node_id = node_id,
+            .socket_fd = -1,
             .address = address,
-            .send_limit = 0,
-            .send_position = 0,
-            .sequence_number = 0,
-            .retransmit_buffer = retransmit_buffer,
-            .retransmit_handler = RetransmitHandler.init(),
-            .connected = false,
-            .last_sm_received_ns = 0,
-            .socket_fd = socket_fd,
+            .state = .disconnected,
+            .write_queue = try WriteQueue.init(
+                constants.default_peer_write_queue_capacity,
+                constants.default_max_frame_length,
+                allocator,
+            ),
+            .write_blocked = false,
+            .partial_write_offset = 0,
+            .last_send_ns = 0,
+            .reconnect_delay_ms = constants.default_reconnect_initial_delay_ms,
+            .next_reconnect_ns = 0,
         };
     }
 
-    /// Advance the sequence number and return the previous value (post-increment returns old).
-    pub inline fn nextSequence(self: *Self) i64 {
-        const seq = self.sequence_number;
-        self.sequence_number += 1;
-        return seq;
+    /// Reset connection state for a new connection attempt.
+    pub fn resetForReconnect(self: *Self) void {
+        if (self.socket_fd >= 0) {
+            std.posix.close(self.socket_fd);
+            self.socket_fd = -1;
+        }
+        self.state = .disconnected;
+        self.write_blocked = false;
+        self.partial_write_offset = 0;
+        self.write_queue.clear();
     }
 
-    /// Return the current sequence number without advancing.
-    /// Used for heartbeats (which do not consume a sequence number).
-    pub inline fn currentSequence(self: *const Self) i64 {
-        return self.sequence_number;
+    /// Advance the reconnect backoff timer (exponential with cap).
+    pub fn advanceBackoff(self: *Self, now_ns: i64) void {
+        self.next_reconnect_ns = now_ns +
+            @as(i64, @intCast(self.reconnect_delay_ms)) * std.time.ns_per_ms;
+        self.reconnect_delay_ms = @min(
+            self.reconnect_delay_ms * 2,
+            constants.default_reconnect_max_delay_ms,
+        );
     }
 
-    /// Returns true if the sender is flow-controlled (cannot send more data).
-    pub inline fn isFlowControlled(self: *const Self) bool {
-        return self.send_position >= self.send_limit;
+    /// Reset backoff after successful connection.
+    pub fn resetBackoff(self: *Self) void {
+        self.reconnect_delay_ms = constants.default_reconnect_initial_delay_ms;
+    }
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        if (self.socket_fd >= 0) std.posix.close(self.socket_fd);
+        self.write_queue.deinit(allocator);
     }
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-const constants = @import("brz_common").platform.constants;
-
-test "nextSequence advances and returns old value" {
-    // Given
+test "PeerSender init sets correct defaults" {
     const allocator = std.testing.allocator;
-    var rb = try RetransmitBuffer.init(64 * 1024, constants.default_mtu_length, allocator);
-    defer rb.close(allocator);
-
     const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
-    var peer = PeerSender.init(1, address, -1, &rb);
 
-    // When / Then — each call returns the old value and advances
-    try std.testing.expectEqual(@as(i64, 0), peer.nextSequence());
-    try std.testing.expectEqual(@as(i64, 1), peer.nextSequence());
-    try std.testing.expectEqual(@as(i64, 2), peer.nextSequence());
+    var peer = try PeerSender.init(1, address, allocator);
+    defer peer.deinit(allocator);
 
-    // Then — currentSequence reflects the new value
-    try std.testing.expectEqual(@as(i64, 3), peer.currentSequence());
+    try std.testing.expectEqual(@as(u8, 1), peer.node_id);
+    try std.testing.expectEqual(ConnectionState.disconnected, peer.state);
+    try std.testing.expectEqual(@as(std.posix.fd_t, -1), peer.socket_fd);
+    try std.testing.expect(!peer.write_blocked);
+    try std.testing.expectEqual(@as(i64, 0), peer.last_send_ns);
+    try std.testing.expectEqual(constants.default_reconnect_initial_delay_ms, peer.reconnect_delay_ms);
 }
 
-test "currentSequence does not advance" {
-    // Given
+test "PeerSender resetForReconnect clears state" {
     const allocator = std.testing.allocator;
-    var rb = try RetransmitBuffer.init(64 * 1024, constants.default_mtu_length, allocator);
-    defer rb.close(allocator);
-
     const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
-    var peer = PeerSender.init(1, address, -1, &rb);
 
-    // When / Then — calling currentSequence multiple times returns the same value
-    try std.testing.expectEqual(@as(i64, 0), peer.currentSequence());
-    try std.testing.expectEqual(@as(i64, 0), peer.currentSequence());
+    var peer = try PeerSender.init(1, address, allocator);
+    defer peer.deinit(allocator);
+
+    peer.state = .connected;
+    peer.write_blocked = true;
+    peer.partial_write_offset = 100;
+
+    const frame = [_]u8{0} ** 24;
+    try peer.write_queue.enqueue(&frame);
+
+    peer.resetForReconnect();
+
+    try std.testing.expectEqual(ConnectionState.disconnected, peer.state);
+    try std.testing.expect(!peer.write_blocked);
+    try std.testing.expectEqual(@as(usize, 0), peer.partial_write_offset);
+    try std.testing.expect(peer.write_queue.isEmpty());
 }
 
-test "isFlowControlled returns true when position >= limit" {
-    // Given
+test "PeerSender advanceBackoff doubles delay with cap" {
     const allocator = std.testing.allocator;
-    var rb = try RetransmitBuffer.init(64 * 1024, constants.default_mtu_length, allocator);
-    defer rb.close(allocator);
-
     const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
-    var peer = PeerSender.init(1, address, -1, &rb);
 
-    // When — send_position == send_limit
-    peer.send_position = 100;
-    peer.send_limit = 100;
+    var peer = try PeerSender.init(1, address, allocator);
+    defer peer.deinit(allocator);
 
-    // Then — flow controlled
-    try std.testing.expect(peer.isFlowControlled());
+    try std.testing.expectEqual(constants.default_reconnect_initial_delay_ms, peer.reconnect_delay_ms);
 
-    // When — send_position < send_limit
-    peer.send_position = 99;
-    peer.send_limit = 100;
+    peer.advanceBackoff(0);
+    try std.testing.expectEqual(constants.default_reconnect_initial_delay_ms * 2, peer.reconnect_delay_ms);
 
-    // Then — not flow controlled
-    try std.testing.expect(!peer.isFlowControlled());
+    // Advance several times to hit the cap
+    peer.advanceBackoff(0);
+    peer.advanceBackoff(0);
+    peer.advanceBackoff(0);
+    peer.advanceBackoff(0);
 
-    // When — send_position > send_limit
-    peer.send_position = 101;
-    peer.send_limit = 100;
-
-    // Then — flow controlled
-    try std.testing.expect(peer.isFlowControlled());
+    try std.testing.expect(peer.reconnect_delay_ms <= constants.default_reconnect_max_delay_ms);
 }
 
-test "init sets default values correctly" {
-    // Given
+test "PeerSender resetBackoff restores initial delay" {
     const allocator = std.testing.allocator;
-    var rb = try RetransmitBuffer.init(64 * 1024, constants.default_mtu_length, allocator);
-    defer rb.close(allocator);
-
     const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
 
-    // When
-    const peer = PeerSender.init(1, address, -1, &rb);
+    var peer = try PeerSender.init(1, address, allocator);
+    defer peer.deinit(allocator);
 
-    // Then
-    try std.testing.expectEqual(false, peer.connected);
-    try std.testing.expectEqual(@as(i64, 0), peer.send_limit);
-    try std.testing.expectEqual(@as(i64, 0), peer.send_position);
-    try std.testing.expectEqual(@as(i64, 0), peer.sequence_number);
-    try std.testing.expectEqual(@as(i64, 0), peer.last_sm_received_ns);
+    peer.advanceBackoff(0);
+    peer.advanceBackoff(0);
+
+    peer.resetBackoff();
+    try std.testing.expectEqual(constants.default_reconnect_initial_delay_ms, peer.reconnect_delay_ms);
 }

@@ -1,9 +1,9 @@
 const std = @import("std");
 const constants = @import("brz_common").platform.constants;
 
-/// Pre-allocated pool of MTU-sized, 64-byte-aligned buffers for zero-allocation
-/// UDP frame building. Each buffer is acquired before constructing a frame and
-/// released when the corresponding io_uring CQE arrives.
+/// Pre-allocated pool of frame-sized, 64-byte-aligned buffers for zero-allocation
+/// TCP frame building. Each buffer is acquired before constructing a frame and
+/// released after the data has been written to the TCP connection.
 ///
 /// Single-threaded — only accessed by the sender event loop.
 pub const SendBufferPool = struct {
@@ -91,7 +91,7 @@ pub const SendBufferPool = struct {
 test "acquire and release roundtrip" {
     const allocator = std.testing.allocator;
 
-    var pool = try SendBufferPool.init(4, constants.default_mtu_length, allocator);
+    var pool = try SendBufferPool.init(4, constants.default_max_frame_length, allocator);
     defer pool.deinit();
 
     // Acquire all 4 buffers.
@@ -112,7 +112,7 @@ test "acquire and release roundtrip" {
 test "buffers are 64-byte aligned" {
     const allocator = std.testing.allocator;
 
-    var pool = try SendBufferPool.init(4, constants.default_mtu_length, allocator);
+    var pool = try SendBufferPool.init(4, constants.default_max_frame_length, allocator);
     defer pool.deinit();
 
     for (0..4) |_| {
@@ -124,17 +124,17 @@ test "buffers are 64-byte aligned" {
 test "acquired buffers have correct size" {
     const allocator = std.testing.allocator;
 
-    var pool = try SendBufferPool.init(2, constants.default_mtu_length, allocator);
+    var pool = try SendBufferPool.init(2, constants.default_max_frame_length, allocator);
     defer pool.deinit();
 
     const buf = pool.acquire() orelse return error.UnexpectedNull;
-    try std.testing.expectEqual(constants.default_mtu_length, buf.len);
+    try std.testing.expectEqual(constants.default_max_frame_length, buf.len);
 }
 
 test "available tracks free count" {
     const allocator = std.testing.allocator;
 
-    var pool = try SendBufferPool.init(4, constants.default_mtu_length, allocator);
+    var pool = try SendBufferPool.init(4, constants.default_max_frame_length, allocator);
     defer pool.deinit();
 
     try std.testing.expectEqual(@as(u32, 4), pool.available());
@@ -149,7 +149,7 @@ test "available tracks free count" {
 test "release and re-acquire returns valid buffer" {
     const allocator = std.testing.allocator;
 
-    var pool = try SendBufferPool.init(2, constants.default_mtu_length, allocator);
+    var pool = try SendBufferPool.init(2, constants.default_max_frame_length, allocator);
     defer pool.deinit();
 
     // Acquire and fill with 0xAA.
@@ -163,5 +163,5 @@ test "release and re-acquire returns valid buffer" {
     // Fill with 0xBB — should not crash.
     @memset(buf2, 0xBB);
 
-    try std.testing.expectEqual(constants.default_mtu_length, buf2.len);
+    try std.testing.expectEqual(constants.default_max_frame_length, buf2.len);
 }

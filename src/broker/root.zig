@@ -26,7 +26,6 @@ pub const cluster = @import("cluster.zig");
 pub const sender = @import("sender.zig");
 pub const receiver = @import("receiver.zig");
 pub const transport = @import("transport.zig");
-pub const flow_control = @import("flow_control.zig");
 pub const threading = @import("threading.zig");
 
 // ── Monitoring (re-exported from common for broker convenience) ──────
@@ -98,32 +97,17 @@ comptime {
     // Sender
     _ = @import("sender/sender_event_loop.zig");
     _ = @import("sender/peer_sender.zig");
-    _ = @import("sender/retransmit_buffer.zig");
-    _ = @import("sender/retransmit_handler.zig");
-    _ = @import("sender/message_fragmenter.zig");
     _ = @import("sender/send_buffer_pool.zig");
     _ = @import("sender/sender_command.zig");
+    _ = @import("sender/write_queue.zig");
 
     // Receiver
-    _ = @import("receiver/loss_detector.zig");
-    _ = @import("receiver/fragment_assembler.zig");
     _ = @import("receiver/peer_receiver.zig");
-    _ = @import("receiver/receive_log_buffer.zig");
     _ = @import("receiver/message_router.zig");
     _ = @import("receiver/receiver_event_loop.zig");
 
-    // Flow control
-    _ = @import("flow_control/sender_flow_control.zig");
-    _ = @import("flow_control/receiver_flow_control.zig");
-    _ = @import("flow_control/status_message.zig");
-    _ = @import("flow_control/zero_window_probe.zig");
-    _ = @import("flow_control/back_pressure.zig");
-    _ = @import("flow_control/counters.zig");
-    _ = @import("flow_control/test_flow_control.zig");
-
     // Transport
     _ = @import("transport/buffer_pool.zig");
-    _ = @import("transport/udp_socket.zig");
     _ = @import("transport/network_io.zig");
     _ = @import("transport/kqueue.zig");
     if (@import("builtin").os.tag == .linux) {

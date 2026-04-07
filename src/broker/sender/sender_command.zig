@@ -9,9 +9,15 @@ pub const SenderCommand = union(enum) {
         address: std.net.Address,
     },
 
-    /// Remove a peer. The sender closes the socket, frees the retransmit
-    /// buffer, and removes the PeerSender from the map.
+    /// Remove a peer. The sender closes the socket, drains the write queue,
+    /// and removes the PeerSender from the map.
     remove_peer: struct {
+        node_id: u8,
+    },
+
+    /// Reconnect a peer. The sender resets connection state and starts
+    /// the reconnect backoff timer.
+    reconnect_peer: struct {
         node_id: u8,
     },
 };

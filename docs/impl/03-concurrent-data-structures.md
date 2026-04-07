@@ -2037,4 +2037,4 @@ test "different errors get separate entries" {
 
 *Previous: [02 — Memory Layout & Shared Memory](02-memory-layout-and-shared-memory.md)*
 ·
-*Next: [04 — UDP Transport & io_uring](04-udp-transport-and-io-uring.md)*
+*Next: [04 — TCP Transport Library](04-tcp-transport-library.md)*

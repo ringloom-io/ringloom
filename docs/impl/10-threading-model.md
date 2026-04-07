@@ -83,20 +83,20 @@ configuration for production):
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  • Drain inter-loop command queue (1 per cycle)           │  │
 │  │  • Drain send ring buffer (outbound cross-host messages)  │  │
-│  │  • UDP send via io_uring (Linux) / sendmsg (macOS)        │  │
-│  │  • Process incoming Status Messages and NAKs              │  │
-│  │  • Send heartbeats (zero-length DATA every 100ms)         │  │
-│  │  • Retransmission handling                                │  │
+│  │  • TCP write via io_uring (Linux) / kqueue (macOS)        │  │
+│  │  • Per-peer write queues + fair round-robin               │  │
+│  │  • Send heartbeats (every 500ms per idle peer)            │  │
+│  │  • Connection management + reconnection                   │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                 │
 │  Thread 3: brz-receiver                                         │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  • Drain inter-loop command queue (1 per cycle)           │  │
-│  │  • UDP recv via io_uring (Linux) / recvmsg (macOS)        │  │
-│  │  • Insert packets into receive log buffers                │  │
+│  │  • TCP read via io_uring (Linux) / kqueue (macOS)         │  │
+│  │  • TCP accept + handshake validation                      │  │
 │  │  • Route messages to target service ring buffers          │  │
-│  │  • Loss detection and NAK sending                         │  │
-│  │  • Send Status Messages                                   │  │
+│  │  • Heartbeat timeout detection                            │  │
+│  │  • Always-read model (drop on full, never pause)          │  │
 │  │  • Handle admin messages (cluster protocol)               │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                 │
@@ -735,10 +735,10 @@ pub const AddPeerEndpointCmd = struct {
     }
 };
 
-/// Command data for notifying the control loop about a received SETUP frame.
+/// Command data for notifying the control loop about a new TCP peer connection.
 pub const PeerConnectedCmd = struct {
     node_id: u16,
-    term_id: i32,
+    session_epoch: u64,
 
     pub fn toCommand(self: *PeerConnectedCmd) Command {
         return .{
@@ -750,7 +750,7 @@ pub const PeerConnectedCmd = struct {
     fn handlePeerConnected(loop_ctx: *anyopaque, cmd: *const Command) void {
         const control: *@import("control_loop.zig").ControlLoop = @ptrCast(@alignCast(loop_ctx));
         const data: *const PeerConnectedCmd = @ptrCast(@alignCast(cmd.data.?));
-        control.onPeerConnected(data.node_id, data.term_id);
+        control.onPeerConnected(data.node_id, data.session_epoch);
     }
 };
 ```
@@ -1003,8 +1003,8 @@ fn startDedicated(broker: *Broker) !void {
 7. Create command queue ring buffers (small, heap-allocated)
 8. Create event loop instances:
    a. ControlLoop — owns control RB, service registry, cluster manager
-   b. SenderEventLoop — owns send RB, UDP socket, retransmit buffer
-   c. ReceiverEventLoop — owns UDP socket, receive log buffers, routing table
+   b. SenderEventLoop — owns send RB, outgoing TCP connections (via brz_tcp), per-peer write queues
+   c. ReceiverEventLoop — owns TCP listener, incoming TCP connections (via brz_tcp), routing table
 9. Wire command queues between event loops
 10. Select threading mode, create ThreadRunners
 11. Start threads (order depends on mode — see §3)

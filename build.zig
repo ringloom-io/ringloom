@@ -11,6 +11,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const brz_tcp = b.addModule("brz_tcp", .{
+        .root_source_file = b.path("src/tcp/tcp.zig"),
+        .target = target,
+    });
+
     const brz_service = b.addModule("brz_service", .{
         .root_source_file = b.path("src/service/root.zig"),
         .target = target,
@@ -24,6 +29,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "brz_common", .module = brz_common },
+            .{ .name = "brz_tcp", .module = brz_tcp },
         },
     });
 
@@ -43,6 +49,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "brz_common", .module = brz_common },
                 .{ .name = "brz_broker", .module = brz_broker },
+                .{ .name = "brz_tcp", .module = brz_tcp },
                 .{ .name = "brz_service", .module = brz_service },
             },
         }),
@@ -118,6 +125,14 @@ pub fn build(b: *std.Build) void {
     });
     const run_broker_tests = b.addRunArtifact(broker_tests);
 
+    const tcp_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tcp/tcp.zig"),
+            .target = target,
+        }),
+    });
+    const run_tcp_tests = b.addRunArtifact(tcp_tests);
+
     const service_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/service/root.zig"),
@@ -153,6 +168,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all unit and integration tests");
     test_step.dependOn(&run_common_tests.step);
     test_step.dependOn(&run_broker_tests.step);
+    test_step.dependOn(&run_tcp_tests.step);
     test_step.dependOn(&run_service_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_testing_tests.step);

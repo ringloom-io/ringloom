@@ -188,6 +188,7 @@ pub const BrokerRuntime = struct {
             &self.routing_registry.?,
             &self.counters.?,
             self.config.node_id,
+            self.allocator,
         );
 
         self.broker_threads = BrokerThreads.init(

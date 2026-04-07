@@ -79,7 +79,7 @@ pub const ServiceMetadataFile = struct {
         service_id: i32,
         node_id: i16,
         blocking_mode: bool = false,
-        heartbeat_timeout_ms: i32 = @intCast(constants.default_heartbeat_timeout_ms),
+        heartbeat_timeout_ms: i32 = @intCast(constants.default_svc_heartbeat_timeout_ms),
         control_buffer_length: usize = constants.default_control_buffer_length,
         messages_buffer_length: usize = constants.default_messages_buffer_length,
     };

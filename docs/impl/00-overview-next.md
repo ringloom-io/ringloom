@@ -30,7 +30,7 @@ functionally. They are still valid for:
 
 - shared-memory layout
 - ring buffers
-- UDP transport
+- TCP transport
 - control plane
 - threading model
 - cluster management
@@ -124,7 +124,7 @@ tests.
 This document set does **not** redefine the BRZ architecture itself. It does not replace:
 
 - the shared-memory file layouts
-- the UDP wire protocol
+- the TCP wire protocol
 - the ring buffer algorithm
 - the control-plane message formats
 - the threading model semantics
@@ -371,7 +371,7 @@ Examples:
 - protocol encode/decode
 - config parsing
 - leader election logic
-- fragmentation/reassembly
+- TCP message framing
 
 These mostly already exist or are already planned.
 
@@ -628,7 +628,7 @@ They assume familiarity with:
 - `docs/architecture.md`
 - the existing `docs/impl` series
 - Zig build graph concepts
-- BRZ shared-memory and UDP architecture
+- BRZ shared-memory and TCP architecture
 
 They are intentionally implementation-oriented and should be used as a direct guide for
 code and build-system changes.

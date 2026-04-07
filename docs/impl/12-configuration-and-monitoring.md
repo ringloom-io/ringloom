@@ -108,21 +108,27 @@ or startup fails immediately with a descriptive error.
 | Property | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `broker.node.id` | `u8` | — | **Yes** | Unique node ID for this broker (0–255) |
-| `broker.local.host.port` | `host:port` | — | **Yes** | This broker's UDP bind address |
-| `broker.member.host.ports` | `id@host:port,...` | (empty) | No | Comma-separated peer list: `1@10.0.0.2:9000,2@10.0.0.3:9000` |
+| `broker.local.host.port` | `host:port` | — | **Yes** | This broker's TCP listen address |
+| `broker.member.host.ports` | `id@host:port,...` | (empty) | No | Comma-separated peer list: `1@10.0.0.2:9100,2@10.0.0.3:9100` |
 | `broker.group.name` | `[]const u8` | `"brz"` | No | Group name (directory prefix under storage path) |
 | `broker.storage.path` | `[]const u8` | `/dev/shm` | No | Base path for metadata files |
 | `broker.control.buffer.size` | `u32` | `65536` | No | Control ring buffer capacity (bytes, power of 2) |
 | `broker.messages.buffer.size` | `u32` | `1048576` | No | Send ring buffer capacity (bytes, power of 2) |
-| `broker.recv.log.buffer.size` | `u32` | `4194304` | No | Receive log buffer per peer (bytes, power of 2) |
-| `broker.retransmit.buffer.size` | `u32` | `4194304` | No | Retransmit buffer per peer (bytes, power of 2) |
-| `broker.mtu.length` | `u32` | `1408` | No | Maximum UDP payload size |
+| `broker.peer.write.queue.capacity` | `u32` | `8192` | No | Per-peer outbound write queue capacity (frames) |
+| `broker.max.frame.length` | `u32` | `1048576` | No | Maximum TCP frame length (bytes, default 1 MB) |
 | `broker.threading.mode` | enum | `DEDICATED` | No | `DEDICATED`, `SHARED_NETWORK`, or `SHARED` |
 | `broker.idle.strategy` | enum | `backoff` | No | `busy_spin`, `yielding`, `sleeping`, `backoff`, `blocking` |
 | `broker.counter.values.buffer.size` | `u32` | `65536` | No | Counter values buffer (bytes, power of 2) |
 | `broker.error.log.buffer.size` | `u32` | `262144` | No | Error log buffer (bytes) |
 | `broker.max.services` | `u16` | `256` | No | Maximum concurrent services |
 | `broker.max.peers` | `u8` | `16` | No | Maximum peer brokers |
+| `broker.tcp.sndbuf.size` | `u32` | `262144` | No | TCP SO_SNDBUF size (bytes, default 256 KB) |
+| `broker.tcp.rcvbuf.size` | `u32` | `262144` | No | TCP SO_RCVBUF size (bytes, default 256 KB) |
+| `broker.tcp.listen.backlog` | `u32` | `128` | No | TCP listen backlog |
+| `broker.heartbeat.interval.ms` | `u32` | `500` | No | Heartbeat send interval (ms) |
+| `broker.heartbeat.timeout.ms` | `u32` | `2000` | No | Heartbeat receive timeout (ms) |
+| `broker.reconnect.base.delay.ms` | `u32` | `100` | No | Reconnect initial backoff (ms) |
+| `broker.reconnect.max.delay.ms` | `u32` | `1000` | No | Reconnect max backoff (ms) |
 | `broker.io.uring.queue.depth` | `u32` | `256` | No | io_uring SQ/CQ depth (Linux only) |
 | `broker.io.uring.sqpoll` | `bool` | `false` | No | Enable io_uring SQPOLL mode (Linux only) |
 | `broker.io.uring.registered.buffers` | `u32` | `64` | No | Number of registered io_uring buffers (Linux only) |
@@ -194,9 +200,17 @@ pub const BrokerConfig = struct {
     // ── Buffer sizes (bytes — all must be power of 2 unless noted) ──
     control_buffer_size: u32 = 65_536,           // 64 KB
     messages_buffer_size: u32 = 1_048_576,       // 1 MB
-    recv_log_buffer_size: u32 = 4_194_304,       // 4 MB
-    retransmit_buffer_size: u32 = 4_194_304,     // 4 MB
-    mtu_length: u32 = 1_408,
+
+    // ── TCP transport ──────────────────────────────────────────
+    peer_write_queue_capacity: u32 = 8_192,      // frames
+    max_frame_length: u32 = 1_048_576,           // 1 MB
+    tcp_sndbuf_size: u32 = 262_144,              // 256 KB
+    tcp_rcvbuf_size: u32 = 262_144,              // 256 KB
+    tcp_listen_backlog: u32 = 128,
+    heartbeat_interval_ms: u32 = 500,
+    heartbeat_timeout_ms: u32 = 2_000,
+    reconnect_base_delay_ms: u32 = 100,
+    reconnect_max_delay_ms: u32 = 1_000,
 
     // ── Threading ───────────────────────────────────────────────
     threading_mode: ThreadingMode = .dedicated,
@@ -404,14 +418,32 @@ pub const ConfigLoader = struct {
         if (props.get("broker.messages.buffer.size")) |v|
             config.messages_buffer_size = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
-        if (props.get("broker.recv.log.buffer.size")) |v|
-            config.recv_log_buffer_size = std.fmt.parseInt(u32, v, 10) catch
+        if (props.get("broker.peer.write.queue.capacity")) |v|
+            config.peer_write_queue_capacity = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
-        if (props.get("broker.retransmit.buffer.size")) |v|
-            config.retransmit_buffer_size = std.fmt.parseInt(u32, v, 10) catch
+        if (props.get("broker.max.frame.length")) |v|
+            config.max_frame_length = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
-        if (props.get("broker.mtu.length")) |v|
-            config.mtu_length = std.fmt.parseInt(u32, v, 10) catch
+        if (props.get("broker.tcp.sndbuf.size")) |v|
+            config.tcp_sndbuf_size = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.tcp.rcvbuf.size")) |v|
+            config.tcp_rcvbuf_size = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.tcp.listen.backlog")) |v|
+            config.tcp_listen_backlog = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.heartbeat.interval.ms")) |v|
+            config.heartbeat_interval_ms = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.heartbeat.timeout.ms")) |v|
+            config.heartbeat_timeout_ms = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.reconnect.base.delay.ms")) |v|
+            config.reconnect_base_delay_ms = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.reconnect.max.delay.ms")) |v|
+            config.reconnect_max_delay_ms = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
 
         if (props.get("broker.threading.mode")) |v|
@@ -538,9 +570,15 @@ fn applyEnvOverrides(
         "broker.storage.path",
         "broker.control.buffer.size",
         "broker.messages.buffer.size",
-        "broker.recv.log.buffer.size",
-        "broker.retransmit.buffer.size",
-        "broker.mtu.length",
+        "broker.peer.write.queue.capacity",
+        "broker.max.frame.length",
+        "broker.tcp.sndbuf.size",
+        "broker.tcp.rcvbuf.size",
+        "broker.tcp.listen.backlog",
+        "broker.heartbeat.interval.ms",
+        "broker.heartbeat.timeout.ms",
+        "broker.reconnect.base.delay.ms",
+        "broker.reconnect.max.delay.ms",
         "broker.threading.mode",
         "broker.idle.strategy",
         "broker.counter.values.buffer.size",
@@ -576,8 +614,8 @@ fn applyEnvOverrides(
 ### 2.7 Buffer Sizing Validation
 
 All ring buffer sizes must be powers of two (Agrona / MPSC ring buffer requirement from
-doc 03). The MTU does not need to be a power of two. The error log buffer size does not
-need to be a power of two either (it is a linear append-only buffer).
+doc 03). The error log buffer size does not need to be a power of two either (it is a
+linear append-only buffer).
 
 Validation runs after all properties are loaded and env overrides are applied:
 
@@ -600,8 +638,6 @@ fn validate(config: *BrokerConfig) !void {
     const po2_fields = [_]*u32{
         &config.control_buffer_size,
         &config.messages_buffer_size,
-        &config.recv_log_buffer_size,
-        &config.retransmit_buffer_size,
         &config.counter_values_buffer_size,
     };
 
@@ -618,8 +654,12 @@ fn validate(config: *BrokerConfig) !void {
     if (config.messages_buffer_size < 4096)
         return ConfigError.BufferSizeTooSmall;
 
-    // ── MTU range check ─────────────────────────────────────────
-    if (config.mtu_length < 256 or config.mtu_length > 65535)
+    // ── Max frame length bounds ─────────────────────────────────
+    if (config.max_frame_length < 1024 or config.max_frame_length > 16 * 1024 * 1024)
+        return ConfigError.InvalidValue;
+
+    // ── Heartbeat sanity (timeout must exceed interval) ─────────
+    if (config.heartbeat_timeout_ms <= config.heartbeat_interval_ms)
         return ConfigError.InvalidValue;
 
     // ── Compute derived fields ──────────────────────────────────
@@ -749,18 +789,16 @@ pub const SystemCounter = enum(u8) {
     messages_routed_local = 2,
     messages_routed_remote = 3,
 
-    // ── Reliability counters ────────────────────────────────────
-    naks_sent = 4,
-    naks_received = 5,
-    retransmits_sent = 6,
-
-    // ── Status messages ─────────────────────────────────────────
-    status_messages_sent = 7,
-    status_messages_received = 8,
+    // ── TCP connection counters ─────────────────────────────────
+    tcp_connections_accepted = 4,
+    tcp_connection_errors = 5,
+    tcp_handshake_failures = 6,
+    tcp_reconnect_attempts = 7,
 
     // ── Heartbeats ──────────────────────────────────────────────
-    heartbeats_sent = 9,
-    heartbeats_received = 10,
+    heartbeats_sent = 8,
+    heartbeats_received = 9,
+    heartbeat_timeouts = 10,
 
     // ── Service lifecycle ───────────────────────────────────────
     services_registered = 11,
@@ -768,20 +806,18 @@ pub const SystemCounter = enum(u8) {
 
     // ── Back-pressure ───────────────────────────────────────────
     send_rb_back_pressure = 13,
-    service_back_pressure = 14,
+    service_full_drops = 14,
+    peer_queue_overflow_drops = 15,
+    peer_not_connected_drops = 16,
 
     // ── Error counters ──────────────────────────────────────────
-    unknown_service_drops = 15,
-    invalid_packets = 16,
+    unknown_service_drops = 17,
+    invalid_frames = 18,
 
     // ── Performance: max cycle time per event loop (nanoseconds) ──
-    control_loop_cycle_time_max = 17,
-    sender_cycle_time_max = 18,
-    receiver_cycle_time_max = 19,
-
-    // ── Flow control ────────────────────────────────────────────
-    flow_control_under_runs = 20,
-    flow_control_over_runs = 21,
+    control_loop_cycle_time_max = 19,
+    sender_cycle_time_max = 20,
+    receiver_cycle_time_max = 21,
 
     /// Total number of well-known counters.
     pub const count: usize = 22;
@@ -793,24 +829,24 @@ pub const SystemCounter = enum(u8) {
             .bytes_received => "bytes-received",
             .messages_routed_local => "messages-routed-local",
             .messages_routed_remote => "messages-routed-remote",
-            .naks_sent => "naks-sent",
-            .naks_received => "naks-received",
-            .retransmits_sent => "retransmits-sent",
-            .status_messages_sent => "status-messages-sent",
-            .status_messages_received => "status-messages-received",
+            .tcp_connections_accepted => "tcp-connections-accepted",
+            .tcp_connection_errors => "tcp-connection-errors",
+            .tcp_handshake_failures => "tcp-handshake-failures",
+            .tcp_reconnect_attempts => "tcp-reconnect-attempts",
             .heartbeats_sent => "heartbeats-sent",
             .heartbeats_received => "heartbeats-received",
+            .heartbeat_timeouts => "heartbeat-timeouts",
             .services_registered => "services-registered",
             .services_removed => "services-removed",
             .send_rb_back_pressure => "send-rb-back-pressure",
-            .service_back_pressure => "service-back-pressure",
+            .service_full_drops => "service-full-drops",
+            .peer_queue_overflow_drops => "peer-queue-overflow-drops",
+            .peer_not_connected_drops => "peer-not-connected-drops",
             .unknown_service_drops => "unknown-service-drops",
-            .invalid_packets => "invalid-packets",
+            .invalid_frames => "invalid-frames",
             .control_loop_cycle_time_max => "control-loop-cycle-time-max-ns",
             .sender_cycle_time_max => "sender-cycle-time-max-ns",
             .receiver_cycle_time_max => "receiver-cycle-time-max-ns",
-            .flow_control_under_runs => "flow-control-under-runs",
-            .flow_control_over_runs => "flow-control-over-runs",
         };
     }
 };
@@ -1041,7 +1077,7 @@ Errors fall into three categories based on severity and frequency:
 | Category | Example | Recording Strategy |
 |---|---|---|
 | **Transient** | Ring buffer full, send buffer back-pressure | Counter increment only — no error log (too frequent) |
-| **Operational** | Unknown target service, invalid packet, NAK for missing data | Counter + error log (deduplicated — one entry per unique error message) |
+| **Operational** | Unknown target service, invalid frame, protocol error | Counter + error log (deduplicated — one entry per unique error message) |
 | **Fatal** | mmap failure, io_uring setup failure, out of memory | Log to stderr + error log + immediate shutdown |
 
 The error log is **not for hot-path events**. Incrementing a counter is ~1 ns (single
@@ -1171,7 +1207,7 @@ fn doWork(ctx: *anyopaque) u32 {
 
 ## 6. Hot-Path Error Handling Patterns
 
-The hot path — message routing, ring buffer reads/writes, UDP send/receive — must
+The hot path — message routing, ring buffer reads/writes, TCP send/receive — must
 **never allocate**, **never throw**, and **never log synchronously**. Every error on the
 hot path is handled through one of three patterns.
 
@@ -1795,8 +1831,8 @@ All values are defined in `src/platform/constants.zig` (doc 01) and
 | `ring_buffer_trailer_length` | `768` | bytes | doc 01 | 6 × 128-byte padded slots: begin_pad, tail, head_cache, head, correlation, heartbeat |
 | `ring_buffer_record_header_length` | `8` | bytes | doc 01 | `i32 length` + `i32 msg_type_id` |
 | `ring_buffer_alignment` | `8` | bytes | doc 01 | Record alignment within ring buffers |
-| `recv_log_metadata_length` | `256` | bytes | doc 01 | Receive log tail + rebuild positions + padding |
-| `data_frame_header_length` | `40` | bytes | doc 01 | On-wire UDP data frame header |
+| `recv_log_metadata_length` | `256` | bytes | doc 01 | (Reserved — no longer used with TCP transport) |
+| `frame_header_length` | `24` | bytes | doc 01 | On-wire TCP message frame header |
 | `blocking_trailer_length` | `384` | bytes | doc 02 | 3 × 128-byte padded slots for blocking mode (writer wait, reader wait, timeout) |
 | `counter_value_length` | `128` | bytes | doc 03 | Per-counter value slot (i64 + 120 bytes padding) |
 | `counter_metadata_length` | `256` | bytes | doc 03 | Per-counter metadata slot (state + type_id + label_len + label) |
@@ -1808,41 +1844,37 @@ All values are defined in `src/platform/constants.zig` (doc 01) and
 
 | Constant | Value | Description |
 |---|---|---|
-| `frame_header_version` | `0` | Wire protocol version |
+| `protocol_version` | `1` | TCP wire protocol version |
+| `handshake_magic` | `0x42525A00` | "BRZ\0" — TCP handshake magic bytes |
+| `handshake_length` | `24` | bytes | TCP handshake frame length |
 | `padding_msg_type_id` | `-1` | Sentinel msg_type_id for padding records in ring buffers |
-| `frame_type_pad` | `0x00` | Padding frame (no data) |
-| `frame_type_data` | `0x01` | Data frame carrying a message fragment |
-| `frame_type_nak` | `0x02` | Negative acknowledgement (retransmit request) |
-| `frame_type_sm` | `0x03` | Status message (flow control) |
-| `frame_type_setup` | `0x04` | Connection setup frame |
-| `flag_begin` | `0x80` | First fragment of a message |
-| `flag_end` | `0x40` | Last fragment of a message |
-| `flag_unfragmented` | `0xC0` | Unfragmented message (`begin \| end`) |
 | `flag_admin` | `0x20` | Admin / cluster management message |
+| `direction_send` | `0` | Handshake direction: sender connecting |
+| `direction_recv` | `1` | Handshake direction: receiver connecting |
 | `broker_service_id` | `0` | Broker is always service ID 0 |
 | `broker_service_name` | `"broker"` | Broker service name |
+| `heartbeat_template_id` | `0xFFFF` | Template ID used for heartbeat frames |
 
 ### 9.3 Timing Constants
 
 | Constant | Value | Unit | Description |
 |---|---|---|---|
-| `udp_heartbeat_interval_ns` | `100ms` | ns | Sender emits zero-length DATA heartbeats to all peers |
-| `sm_timeout_ns` | `200ms` | ns | Receiver sends status messages at this interval |
-| `nak_initial_delay_ns` | `60ms` | ns | Delay before first NAK for a detected gap |
-| `nak_retry_delay_ns` | `60ms` | ns | Delay between successive NAKs for the same gap |
-| `retransmit_linger_ns` | `10µs` | ns | How long a retransmitted frame lingers in the retransmit buffer |
+| `heartbeat_interval_ms` | `500` | ms | Sender emits heartbeat frames to idle peers |
+| `heartbeat_timeout_ms` | `2000` | ms | Receiver marks peer suspect if no data within this window |
+| `peer_liveness_timeout_ms` | `5000` | ms | Peer declared dead if no data within this window |
+| `reconnect_base_delay_ms` | `100` | ms | Initial reconnect backoff delay |
+| `reconnect_max_delay_ms` | `1000` | ms | Maximum reconnect backoff delay |
 | `service_heartbeat_write_interval_ms` | `1000` | ms | Services write heartbeat timestamps at this rate |
 | `service_heartbeat_check_interval_ms` | `3000` | ms | Broker scans for stale service heartbeats at this rate |
 | `service_heartbeat_timeout_ms` | `10000` | ms | Service declared dead if no heartbeat within this window |
 | `control_loop_timeout_check_interval_ns` | `1s` | ns | Control loop checks for timed-out services |
 | `broker_heartbeat_interval_ns` | `1s` | ns | Broker-to-broker admin heartbeat interval |
-| `peer_liveness_timeout_ns` | `10s` | ns | Peer broker declared disconnected after this timeout |
 | `election_window_ns` | `5s` | ns | Time window to collect election responses before declaring a winner |
-| `setup_retry_interval_ns` | `1s` | ns | Interval between retried connection setup frames to a peer |
 | `command_drain_limit` | `1` | count | Max commands drained from inter-thread queue per duty cycle |
 | `control_read_limit` | `10` | count | Max control messages read per duty cycle |
-| `send_batch_limit` | `10` | count | Max outbound UDP frames per duty cycle |
-| `recv_batch_limit` | `4` | count | Max inbound UDP frames per duty cycle |
+| `write_budget_per_peer` | `16` | count | Max TCP frames written per peer per duty cycle |
+| `read_budget_per_peer` | `16` | count | Max TCP frames read per peer per duty cycle |
+| `send_batch_limit` | `64` | count | Max messages read from send ring buffer per duty cycle |
 
 ### 9.4 Memory Ordering Summary
 
@@ -1866,8 +1898,6 @@ the broker. The ordering chosen is the **minimum** required for correctness.
 | Metadata heartbeat_time_ms store | `.release` | Reader (broker) must see timestamp after the value is meaningful. |
 | Metadata heartbeat_time_ms load | `.acquire` | Pairs with service's release store. |
 | Metadata next_service_id fetchAdd | `.acq_rel` | Each service must get a unique ID — no duplicates. |
-| Receive log tail_position store | `.release` | Router reading the tail must see frame data before the position advance. |
-| Receive log rebuild_position store | `.release` | Same as tail — gap processing depends on seeing frame data. |
 
 ### 9.5 Default Configuration Values
 
@@ -1883,9 +1913,15 @@ pub const defaults = struct {
     pub const storage_path = "/dev/shm";
     pub const control_buffer_size: u32 = 65_536;           // 64 KB
     pub const messages_buffer_size: u32 = 1_048_576;       // 1 MB
-    pub const recv_log_buffer_size: u32 = 4_194_304;       // 4 MB
-    pub const retransmit_buffer_size: u32 = 4_194_304;     // 4 MB
-    pub const mtu_length: u32 = 1_408;
+    pub const peer_write_queue_capacity: u32 = 8_192;      // frames
+    pub const max_frame_length: u32 = 1_048_576;           // 1 MB
+    pub const tcp_sndbuf_size: u32 = 262_144;              // 256 KB
+    pub const tcp_rcvbuf_size: u32 = 262_144;              // 256 KB
+    pub const tcp_listen_backlog: u32 = 128;
+    pub const heartbeat_interval_ms: u32 = 500;
+    pub const heartbeat_timeout_ms: u32 = 2_000;
+    pub const reconnect_base_delay_ms: u32 = 100;
+    pub const reconnect_max_delay_ms: u32 = 1_000;
     pub const threading_mode = "DEDICATED";
     pub const idle_strategy = "backoff";
     pub const counter_values_buffer_size: u32 = 65_536;    // 64 KB → 512 counters
@@ -1978,7 +2014,6 @@ test "default values are applied for omitted properties" {
     try testing.expectEqualStrings("/dev/shm", config.storage_path);
     try testing.expectEqual(@as(u32, 65_536), config.control_buffer_size);
     try testing.expectEqual(@as(u32, 1_048_576), config.messages_buffer_size);
-    try testing.expectEqual(@as(u32, 1_408), config.mtu_length);
     try testing.expect(config.single_node_cluster);
 }
 

@@ -1,4 +1,4 @@
-//! Transport layer — UDP wire protocol, buffer management, and platform I/O backends.
+//! Transport layer — TCP transport, buffer management, and platform I/O backends.
 //!
 //! This is the single import point for all transport-related functionality.
 //! The rest of the codebase imports this module instead of individual files.
@@ -8,7 +8,6 @@ const builtin = @import("builtin");
 // ── Submodules ────────────────────────────────────────────────────────
 
 pub const buffer_pool = @import("transport/buffer_pool.zig");
-pub const udp_socket = @import("transport/udp_socket.zig");
 pub const network_io = @import("transport/network_io.zig");
 pub const kqueue = @import("transport/kqueue.zig");
 
@@ -22,11 +21,6 @@ else
 
 pub const BufferPool = buffer_pool.BufferPool;
 pub const BufferSlot = buffer_pool.BufferSlot;
-
-// ── Re-exports: UDP Socket ───────────────────────────────────────────
-
-pub const UdpSocket = udp_socket.UdpSocket;
-pub const BrokerSockets = udp_socket.BrokerSockets;
 
 // ── Re-exports: Network I/O ──────────────────────────────────────────
 
@@ -51,7 +45,6 @@ else
 // Ensure all transport module tests are discovered by `zig build test`.
 comptime {
     _ = @import("transport/buffer_pool.zig");
-    _ = @import("transport/udp_socket.zig");
     _ = @import("transport/network_io.zig");
     _ = @import("transport/kqueue.zig");
     if (builtin.os.tag == .linux) {

@@ -1,94 +1,85 @@
-//! Frame parser — flyweight overlays and dispatch for the UDP wire protocol.
+//! TCP frame parser — encoding and validation helpers for the TCP wire protocol.
 //!
-//! All `read*` functions overlay packed structs onto byte slices via `@ptrCast`
-//! for zero-copy access. The `parseFrame` function dispatches on frame_type
-//! and returns a tagged union.
+//! The TCP framing layer uses a 24-byte length-prefixed header (defined in
+//! brz_tcp). This module provides broker-level helpers for encoding outbound
+//! data frames and parsing/validating inbound frame headers.
 
 const std = @import("std");
-const frames = @import("frames.zig");
 const constants = @import("../platform/constants.zig");
 
-/// Overlay a DataFrameHeader onto a byte slice (read-only, zero-copy).
-/// Returns null if the buffer is too small or frame_length is invalid.
-pub fn readDataFrame(buf: []const u8) ?*const frames.DataFrameHeader {
-    if (buf.len < @sizeOf(frames.DataFrameHeader)) return null;
+/// 24-byte TCP frame header (matches brz_tcp FrameHeader layout).
+pub const TcpFrameHeader = extern struct {
+    frame_length: u32 = 0,
+    flags: u8 = 0,
+    source_node_id: u8 = 0,
+    target_node_id: u8 = 0,
+    reserved_1: u8 = 0,
+    source_service_id: u16 = 0,
+    target_service_id: u16 = 0,
+    template_id: u16 = 0,
+    reserved_2: u16 = 0,
+    correlation_id: i64 align(4) = 0,
 
-    const header: *const frames.DataFrameHeader = @ptrCast(@alignCast(buf.ptr));
+    pub const size: u32 = @sizeOf(TcpFrameHeader);
 
-    // Validate frame_length is at least the header size
-    if (header.frame_length < @as(i32, @intCast(@sizeOf(frames.DataFrameHeader)))) return null;
+    comptime {
+        std.debug.assert(@sizeOf(TcpFrameHeader) == 24);
+    }
 
-    return header;
-}
+    pub fn payloadLength(self: TcpFrameHeader) u32 {
+        return self.frame_length - size;
+    }
 
-/// Overlay a DataFrameHeader onto a mutable byte slice (write, zero-copy).
-/// The caller writes fields directly through the returned pointer.
-pub fn writeDataFrame(buf: []u8) ?*frames.DataFrameHeader {
-    if (buf.len < @sizeOf(frames.DataFrameHeader)) return null;
+    pub fn isHeartbeat(self: TcpFrameHeader) bool {
+        return self.flags & 0x01 != 0;
+    }
 
-    const header: *frames.DataFrameHeader = @ptrCast(@alignCast(buf.ptr));
-    header.* = .{
-        .frame_length = 0, // caller must set
-    };
+    pub fn isAdmin(self: TcpFrameHeader) bool {
+        return self.flags & constants.flag_admin != 0;
+    }
 
-    return header;
-}
-
-/// Parse just the common frame header to determine the frame type.
-/// This is the first step in the receive path dispatch.
-pub fn readFrameHeader(buf: []const u8) ?*const frames.FrameHeader {
-    if (buf.len < @sizeOf(frames.FrameHeader)) return null;
-    return @ptrCast(@alignCast(buf.ptr));
-}
-
-/// Overlay a SetupFrame onto a byte slice.
-pub fn readSetupFrame(buf: []const u8) ?*const frames.SetupFrame {
-    if (buf.len < @sizeOf(frames.SetupFrame)) return null;
-    return @ptrCast(@alignCast(buf.ptr));
-}
-
-/// Overlay a StatusMessage onto a byte slice.
-pub fn readStatusMessage(buf: []const u8) ?*const frames.StatusMessage {
-    if (buf.len < @sizeOf(frames.StatusMessage)) return null;
-    return @ptrCast(@alignCast(buf.ptr));
-}
-
-/// Overlay a NakFrame onto a byte slice.
-pub fn readNakFrame(buf: []const u8) ?*const frames.NakFrame {
-    if (buf.len < @sizeOf(frames.NakFrame)) return null;
-    return @ptrCast(@alignCast(buf.ptr));
-}
-
-/// Dispatch on frame_type and return the specific frame type.
-pub const ParsedFrame = union(enum) {
-    data: *const frames.DataFrameHeader,
-    setup: *const frames.SetupFrame,
-    sm: *const frames.StatusMessage,
-    nak: *const frames.NakFrame,
-    pad: *const frames.FrameHeader,
-    unknown: u16,
+    /// Return the payload portion of a frame buffer.
+    pub fn payloadSlice(frame_buf: []const u8) []const u8 {
+        if (frame_buf.len <= size) return &.{};
+        return frame_buf[size..];
+    }
 };
 
-/// Parse a raw byte buffer into a typed frame. Returns null if the buffer
-/// is too small for even the common header.
-pub fn parseFrame(buf: []const u8) ?ParsedFrame {
-    const header = readFrameHeader(buf) orelse return null;
-    const frame_type = frames.FrameType.fromU16(header.frame_type);
+/// Parsed frame — a typed view over a raw TCP frame.
+pub const ParsedFrame = union(enum) {
+    /// Data frame — carries application or admin payload.
+    data: struct {
+        header: TcpFrameHeader,
+        payload: []const u8,
+    },
+    /// Heartbeat — header-only frame with no payload.
+    heartbeat: TcpFrameHeader,
+    /// Invalid or unrecognized frame.
+    invalid: void,
+};
 
-    return switch (frame_type) {
-        .data, .heartbeat => if (readDataFrame(buf)) |f| .{ .data = f } else null,
-        .setup => if (readSetupFrame(buf)) |f| .{ .setup = f } else null,
-        .sm => if (readStatusMessage(buf)) |f| .{ .sm = f } else null,
-        .nak => if (readNakFrame(buf)) |f| .{ .nak = f } else null,
-        .pad => .{ .pad = header },
-        _ => .{ .unknown = header.frame_type },
-    };
+/// Parse a complete frame buffer (header + payload) into a ParsedFrame.
+pub fn parseFrame(buf: []const u8) ?ParsedFrame {
+    if (buf.len < TcpFrameHeader.size) return null;
+
+    const header_bytes: *const [TcpFrameHeader.size]u8 = @ptrCast(buf[0..TcpFrameHeader.size]);
+    const header: TcpFrameHeader = @as(*const TcpFrameHeader, @ptrCast(@alignCast(header_bytes))).*;
+
+    if (header.frame_length < TcpFrameHeader.size) return .{ .invalid = {} };
+    if (header.frame_length > buf.len) return .{ .invalid = {} };
+
+    if (header.isHeartbeat()) {
+        return .{ .heartbeat = header };
+    }
+
+    return .{ .data = .{
+        .header = header,
+        .payload = buf[TcpFrameHeader.size..header.frame_length],
+    } };
 }
 
 /// Encode a complete data frame (header + payload) into a buffer.
-///
 /// Returns the total number of bytes written, or null if the buffer is too small.
-/// This is the primary send-path encoding function.
 pub fn encodeDataFrame(
     buf: []u8,
     payload: []const u8,
@@ -97,31 +88,26 @@ pub fn encodeDataFrame(
     source_service_id: u16,
     target_service_id: u16,
     template_id: u16,
-    correlation_id: i32,
-    msg_flags: u8,
-    sequence_number: i64,
+    correlation_id: i64,
+    flags: u8,
 ) ?usize {
-    const header_len = @sizeOf(frames.DataFrameHeader);
-    const total_len = header_len + payload.len;
+    const total_len = TcpFrameHeader.size + payload.len;
     if (buf.len < total_len) return null;
 
-    const header: *frames.DataFrameHeader = @ptrCast(@alignCast(buf.ptr));
+    const header: *TcpFrameHeader = @ptrCast(@alignCast(buf.ptr));
     header.* = .{
         .frame_length = @intCast(total_len),
-        .flags = constants.flag_unfragmented,
+        .flags = flags,
         .source_node_id = source_node_id,
         .target_node_id = target_node_id,
         .source_service_id = source_service_id,
         .target_service_id = target_service_id,
         .template_id = template_id,
         .correlation_id = correlation_id,
-        .msg_flags = msg_flags,
-        .sequence_number = sequence_number,
     };
 
-    // Copy payload immediately after header
     if (payload.len > 0) {
-        @memcpy(buf[header_len..][0..payload.len], payload);
+        @memcpy(buf[TcpFrameHeader.size..][0..payload.len], payload);
     }
 
     return total_len;
@@ -129,206 +115,82 @@ pub fn encodeDataFrame(
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-test "parseFrame dispatches DATA correctly" {
-    // Given
-    var buf: [64]u8 align(8) = [_]u8{0} ** 64;
-    const header: *frames.DataFrameHeader = @ptrCast(@alignCast(&buf));
-    header.* = .{ .frame_length = 40 };
-
-    // When
-    const parsed = parseFrame(&buf);
-
-    // Then
-    try std.testing.expect(parsed != null);
-    try std.testing.expect(parsed.? == .data);
+test "TcpFrameHeader size is 24 bytes" {
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(TcpFrameHeader));
 }
 
-test "parseFrame dispatches SETUP correctly" {
-    // Given
-    var buf: [32]u8 align(8) = [_]u8{0} ** 32;
-    const header: *frames.SetupFrame = @ptrCast(@alignCast(&buf));
+test "parseFrame heartbeat" {
+    var buf: [24]u8 align(4) = [_]u8{0} ** 24;
+    const header: *TcpFrameHeader = @ptrCast(@alignCast(&buf));
     header.* = .{
         .frame_length = 24,
-        .frame_type = @intFromEnum(frames.FrameType.setup),
-        .source_node_id = 5,
-        .log_buffer_length = 4 * 1024 * 1024,
-        .mtu_length = 1408,
-        .initial_sequence = 0,
+        .flags = 0x01,
+        .source_node_id = 1,
+        .target_node_id = 2,
+        .source_service_id = 0,
+        .target_service_id = 0,
+        .template_id = 0xFFFF,
     };
 
-    // When
     const parsed = parseFrame(&buf);
-
-    // Then
     try std.testing.expect(parsed != null);
-    try std.testing.expect(parsed.? == .setup);
-    try std.testing.expectEqual(@as(u8, 5), parsed.?.setup.source_node_id);
+    try std.testing.expect(parsed.? == .heartbeat);
+    try std.testing.expectEqual(@as(u8, 1), parsed.?.heartbeat.source_node_id);
 }
 
-test "parseFrame dispatches SM correctly" {
-    // Given
-    var buf: [32]u8 align(8) = [_]u8{0} ** 32;
-    const header: *frames.StatusMessage = @ptrCast(@alignCast(&buf));
+test "parseFrame data" {
+    var buf: [32]u8 align(4) = [_]u8{0} ** 32;
+    const header: *TcpFrameHeader = @ptrCast(@alignCast(&buf));
     header.* = .{
-        .frame_type = @intFromEnum(frames.FrameType.sm),
-        .node_id = 3,
-        .consumption_position = 1000,
-        .receiver_window = 65536,
+        .frame_length = 32,
+        .flags = 0,
+        .source_node_id = 1,
+        .target_node_id = 2,
+        .source_service_id = 10,
+        .target_service_id = 20,
+        .template_id = 42,
     };
+    @memcpy(buf[24..32], "testdata");
 
-    // When
     const parsed = parseFrame(&buf);
-
-    // Then
     try std.testing.expect(parsed != null);
-    try std.testing.expect(parsed.? == .sm);
-    try std.testing.expectEqual(@as(u8, 3), parsed.?.sm.node_id);
-}
-
-test "parseFrame dispatches NAK correctly" {
-    // Given
-    var buf: [32]u8 align(8) = [_]u8{0} ** 32;
-    const header: *frames.NakFrame = @ptrCast(@alignCast(&buf));
-    header.* = .{
-        .frame_type = @intFromEnum(frames.FrameType.nak),
-        .node_id = 7,
-        .position = 500,
-        .length = 100,
-    };
-
-    // When
-    const parsed = parseFrame(&buf);
-
-    // Then
-    try std.testing.expect(parsed != null);
-    try std.testing.expect(parsed.? == .nak);
-    try std.testing.expectEqual(@as(u8, 7), parsed.?.nak.node_id);
-}
-
-test "parseFrame dispatches PAD correctly" {
-    // Given
-    var buf: [8]u8 align(8) = [_]u8{0} ** 8;
-    const header: *frames.FrameHeader = @ptrCast(@alignCast(&buf));
-    header.* = .{
-        .frame_length = 8,
-        .frame_type = @intFromEnum(frames.FrameType.pad),
-    };
-
-    // When
-    const parsed = parseFrame(&buf);
-
-    // Then
-    try std.testing.expect(parsed != null);
-    try std.testing.expect(parsed.? == .pad);
-}
-
-test "parseFrame returns unknown for unrecognized frame type" {
-    // Given
-    var buf: [8]u8 align(8) = [_]u8{0} ** 8;
-    const header: *frames.FrameHeader = @ptrCast(@alignCast(&buf));
-    header.* = .{
-        .frame_length = 8,
-        .frame_type = 0xFF,
-    };
-
-    // When
-    const parsed = parseFrame(&buf);
-
-    // Then
-    try std.testing.expect(parsed != null);
-    try std.testing.expect(parsed.? == .unknown);
-    try std.testing.expectEqual(@as(u16, 0xFF), parsed.?.unknown);
+    try std.testing.expect(parsed.? == .data);
+    try std.testing.expectEqual(@as(u8, 1), parsed.?.data.header.source_node_id);
+    try std.testing.expectEqualStrings("testdata", parsed.?.data.payload);
 }
 
 test "parseFrame returns null for undersized buffer" {
-    // Given: buffer too small for even a frame header
     var buf: [4]u8 = [_]u8{0} ** 4;
-
-    // When / Then
     try std.testing.expect(parseFrame(&buf) == null);
 }
 
-test "readDataFrame rejects undersized buffer" {
-    // Given: buffer too small for a data frame header
-    var buf: [20]u8 = [_]u8{0} ** 20;
-
-    // When / Then
-    try std.testing.expect(readDataFrame(&buf) == null);
-}
-
-test "readDataFrame rejects invalid frame_length" {
-    // Given: frame_length smaller than header size
-    var buf: [64]u8 align(8) = [_]u8{0} ** 64;
-    const header: *frames.DataFrameHeader = @ptrCast(@alignCast(&buf));
-    header.* = .{ .frame_length = 10 }; // too small
-
-    // When / Then
-    try std.testing.expect(readDataFrame(&buf) == null);
-}
-
-test "writeDataFrame initializes header in mutable buffer" {
-    // Given
-    var buf: [64]u8 align(8) = [_]u8{0xFF} ** 64;
-
-    // When
-    const header = writeDataFrame(&buf);
-
-    // Then
-    try std.testing.expect(header != null);
-    try std.testing.expectEqual(@as(i32, 0), header.?.frame_length);
-}
-
-test "writeDataFrame rejects undersized buffer" {
-    // Given
-    var buf: [20]u8 = [_]u8{0} ** 20;
-
-    // When / Then
-    try std.testing.expect(writeDataFrame(&buf) == null);
-}
-
 test "encodeDataFrame roundtrip" {
-    // Given
-    var buf: [128]u8 align(8) = [_]u8{0} ** 128;
-    const payload = "test-payload";
+    var buf: [64]u8 align(4) = [_]u8{0} ** 64;
+    const payload = "hello";
 
-    // When
     const total = encodeDataFrame(
         &buf,
         payload,
-        1, // source_node_id
-        2, // target_node_id
-        100, // source_service_id
-        200, // target_service_id
-        42, // template_id
-        999, // correlation_id
-        0, // msg_flags
-        77, // sequence_number
+        1,
+        2,
+        100,
+        200,
+        42,
+        999,
+        0,
     );
 
-    // Then
     try std.testing.expect(total != null);
-    try std.testing.expectEqual(@as(usize, 40 + payload.len), total.?);
+    try std.testing.expectEqual(@as(usize, 24 + payload.len), total.?);
 
-    // Verify via read
-    const read = readDataFrame(&buf).?;
-    try std.testing.expectEqual(@as(i32, @intCast(total.?)), read.frame_length);
-    try std.testing.expectEqual(@as(u8, 1), read.source_node_id);
-    try std.testing.expectEqual(@as(u8, 2), read.target_node_id);
-    try std.testing.expectEqual(@as(u16, 100), read.source_service_id);
-    try std.testing.expectEqual(@as(u16, 200), read.target_service_id);
-    try std.testing.expectEqual(@as(u16, 42), read.template_id);
-    try std.testing.expectEqual(@as(i32, 999), read.correlation_id);
-    try std.testing.expectEqual(@as(i64, 77), read.sequence_number);
-
-    // Verify payload
-    const read_payload = frames.DataFrameHeader.payloadSlice(buf[0..total.?]);
-    try std.testing.expectEqualStrings(payload, read_payload);
+    const parsed = parseFrame(buf[0..total.?]);
+    try std.testing.expect(parsed != null);
+    try std.testing.expect(parsed.? == .data);
+    try std.testing.expectEqual(@as(u16, 100), parsed.?.data.header.source_service_id);
+    try std.testing.expectEqualStrings(payload, parsed.?.data.payload);
 }
 
 test "encodeDataFrame rejects undersized buffer" {
-    // Given
-    var buf: [30]u8 align(8) = [_]u8{0} ** 30;
-
-    // When / Then
-    try std.testing.expect(encodeDataFrame(&buf, "x", 0, 0, 0, 0, 0, 0, 0, 0) == null);
+    var buf: [20]u8 align(4) = [_]u8{0} ** 20;
+    try std.testing.expect(encodeDataFrame(&buf, "x", 0, 0, 0, 0, 0, 0, 0) == null);
 }

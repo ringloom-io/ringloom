@@ -28,9 +28,6 @@ pub const next_service_id_offset_within_header: usize = platform_constants.next_
 /// inserted between the header and the ring buffers.
 pub const blocking_trailer_length: usize = platform_constants.blocking_trailer_length;
 
-/// Receive log buffer metadata (tail_position + rebuild_position + padding).
-pub const recv_log_metadata_length: usize = platform_constants.recv_log_metadata_length;
-
 /// Ring buffer trailer length.
 pub const ring_buffer_trailer_length: usize = platform_constants.ring_buffer_trailer_length;
 
@@ -44,7 +41,6 @@ pub const ring_buffer_record_header_length: usize = platform_constants.ring_buff
 pub const default_control_buffer_length: usize = platform_constants.default_control_buffer_length;
 pub const default_send_buffer_length: usize = platform_constants.default_send_buffer_length;
 pub const default_messages_buffer_length: usize = platform_constants.default_messages_buffer_length;
-pub const default_recv_log_buffer_length: usize = platform_constants.default_recv_log_buffer_length;
 
 /// Broker is always service ID 0.
 pub const broker_service_id: i32 = platform_constants.broker_service_id;
@@ -56,7 +52,7 @@ pub const broker_service_name: []const u8 = platform_constants.broker_service_na
 pub const page_size: usize = platform_constants.page_size;
 
 /// Default heartbeat timeout (ms).
-pub const default_heartbeat_timeout_ms: i64 = platform_constants.default_heartbeat_timeout_ms;
+pub const default_svc_heartbeat_timeout_ms: i64 = platform_constants.default_svc_heartbeat_timeout_ms;
 
 /// Default storage path.
 pub const default_storage_path: []const u8 = platform_constants.default_storage_path;
@@ -72,17 +68,13 @@ pub const services_directory: []const u8 = platform_constants.services_directory
 
 // ── Protocol Flags ────────────────────────────────────────────────────
 
-/// Begin fragment flag.
-pub const flag_begin: u8 = platform_constants.flag_begin;
-
-/// End fragment flag.
-pub const flag_end: u8 = platform_constants.flag_end;
-
-/// Unfragmented message flag (begin | end).
-pub const flag_unfragmented: u8 = platform_constants.flag_unfragmented;
-
 /// Admin message flag.
 pub const flag_admin: u8 = platform_constants.flag_admin;
+
+/// IPC message fragmentation flags.
+pub const flag_begin: u8 = platform_constants.flag_begin;
+pub const flag_end: u8 = platform_constants.flag_end;
+pub const flag_unfragmented: u8 = platform_constants.flag_unfragmented;
 
 // ── Timing & Limits ──────────────────────────────────────────────────
 
@@ -104,5 +96,4 @@ test "memory constants are consistent with platform constants" {
     try std.testing.expectEqual(platform_constants.cache_line_pad, cache_line_pad);
     try std.testing.expectEqual(platform_constants.metadata_header_length, metadata_header_length);
     try std.testing.expectEqual(@as(usize, 384), blocking_trailer_length);
-    try std.testing.expectEqual(@as(usize, 256), recv_log_metadata_length);
 }

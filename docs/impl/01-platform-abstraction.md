@@ -87,32 +87,33 @@ pub const ring_buffer_record_header_length: usize = 8;
 /// Records in the ring buffer are aligned to 8 bytes.
 pub const ring_buffer_alignment: usize = 8;
 
-/// Receive log buffer metadata appended after the data region.
-/// Contains tail_position (i64) + pad + rebuild_position (i64) + pad.
-pub const recv_log_metadata_length: usize = 256;
-
-/// On-wire UDP data frame header size.
-pub const data_frame_header_length: usize = 40;
+/// On-wire TCP message frame header size.
+pub const frame_header_length: usize = 24;
 ```
 
 ### 1.2 Protocol Constants
 
 ```zig
-pub const frame_header_version: u8 = 0;
+/// TCP wire protocol version.
+pub const protocol_version: u8 = 1;
+
+/// TCP handshake magic bytes: "BRZ\0".
+pub const handshake_magic: u32 = 0x42525A00;
+
+/// TCP handshake frame length.
+pub const handshake_length: usize = 24;
 
 /// Sentinel msg_type_id written into padding records.
 pub const padding_msg_type_id: i32 = -1;
 
-pub const frame_type_pad: u8 = 0x00;
-pub const frame_type_data: u8 = 0x01;
-pub const frame_type_nak: u8 = 0x02;
-pub const frame_type_sm: u8 = 0x03;
-pub const frame_type_setup: u8 = 0x04;
-
-pub const flag_begin: u8 = 0x80;
-pub const flag_end: u8 = 0x40;
-pub const flag_unfragmented: u8 = 0xC0; // begin | end
 pub const flag_admin: u8 = 0x20;
+
+/// Handshake direction values.
+pub const direction_send: u8 = 0;
+pub const direction_recv: u8 = 1;
+
+/// Template ID for heartbeat frames (no payload).
+pub const heartbeat_template_id: u16 = 0xFFFF;
 
 pub const broker_service_id: i32 = 0;
 pub const broker_service_name: []const u8 = "broker";
@@ -121,20 +122,20 @@ pub const broker_service_name: []const u8 = "broker";
 ### 1.3 Timing Constants
 
 ```zig
-/// How often the sender emits zero-length DATA frames as heartbeats.
-pub const udp_heartbeat_interval_ns: i64 = 100 * std.time.ns_per_ms;
+/// How often the sender emits heartbeat frames to idle peers.
+pub const heartbeat_interval_ms: i64 = 500;
 
-/// Status Message timeout — receiver sends SM at least this often.
-pub const sm_timeout_ns: i64 = 200 * std.time.ns_per_ms;
+/// Receiver marks peer as suspect if no data within this window.
+pub const heartbeat_timeout_ms: i64 = 2000;
 
-/// Initial delay before sending a NAK for a gap.
-pub const nak_initial_delay_ns: i64 = 60 * std.time.ns_per_ms;
+/// Peer declared dead after this timeout with no data.
+pub const peer_liveness_timeout_ms: i64 = 5000;
 
-/// Retry delay between NAKs for the same gap.
-pub const nak_retry_delay_ns: i64 = 60 * std.time.ns_per_ms;
+/// Initial reconnect backoff delay.
+pub const reconnect_base_delay_ms: i64 = 100;
 
-/// How long the sender keeps a retransmitted frame alive.
-pub const retransmit_linger_ns: i64 = 10 * std.time.ns_per_us;
+/// Maximum reconnect backoff delay.
+pub const reconnect_max_delay_ms: i64 = 1000;
 
 /// Services write heartbeat timestamps at this interval.
 pub const service_heartbeat_write_interval_ms: i64 = 1000;
@@ -154,11 +155,14 @@ pub const command_drain_limit: u32 = 1;
 /// Max control messages read per duty cycle.
 pub const control_read_limit: u32 = 10;
 
-/// Max outbound UDP frames sent per duty cycle.
-pub const send_batch_limit: u32 = 10;
+/// Max outbound TCP frames written per peer per duty cycle.
+pub const write_budget_per_peer: u32 = 16;
 
-/// Max inbound UDP frames received per duty cycle.
-pub const recv_batch_limit: u32 = 4;
+/// Max inbound TCP frames read per peer per duty cycle.
+pub const read_budget_per_peer: u32 = 16;
+
+/// Max messages read from send ring buffer per duty cycle.
+pub const send_batch_limit: u32 = 64;
 
 const std = @import("std");
 ```
@@ -186,11 +190,12 @@ pub fn isAligned(value: usize, alignment: usize) bool {
 ### 1.5 Default Configuration Values
 
 ```zig
-pub const default_mtu_length: usize = 1408;
 pub const default_control_buffer_length: usize = 64 * 1024;         // 64 KB
 pub const default_send_buffer_length: usize = 1024 * 1024;          // 1 MB
-pub const default_recv_log_buffer_length: usize = 4 * 1024 * 1024;  // 4 MB
-pub const default_retransmit_buffer_length: usize = 4 * 1024 * 1024;// 4 MB
+pub const default_peer_write_queue_capacity: usize = 8_192;         // frames
+pub const default_max_frame_length: usize = 1024 * 1024;            // 1 MB
+pub const default_tcp_sndbuf_size: usize = 256 * 1024;              // 256 KB
+pub const default_tcp_rcvbuf_size: usize = 256 * 1024;              // 256 KB
 pub const default_counter_values_buffer_length: usize = 64 * 1024;  // 64 KB
 pub const default_error_log_buffer_length: usize = 256 * 1024;      // 256 KB
 pub const default_max_services: u32 = 256;
@@ -1199,7 +1204,7 @@ Two clock types serve different purposes in the broker:
 
 | Clock | Resolution | Use | Hot Path? |
 |---|---|---|---|
-| **Monotonic** | Nanoseconds | Idle strategy timing, NAK delays, SM intervals, heartbeat scheduling | Yes |
+| **Monotonic** | Nanoseconds | Idle strategy timing, heartbeat scheduling, reconnect backoff | Yes |
 | **Wall clock** | Milliseconds | Heartbeat timestamps in metadata, service start timestamps | No (written every ~1s) |
 
 ### 4.1 Monotonic Clock

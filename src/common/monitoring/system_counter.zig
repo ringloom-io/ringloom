@@ -10,18 +10,16 @@ pub const SystemCounter = enum(u8) {
     messages_routed_local = 2,
     messages_routed_remote = 3,
 
-    // ── Reliability counters ────────────────────────────────────
-    naks_sent = 4,
-    naks_received = 5,
-    retransmits_sent = 6,
-
-    // ── Status messages ─────────────────────────────────────────
-    status_messages_sent = 7,
-    status_messages_received = 8,
+    // ── TCP connection counters ─────────────────────────────────
+    tcp_connections_accepted = 4,
+    tcp_connection_errors = 5,
+    tcp_handshake_failures = 6,
+    tcp_reconnect_attempts = 7,
 
     // ── Heartbeats ──────────────────────────────────────────────
-    heartbeats_sent = 9,
-    heartbeats_received = 10,
+    heartbeats_sent = 8,
+    heartbeats_received = 9,
+    heartbeat_timeouts = 10,
 
     // ── Service lifecycle ───────────────────────────────────────
     services_registered = 11,
@@ -31,21 +29,20 @@ pub const SystemCounter = enum(u8) {
     send_rb_back_pressure = 13,
     service_back_pressure = 14,
 
-    // ── Error counters ──────────────────────────────────────────
+    // ── Drop counters ───────────────────────────────────────────
     unknown_service_drops = 15,
-    invalid_packets = 16,
+    service_full_drops = 16,
+    peer_queue_overflow_drops = 17,
+    peer_not_connected_drops = 18,
+    invalid_frames = 19,
 
     // ── Performance: max cycle time per event loop (nanoseconds) ──
-    control_loop_cycle_time_max = 17,
-    sender_cycle_time_max = 18,
-    receiver_cycle_time_max = 19,
-
-    // ── Flow control ────────────────────────────────────────────
-    flow_control_under_runs = 20,
-    flow_control_over_runs = 21,
+    control_loop_cycle_time_max = 20,
+    sender_cycle_time_max = 21,
+    receiver_cycle_time_max = 22,
 
     /// Total number of well-known counters.
-    pub const count: usize = 22;
+    pub const count: usize = 23;
 
     /// Human-readable label for each counter.
     pub fn label(self: SystemCounter) []const u8 {
@@ -54,24 +51,25 @@ pub const SystemCounter = enum(u8) {
             .bytes_received => "bytes-received",
             .messages_routed_local => "messages-routed-local",
             .messages_routed_remote => "messages-routed-remote",
-            .naks_sent => "naks-sent",
-            .naks_received => "naks-received",
-            .retransmits_sent => "retransmits-sent",
-            .status_messages_sent => "status-messages-sent",
-            .status_messages_received => "status-messages-received",
+            .tcp_connections_accepted => "tcp-connections-accepted",
+            .tcp_connection_errors => "tcp-connection-errors",
+            .tcp_handshake_failures => "tcp-handshake-failures",
+            .tcp_reconnect_attempts => "tcp-reconnect-attempts",
             .heartbeats_sent => "heartbeats-sent",
             .heartbeats_received => "heartbeats-received",
+            .heartbeat_timeouts => "heartbeat-timeouts",
             .services_registered => "services-registered",
             .services_removed => "services-removed",
             .send_rb_back_pressure => "send-rb-back-pressure",
             .service_back_pressure => "service-back-pressure",
             .unknown_service_drops => "unknown-service-drops",
-            .invalid_packets => "invalid-packets",
+            .service_full_drops => "service-full-drops",
+            .peer_queue_overflow_drops => "peer-queue-overflow-drops",
+            .peer_not_connected_drops => "peer-not-connected-drops",
+            .invalid_frames => "invalid-frames",
             .control_loop_cycle_time_max => "control-loop-cycle-time-max-ns",
             .sender_cycle_time_max => "sender-cycle-time-max-ns",
             .receiver_cycle_time_max => "receiver-cycle-time-max-ns",
-            .flow_control_under_runs => "flow-control-under-runs",
-            .flow_control_over_runs => "flow-control-over-runs",
         };
     }
 };

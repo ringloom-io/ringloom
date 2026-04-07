@@ -9,7 +9,7 @@
 This document specifies the Service ↔ Broker IPC subsystem — the four shared-memory
 channels that connect every service to its local broker, the same-host direct path that
 bypasses the broker entirely, and the cross-host routed path that hands messages off to
-the broker's UDP transport layer.
+the broker's TCP transport layer.
 
 All code targets **Zig 0.15.x** stable.
 
@@ -46,7 +46,7 @@ There are two IPC paths:
 
 2. **Cross-host routed path** — Service A writes into the broker's send ring buffer
    (via the broker's metadata file). The broker's sender event loop drains this buffer
-   and transmits the message over UDP to the remote broker. The remote broker writes the
+   and transmits the message over TCP to the remote broker. The remote broker writes the
    message into the target service's messages ring buffer on that host.
 
 Both paths use the MPSC ring buffer defined in doc 03, backed by memory-mapped files
@@ -65,7 +65,7 @@ consumers operate on the same physical pages via `mmap`.
                             │                                     │
                             ▼                                     ▼
                      Service B reads                       Broker drains →
-                     (MessageConsumer)                     UDP to remote host
+                     (MessageConsumer)                     TCP to remote host
 ```
 
 ---
@@ -547,7 +547,7 @@ fn sendToLocalService(
 
 When `targetNodeId != sourceNodeId`, the message must traverse the network. The sending
 service writes the message into the broker's send ring buffer (Channel 3). The broker's
-sender event loop (doc 05) drains this buffer, looks up the target node's UDP address,
+sender event loop (doc 05) drains this buffer, looks up the target node's TCP connection,
 and transmits the message. On the remote host, the receiving broker delivers the
 message into the target service's messages ring buffer.
 
@@ -566,9 +566,9 @@ message into the target service's messages ring buffer.
 │           │                           │   │           │                            │
 │           │ 2. Broker sender drains   │   │           │ 3. Remote broker receives  │
 │           ▼                           │   │           │                            │
-│  ┌──────────────────┐   UDP packet    │   │  ┌──────────────────┐                 │
+│  ┌──────────────────┐   TCP frame     │   │  ┌──────────────────┐                 │
 │  │ Sender Event     │ ══════════════════════►│ Receiver Event   │                 │
-│  │ Loop (doc 05)    │   (io_uring)    │   │  │ Loop (doc 06)    │                 │
+│  │ Loop (doc 05)    │   (brz_tcp)    │   │  │ Loop (doc 06)    │                 │
 │  └──────────────────┘                 │   │  └──────────────────┘                 │
 │                                       │   │                                       │
 └───────────────────────────────────────┘   └───────────────────────────────────────┘
@@ -642,9 +642,9 @@ fn onSendBufferMessage(msg_type: i32, payload: []const u8) void {
         // path), but handle it for correctness.
         deliverToLocalService(header.target_service_id, msg_type, body);
     } else {
-        // Message is for a remote host — forward via UDP.
-        // The MessageRoutingPublisher looks up the target node's AeronProducer
-        // (or UDP endpoint) and transmits the message.
+        // Message is for a remote host — forward via TCP.
+        // The MessageRoutingPublisher looks up the target node's TCP connection
+        // (via brz_tcp) and transmits the message.
         routing_publisher.sendToRemoteNode(header.target_node_id, payload);
     }
 }
@@ -652,9 +652,8 @@ fn onSendBufferMessage(msg_type: i32, payload: []const u8) void {
 
 ### 5.3 Remote Broker Delivery
 
-On the destination host, the broker's `MessageRoutingSubscriber` receives the UDP
-packet (doc 06), reassembles any fragments, and writes the payload into the target
-service's messages ring buffer:
+On the destination host, the broker's `MessageRoutingSubscriber` receives the TCP
+frame (doc 06) and writes the payload into the target service's messages ring buffer:
 
 ```zig
 // src/broker/routing/message_routing_subscriber.zig (sketch)
@@ -1593,7 +1592,7 @@ The broker uses the header fields to make routing decisions:
 | Condition | Action |
 |-----------|--------|
 | `targetNodeId == localNodeId` | Deliver to local service via `ServiceMetadataFile.getMessagesBuffer()` |
-| `targetNodeId != localNodeId` | Forward via UDP to the remote broker |
+| `targetNodeId != localNodeId` | Forward via TCP to the remote broker |
 | `targetServiceId == 0` | Message is for the broker itself (control/admin) |
 | `flags & FLAG_ADMIN != 0` | Broker-to-broker admin message (cluster protocol) |
 
@@ -2186,5 +2185,5 @@ CAS on `tail_position` compiles to `lock cmpxchg`. On ARM64, acquire loads emit
 
 ---
 
-*Previous: [07 — Flow Control](07-flow-control.md)*
+*Previous: [06 — Receive Path](06-receive-path.md)*
 *Next: [09 — Control Plane](09-control-plane.md)*
