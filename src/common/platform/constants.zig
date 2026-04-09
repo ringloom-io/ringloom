@@ -28,6 +28,14 @@ pub const heartbeat_offset_within_header: usize = 256;
 /// The nextServiceId counter starts at offset 288 within the header (broker only).
 pub const next_service_id_offset_within_header: usize = 288;
 
+/// Flow control buffer length field offset within the header (broker only).
+/// When 0, flow control region is absent (disabled).
+pub const fc_buffer_length_offset: usize = 292;
+
+/// Per-peer send counters length field offset within the header (broker only).
+/// When 0, per-peer send counters region is absent (disabled).
+pub const peer_send_counters_length_offset: usize = 296;
+
 /// When blocking mode is enabled, three 128-byte cache-line-padded slots are
 /// inserted between the header and the ring buffers.
 pub const blocking_trailer_length: usize = 3 * cache_line_pad; // 384

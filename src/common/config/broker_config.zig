@@ -84,6 +84,18 @@ pub const BrokerConfig = struct {
     max_services: u16 = 256,
     max_peers: u8 = 16,
 
+    // ── Flow Control ────────────────────────────────────────────
+    fc_enabled: bool = false,
+    fc_max_entries: u32 = 256,
+    fc_low_watermark_pct: u8 = 25,
+    fc_high_watermark_pct: u8 = 50,
+    fc_refresh_interval_ms: u32 = 200,
+    fc_normal_refresh_interval_ms: u32 = 2000,
+    fc_check_interval_ms: u32 = 1,
+    fc_slot_reuse_delay_ms: u32 = 10_000,
+    fc_peer_send_counters_enabled: bool = false,
+    fc_peer_send_counters_max_peers: u32 = 32,
+
     // ── io_uring (Linux only) ───────────────────────────────────
     io_uring_queue_depth: u32 = 256,
     io_uring_sqpoll: bool = false,

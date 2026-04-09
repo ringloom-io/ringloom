@@ -69,6 +69,8 @@ comptime {
     _ = @import("memory/constants.zig");
     _ = @import("memory/broker_metadata.zig");
     _ = @import("memory/service_metadata.zig");
+    _ = @import("memory/flow_control.zig");
+    _ = @import("memory/peer_send_counters.zig");
     _ = @import("memory/service_scanner.zig");
     _ = @import("memory/metadata_descriptor_provider.zig");
     _ = @import("memory/buffers_provider.zig");
@@ -88,6 +90,7 @@ comptime {
     _ = @import("message/control_encoding.zig");
     _ = @import("message/message_fragmenting_producer.zig");
     _ = @import("message/message_assembler.zig");
+    _ = @import("message/flow_control_messages.zig");
 
     // Monitoring
     _ = @import("monitoring/system_counter.zig");

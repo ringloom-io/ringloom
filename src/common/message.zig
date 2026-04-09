@@ -15,10 +15,13 @@ pub const MessageFragmentingProducer = message_fragmenting_producer.MessageFragm
 pub const message_assembler = @import("message/message_assembler.zig");
 pub const MessageAssembler = message_assembler.MessageAssembler;
 
+pub const flow_control_messages = @import("message/flow_control_messages.zig");
+
 // Ensure all message module tests are discovered by `zig build test`.
 comptime {
     _ = @import("message/message_header.zig");
     _ = @import("message/control_encoding.zig");
     _ = @import("message/message_fragmenting_producer.zig");
     _ = @import("message/message_assembler.zig");
+    _ = @import("message/flow_control_messages.zig");
 }

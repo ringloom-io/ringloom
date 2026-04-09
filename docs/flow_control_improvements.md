@@ -9,17 +9,18 @@
 
 1. [Motivation](#1-motivation)
 2. [Design Principles](#2-design-principles)
-3. [Three Flow-Controlled Paths](#3-three-flow-controlled-paths)
+3. [Five Flow-Controlled Paths](#3-five-flow-controlled-paths)
 4. [Remaining-Bytes Visibility by Path](#4-remaining-bytes-visibility-by-path)
 5. [Flow Control Counters Region (Shared Memory)](#5-flow-control-counters-region-shared-memory)
-6. [Service Registry & Discovery Changes](#6-service-registry--discovery-changes)
-7. [ServiceClient Flow Control](#7-serviceclient-flow-control)
-8. [Inter-Broker Counter Propagation](#8-inter-broker-counter-propagation)
-9. [Broker Implementation Changes](#9-broker-implementation-changes)
-10. [Configuration](#10-configuration)
-11. [New Counters & Monitoring](#11-new-counters--monitoring)
-12. [Edge Cases & Staleness Analysis](#12-edge-cases--staleness-analysis)
-13. [Migration & Backward Compatibility](#13-migration--backward-compatibility)
+6. [Per-Peer Send Counters Region (Shared Memory)](#6-per-peer-send-counters-region-shared-memory)
+7. [Service Registry & Discovery Changes](#7-service-registry--discovery-changes)
+8. [ServiceClient Flow Control](#8-serviceclient-flow-control)
+9. [Inter-Broker Counter Propagation](#9-inter-broker-counter-propagation)
+10. [Broker Implementation Changes](#10-broker-implementation-changes)
+11. [Configuration](#11-configuration)
+12. [New Counters & Monitoring](#12-new-counters--monitoring)
+13. [Edge Cases & Staleness Analysis](#13-edge-cases--staleness-analysis)
+14. [Migration & Backward Compatibility](#14-migration--backward-compatibility)
 
 ---
 
@@ -47,9 +48,9 @@ This design introduces **client-side flow control** where service clients know t
 
 ---
 
-## 3. Three Flow-Controlled Paths
+## 3. Five Flow-Controlled Paths
 
-Every message send from a `ServiceClient` traverses one of three paths, each with its own backpressure point:
+Every message send from a `ServiceClient` traverses one of five flow-control checkpoints. Paths 2–5 apply only to cross-host sends.
 
 ```
 Path 1: Local Target (same-host IPC)
@@ -63,9 +64,59 @@ Path 2: Remote Target — Send Buffer (cross-host, outbound)
 Path 3: Remote Target — Destination Buffer (cross-host, inbound on remote)
   [send RB] → TCP → remote broker receiver → target service's messages ring buffer
   Backpressure point: remote service's ring buffer remaining capacity (propagated)
+
+Path 4: Remote Target — Per-Peer Send Congestion (cross-host, outbound)
+  [send RB] → sender thread → per-peer write queue → TCP
+  Backpressure point: per-peer bytes pending (ring + write queue), published by sender
+
+Path 5: Remote Target — Peer Connectivity (cross-host, outbound)
+  ServiceClient → peer connection state check
+  Backpressure point: peer connection state (connected/disconnected), published by sender
 ```
 
-For a cross-host send, the client checks **both** Path 2 (send buffer) and Path 3 (remote target buffer) before writing.
+For a cross-host send, the client checks **all four** applicable paths (2–5) plus the target
+buffer (Path 3) before writing. The checks are ordered from cheapest to most expensive:
+Path 5 (single byte read) → Path 4 (two u64 reads) → Path 2 (ring buffer arithmetic) →
+Path 3 (propagated counter read).
+
+### Design Rationale: Single Send Ring Buffer with Per-Peer Visibility
+
+The architecture retains a **single MPSC send ring buffer** shared by all peers, rather than
+splitting into per-peer ring buffers. This is a deliberate design choice:
+
+**Why not per-peer send ring buffers?**
+
+1. **Burst elasticity.** A single 1 MB ring lets any hot peer borrow all available capacity.
+   With N per-peer rings (e.g. 8 × 1 MB), one hot peer is capped at 1 MB while 7 MB sits
+   idle. Cross-host traffic is inherently bursty; pooled capacity handles bursts better.
+
+2. **The sender already isolates peers downstream.** After draining the shared ring, the
+   sender dispatches to per-peer `WriteQueue`s. Overflow there drops oldest per-peer. A slow
+   peer's TCP backpressure does not stall the sender thread or block other peers' messages
+   from being drained. Per-peer rings would only improve **pre-dispatch admission** isolation.
+
+3. **Sender scheduling simplicity.** One `ring_buffer.read()` call per duty cycle is the
+   simplest possible consumer loop. With N rings, the sender must define budget allocation
+   (64 total? 64 per ring?), implement fairness, and accept more cache-line misses per cycle.
+
+4. **Disconnected peer semantics.** With per-peer rings, a disconnected peer's ring fills
+   and stalls producers (stall-fast). With a shared ring, disconnected-peer messages are
+   drained and dropped by the sender (drop-fast). Drop-fast is the better default — it matches
+   the existing best-effort delivery semantics.
+
+5. **Memory layout simplicity.** No per-peer ring offset mapping, no sparse-peer handling,
+   no config-mismatch risk across processes.
+
+**What per-peer visibility solves (Paths 4 & 5):** The gap in the single-buffer design is
+that `sendBufferRemaining()` conflates all peers' usage into one number. If Peer 2's messages
+are accumulating (slow TCP, write-queue overflow), `sendBufferRemaining()` may look low even
+though Peer 1's path is healthy. Per-peer send counters — published by the sender thread into
+shared memory — provide **per-peer admission signals** without restructuring the buffer layout.
+
+**When to reconsider per-peer rings:** If measurements show high CAS retry rates on the send
+ring buffer tail_position, frequent `send_ring_buffer_full` events dominated by one peer's
+traffic, or latency inflation during multi-peer fan-out bursts, per-peer rings become worth
+the trade-offs. See §13.7 for the measurement checklist.
 
 ---
 
@@ -128,6 +179,50 @@ Path 3 (remote — advisory):
 
 Wrap padding may add up to `ring_cost` additional bytes in the worst case. For conservative admission, a simple approximation is `2 × ring_cost`.
 
+### 4.5 Per-Peer Send Congestion (Path 4)
+
+**Data source:** Per-peer send counters region in shared memory (published by sender thread).
+
+The send ring buffer remaining (Path 2) is a single number for all peers. It cannot
+distinguish whether remaining capacity is low because Peer 1 is slow or because all
+peers are under heavy load. Path 4 provides **per-peer visibility** into the outbound
+pipeline:
+
+```
+peer_bytes_pending = @atomicLoad(u64, &peer_entry.ring_bytes_pending, .acquire)
+                   + @atomicLoad(u64, &peer_entry.queue_bytes_pending, .acquire)
+```
+
+- `ring_bytes_pending`: bytes in the send ring buffer destined for this peer (tracked by
+  sender thread as it drains the ring and accumulates per-peer tallies).
+- `queue_bytes_pending`: bytes currently in this peer's write queue (updated by sender
+  after enqueue/dequeue operations).
+
+This counter is **advisory** — it reflects the sender thread's last published state. Between
+sender duty cycles, new messages may enter the ring buffer for this peer. The staleness is
+bounded by the sender's duty-cycle interval (typically < 10µs under load).
+
+**When this triggers backpressure:** If `peer_bytes_pending` exceeds a configurable threshold
+(`per_peer_pending_threshold`), the ServiceClient applies the configured backpressure strategy
+for this specific peer only. Other peers remain unaffected.
+
+### 4.6 Peer Connectivity (Path 5)
+
+**Data source:** Per-peer send counters region in shared memory (published by sender thread).
+
+```
+is_connected = @atomicLoad(u8, &peer_entry.connection_state, .acquire) == 1
+```
+
+This is the cheapest check — a single byte read. If the peer is disconnected, the
+ServiceClient can fail fast with `error.PeerDisconnected` rather than writing to the send
+ring buffer only for the message to be drained and dropped by the sender.
+
+**Staleness:** Connection state changes are published by the sender thread on its duty cycle
+after connection establishment or loss detection. Staleness is bounded by one sender cycle.
+During the brief window where stale state causes a write for a disconnected peer, the sender
+drains and drops the message (existing behavior, no regression).
+
 ---
 
 ## 5. Flow Control Counters Region (Shared Memory)
@@ -160,7 +255,8 @@ Broker Metadata File (extended):
 │  +256:  heartbeatTimeMs        (volatile i64)│
 │  +288:  nextServiceId          (volatile i32)│
 │  +292:  fcBufferLength         (i32)         │  ← NEW: 0 = flow control disabled
-│  +296:  padding to 512 bytes                 │
+│  +296:  peerSendCountersLength (i32)         │  ← NEW: 0 = per-peer counters disabled
+│  +300:  padding to 512 bytes                 │
 ├──────────────────────────────────────────────┤  ← offset 512
 │  Control Ring Buffer                         │
 │  (controlBufferLength + 768 bytes)           │  ← data capacity + trailer
@@ -168,27 +264,34 @@ Broker Metadata File (extended):
 │  Send Ring Buffer                            │
 │  (messagesBufferLength + 768 bytes)          │  ← data capacity + trailer
 ├──────────────────────────────────────────────┤  ← offset 512 + ctrl_region + msgs_region
-│  Flow Control Counters Region                │  ← NEW
+│  Flow Control Counters Region                │  ← NEW (§5)
 │  (fcBufferLength bytes)                      │
 │  Only present when fcBufferLength > 0        │
+├──────────────────────────────────────────────┤  ← offset 512 + ctrl_region + msgs_region + fcBufferLength
+│  Per-Peer Send Counters Region               │  ← NEW (§6)
+│  (peerSendCountersLength bytes)              │
+│  Only present when peerSendCountersLength > 0│
 └──────────────────────────────────────────────┘
 
 Where:
   ctrl_region = controlBufferLength + 768 (ring buffer trailer)
   msgs_region = messagesBufferLength + 768 (ring buffer trailer)
 
-Total size = alignUp(512 + ctrl_region + msgs_region + fcBufferLength, 4096)
+Total size = alignUp(512 + ctrl_region + msgs_region + fcBufferLength + peerSendCountersLength, 4096)
 ```
 
 The `fcBufferLength` field is at raw offset 292 within the header (immediately after
-`nextServiceId` at offset 288). This falls within existing padding. Old brokers/services
-write zeros to this area, which correctly means "flow control disabled."
+`nextServiceId` at offset 288). The `peerSendCountersLength` field is at raw offset 296.
+Both fall within existing padding. Old brokers/services write zeros to this area, which
+correctly means "disabled."
 
 When `fcBufferLength` is 0, the flow control region is absent and the system behaves as before.
 
 **Service-side access:** Services already mmap the broker metadata file. To locate the
 flow control region, a service reads `fcBufferLength` from offset 292. If non-zero, the
 region starts at `512 + (controlBufferLength + 768) + (messagesBufferLength + 768)`.
+To locate the per-peer send counters region, read `peerSendCountersLength` from offset 296.
+If non-zero, it starts immediately after the flow control counters region.
 
 ### 5.2 Flow Control Counters Region Layout
 
@@ -269,9 +372,82 @@ Slots are managed by the **control loop** (single writer for lifecycle operation
 
 ---
 
-## 6. Service Registry & Discovery Changes
+## 6. Per-Peer Send Counters Region (Shared Memory)
 
-### 6.1 ServiceInstance Extension
+The per-peer send counters region is appended after the flow control counters region.
+It provides per-peer visibility into the outbound pipeline, enabling Paths 4 and 5.
+
+### 6.1 Region Layout
+
+The region consists of a header followed by a fixed-size array of peer entries:
+
+```
+Per-Peer Send Counters Region:
+
+┌────────────────────────────────────────────────┐  ← region start
+│  Region Header (128 bytes, 2 cache lines)      │
+│                                                │
+│  +0:   version          (u32) = 1              │
+│  +4:   entry_count      (u32)                  │  ← max peers (fixed at create)
+│  +8:   entry_size       (u32) = 128            │  ← bytes per entry
+│  +12:  reserved         (116 bytes)            │
+├────────────────────────────────────────────────┤  ← offset 128
+│  Peer Entry [0] (128 bytes, 2 cache lines)     │
+│                                                │
+│  +0:   node_id              (i16)              │  ← 0 = slot unused
+│  +2:   state                (u8)               │  ← 0=free, 1=active
+│  +3:   connection_state     (volatile u8)      │  ← 0=disconnected, 1=connected
+│  +4:   reserved_1           (u32)              │
+│  +8:   ring_bytes_pending   (volatile u64)     │  ← bytes in send ring for this peer
+│  +16:  queue_bytes_pending  (volatile u64)     │  ← bytes in write queue for this peer
+│  +24:  queue_capacity       (u64)              │  ← write queue capacity
+│  +32:  total_bytes_sent     (volatile u64)     │  ← lifetime bytes sent (monotonic)
+│  +40:  total_bytes_dropped  (volatile u64)     │  ← lifetime bytes dropped (monotonic)
+│  +48:  last_update_ns       (volatile u64)     │  ← timestamp of last update
+│  +56:  reserved_2           (72 bytes)         │  ← future use, zero-filled
+├────────────────────────────────────────────────┤  ← offset 128 + 128
+│  Peer Entry [1] (128 bytes)                    │
+│  ...                                           │
+├────────────────────────────────────────────────┤
+│  Peer Entry [N-1] (128 bytes)                  │
+└────────────────────────────────────────────────┘
+
+Total region size = 128 + (entry_count × 128)
+```
+
+**Cache line alignment:** Each entry is 128 bytes = 2 cache lines. The first cache line
+contains all fields a ServiceClient needs for fast-path checks (`connection_state`,
+`ring_bytes_pending`, `queue_bytes_pending`). The second cache line holds diagnostic
+counters and padding.
+
+### 6.2 Writer/Reader Invariants
+
+- **Single writer:** Only the sender thread writes to peer entries. This eliminates the
+  need for CAS operations or locks. The sender uses `@atomicStore(.release)` for volatile
+  fields and ServiceClients use `@atomicLoad(.acquire)` to read them.
+- **Slot lifecycle:** When a peer connects, the sender allocates a free slot (state=free),
+  sets `node_id` and `state=active`, then sets `connection_state=connected`. On disconnect,
+  `connection_state` is set to 0. The slot is freed when the peer is fully removed.
+- **ServiceClient lookup:** ServiceClients scan entries linearly for a matching `node_id`.
+  With typical peer counts (< 16), this is a single cache-line scan. For performance, the
+  ServiceClient can cache the slot index after first lookup and validate with `node_id`.
+
+### 6.3 Size Calculation
+
+```
+peerSendCountersLength = 128 + (max_peers × 128)
+
+Example: 8 peers → 128 + (8 × 128) = 1,152 bytes (< 1 page)
+Example: 32 peers → 128 + (32 × 128) = 4,224 bytes (~1 page)
+```
+
+This is negligible compared to the ring buffers (typically 1MB+).
+
+---
+
+## 7. Service Registry & Discovery Changes
+
+### 7.1 ServiceInstance Extension
 
 ```
 const ServiceInstance = struct {
@@ -297,7 +473,7 @@ const ServiceInstance = struct {
 };
 ```
 
-### 6.2 ServiceInstances Discovery Message Extension
+### 7.2 ServiceInstances Discovery Message Extension
 
 When the broker sends `ServiceInstances` (template_id=4) to subscribing local services, it now includes flow control metadata per instance:
 
@@ -319,7 +495,7 @@ If insufficient bytes remain (old-format broker sending short payload), default 
 `fc_slot_id = -1`, `fc_slot_generation = 0`, `messages_buffer_capacity = 0`. This
 means services connected to old brokers simply see "no FC data" and skip backpressure.
 
-### 6.3 ServiceCapacityUpdate Admin Message
+### 7.3 ServiceCapacityUpdate Admin Message
 
 The existing `ServiceAddedBody` is a `comptime`-size-asserted `extern struct` (36 bytes)
 and cannot be extended without breaking the build-time assert and old-format decoding.
@@ -348,7 +524,7 @@ FC entry's capacity field. If a `ServiceCapacityUpdate` is not received (old sen
 the FC entry stays at capacity=0, meaning "unknown" — the service client skips FC
 for that target (graceful degradation).
 
-### 6.4 Flow Control State Sync (New Admin Message)
+### 7.4 Flow Control State Sync (New Admin Message)
 
 The existing `ClusterStateSnapshot` (template_id=5) uses a fixed-size `SnapshotEntry`
 struct with a `block_length` field in its SBE group header. Extending `SnapshotEntry`
@@ -389,9 +565,9 @@ with no disruption to cluster state synchronization.
 
 ---
 
-## 7. ServiceClient Flow Control
+## 8. ServiceClient Flow Control
 
-### 7.0 Prerequisite: Fix ServiceClient Concurrency
+### 8.0 Prerequisite: Fix ServiceClient Concurrency
 
 **This is a pre-existing bug that must be fixed before flow control can be implemented.**
 
@@ -422,7 +598,7 @@ Flow control makes this worse because `send()` would now also read `fc_slot_id` 
 
 Option 1 is preferred for zero-contention on the send hot path.
 
-### 7.1 Unified API
+### 8.1 Unified API
 
 ```
 pub const ServiceClient = struct {
@@ -459,10 +635,30 @@ pub const ServiceClient = struct {
             catch return 0;
         return send_rb.getCapacity() - send_rb.size();
     }
+
+    /// Returns the total bytes pending in the outbound pipeline for a specific peer.
+    /// This is the sum of bytes in the send ring buffer destined for this peer plus
+    /// bytes in the peer's write queue. Returns null if per-peer counters are disabled
+    /// or the peer is not found.
+    pub fn peerSendPending(self: *Self, node_id: i16) ?u64 {
+        const region = self.peer_send_counters orelse return null;
+        const entry = region.findPeer(node_id) orelse return null;
+        const ring_pending = @atomicLoad(u64, &entry.ring_bytes_pending, .acquire);
+        const queue_pending = @atomicLoad(u64, &entry.queue_bytes_pending, .acquire);
+        return ring_pending + queue_pending;
+    }
+
+    /// Returns true if the peer broker is currently connected.
+    /// Returns null if per-peer counters are disabled or the peer is not found.
+    pub fn isPeerConnected(self: *Self, node_id: i16) ?bool {
+        const region = self.peer_send_counters orelse return null;
+        const entry = region.findPeer(node_id) orelse return null;
+        return @atomicLoad(u8, &entry.connection_state, .acquire) == 1;
+    }
 };
 ```
 
-### 7.2 Pre-Send Flow Control Check
+### 8.2 Pre-Send Flow Control Check
 
 The `send()`, `sendTo()`, and `sendToLeader()` methods are all augmented with flow
 control. The `applyFlowControl()` helper is called before the actual write in each path:
@@ -519,6 +715,20 @@ fn applyFlowControl(self: *Self, instance: *const ServiceInstance, payload_len: 
     // Check 2: Send ring buffer remaining (only for remote targets).
     if (instance.node_id != self.local_node_id) {
         const send_cost = alignUp(8 + MessageHeader.encoded_length + payload_len, 8);
+
+        // Check 2a: Peer connectivity (cheapest — single byte read).
+        if (self.isPeerConnected(instance.node_id)) |connected| {
+            if (!connected) return error.PeerDisconnected;
+        }
+
+        // Check 2b: Per-peer send congestion (two u64 reads).
+        if (self.peerSendPending(instance.node_id)) |pending| {
+            if (pending + send_cost > self.fc_config.per_peer_pending_threshold) {
+                try self.applyStrategy(0, send_cost, .peer_congested);
+            }
+        }
+
+        // Check 2c: Global send ring buffer remaining.
         const send_remaining = self.sendBufferRemaining();
         if (send_remaining < send_cost) {
             try self.applyStrategy(send_remaining, send_cost, .send_buffer);
@@ -527,7 +737,7 @@ fn applyFlowControl(self: *Self, instance: *const ServiceInstance, payload_len: 
 }
 ```
 
-### 7.3 Backpressure Strategies
+### 8.3 Backpressure Strategies
 
 ```
 pub const BackpressureStrategy = enum {
@@ -554,6 +764,11 @@ pub const FlowControlConfig = struct {
     /// Backpressure triggers when remaining < max(required, min_threshold).
     /// Useful for reserving headroom. 0 = disabled.
     min_remaining_threshold: u32 = 0,
+
+    /// Per-peer congestion threshold. Backpressure triggers when bytes pending
+    /// in the outbound pipeline for a specific peer exceed this value.
+    /// 0 = disabled (per-peer congestion check skipped).
+    per_peer_pending_threshold: u64 = 0,
 };
 ```
 
@@ -562,6 +777,8 @@ pub const FlowControlConfig = struct {
 | Path | `drop` strategy | `spin` strategy |
 |---|---|---|
 | Local target | Return `error.BackPressure` | Spin on ring buffer head/tail positions (sub-µs responsiveness) |
+| Peer connectivity | Return `error.PeerDisconnected` | N/A — always fail fast (no point waiting for reconnection in send path) |
+| Per-peer congestion | Return `error.PeerCongested` | Spin on per-peer counter (responsiveness bounded by sender duty cycle; ~10µs) |
 | Send buffer | Return `error.BackPressure` | Spin on ring buffer head/tail positions (sub-µs responsiveness) |
 | Remote target | Return `error.BackPressure` | Spin on flow control counter (responsiveness bounded by broker update frequency; recommended timeout ≤ 10ms) |
 
@@ -585,7 +802,7 @@ fn spinUntilCapacity(self: *Self, instance: *const ServiceInstance, required: us
 }
 ```
 
-### 7.4 Flow Control Error Types
+### 8.4 Flow Control Error Types
 
 ```
 pub const SendError = error{
@@ -595,14 +812,16 @@ pub const SendError = error{
     NoLeaderAvailable,
     BackPressure,          // NEW: flow control triggered (drop strategy)
     BackPressureTimeout,   // NEW: spin timed out
+    PeerCongested,         // NEW: per-peer send pipeline over threshold
+    PeerDisconnected,      // NEW: target peer is not connected
 } || RingBuffer.WriteError;
 ```
 
 ---
 
-## 8. Inter-Broker Counter Propagation
+## 9. Inter-Broker Counter Propagation
 
-### 8.1 Pressure State Machine (Per Local Service)
+### 9.1 Pressure State Machine (Per Local Service)
 
 Each local service tracked by the broker has a **pressure state** for flow control:
 
@@ -655,7 +874,7 @@ the update was sent, plus network propagation delay. Client-side flow control lo
 should treat these as approximate signals, not exact byte counts. The actual admission
 decision is always made by the receiving broker or the ring buffer CAS.
 
-### 8.2 Watermark Defaults
+### 9.2 Watermark Defaults
 
 Watermarks are expressed as a percentage of the service's messages ring buffer capacity:
 
@@ -670,7 +889,7 @@ With a 1 MB buffer:
 - Low watermark = 256 KB remaining
 - High watermark = 512 KB remaining
 
-### 8.3 RemainingBytesUpdate Admin Message
+### 9.3 RemainingBytesUpdate Admin Message
 
 **New admin message (template_id = 9):**
 
@@ -719,7 +938,7 @@ may cross watermarks in the same broker cycle.
 union in `admin_dispatch.zig`. The `dispatchAdminMessage()` switch should decode the
 payload and forward it to the control loop for FC entry updates.
 
-### 8.4 Initial Sync & Reconnect
+### 9.4 Initial Sync & Reconnect
 
 To avoid incorrect optimistic assumptions after events that invalidate existing state:
 
@@ -751,7 +970,7 @@ new local service. This approach:
 - Old brokers ignore the unknown template_id=11 harmlessly
 - Provides capacity info needed to initialize FC entries
 
-**On FlowControlSnapshot (template_id = 10, see §6.4):**
+**On FlowControlSnapshot (template_id = 10, see §7.4):**
 - Sent to peers on new TCP connection and after reconnection.
 - Contains `messages_buffer_capacity` and `current_remaining_bytes` for all local services.
 - Receiving brokers initialize or reset all flow control entries to snapshot values.
@@ -760,7 +979,7 @@ new local service. This approach:
 - The reconnecting broker sends a full `RemainingBytesUpdate` for all its local services.
 - This ensures the peer has current values, not stale pre-disconnection data.
 
-### 8.5 Broadcast vs. Targeted
+### 9.5 Broadcast vs. Targeted
 
 Updates are broadcast to **all connected peers**. Rationale:
 
@@ -770,9 +989,9 @@ Updates are broadcast to **all connected peers**. Rationale:
 
 ---
 
-## 9. Broker Implementation Changes
+## 10. Broker Implementation Changes
 
-### 9.1 Control Loop Changes
+### 10.1 Control Loop Changes
 
 The control loop gains new responsibilities:
 
@@ -858,7 +1077,7 @@ fn handleRemainingBytesUpdate(control_loop: *ControlLoop, peer_node_id: u8, entr
 }
 ```
 
-### 9.2 Receiver Event Loop Changes
+### 10.2 Receiver Event Loop Changes
 
 The receiver event loop processes `RemainingBytesUpdate` messages and forwards them to the control loop:
 
@@ -881,9 +1100,10 @@ fn handle_remaining_bytes_update(source_node_id: u8, payload: []const u8) void {
 }
 ```
 
-### 9.3 Sender Event Loop Changes
+### 10.3 Sender Event Loop Changes
 
-The sender event loop sends `RemainingBytesUpdate` frames when commanded by the control loop:
+The sender event loop sends `RemainingBytesUpdate` frames when commanded by the control loop,
+and publishes per-peer send counters to the shared memory region:
 
 ```
 fn handleFlowControlBroadcastCommand(sender: *SenderEventLoop, cmd: *FcBroadcastCmd) void {
@@ -897,9 +1117,41 @@ fn handleFlowControlBroadcastCommand(sender: *SenderEventLoop, cmd: *FcBroadcast
         }
     }
 }
+
+/// Called after each duty cycle iteration. Publishes per-peer send counters
+/// to the shared-memory region so that ServiceClients can read them.
+fn publishPeerSendCounters(sender: *SenderEventLoop) void {
+    const region = sender.peer_send_counters orelse return;
+
+    for (sender.peers) |peer| {
+        const entry = region.findOrAllocPeer(peer.node_id) orelse continue;
+
+        // ring_bytes_pending: tracked by accumulating bytes destined for this peer
+        // during send ring drain, and decrementing when written to write queue.
+        @atomicStore(u64, &entry.ring_bytes_pending, peer.ring_bytes_pending, .release);
+
+        // queue_bytes_pending: current write queue fill level.
+        @atomicStore(u64, &entry.queue_bytes_pending, peer.write_queue.size(), .release);
+
+        // connection_state: 1=connected, 0=disconnected.
+        @atomicStore(u8, &entry.connection_state,
+            if (peer.connection_state == .CONNECTED) @as(u8, 1) else @as(u8, 0),
+            .release);
+
+        // Diagnostic counters (monotonic).
+        @atomicStore(u64, &entry.total_bytes_sent, peer.total_bytes_sent, .release);
+        @atomicStore(u64, &entry.total_bytes_dropped, peer.total_bytes_dropped, .release);
+        @atomicStore(u64, &entry.last_update_ns, monotonic_clock(), .release);
+    }
+}
 ```
 
-### 9.4 Flow Control Counter Update Paths (Summary)
+The `publishPeerSendCounters()` call is added to the sender's `doWork()` method, executed
+at the end of each duty cycle after draining the send ring buffer and processing write queues.
+This ensures counters reflect the latest state. The sender is the **sole writer** — no
+atomics contention, only `release` stores for ServiceClient `acquire` loads.
+
+### 10.4 Flow Control Counter Update Paths (Summary)
 
 ```
 Who updates what:
@@ -910,6 +1162,10 @@ Local service counters (for remote propagation):
 Remote service counters (in shared-memory flow control region):
   Receiver reads RemainingBytesUpdate → commands control loop → control loop writes to shared memory
 
+Per-peer send counters (in shared-memory per-peer region):
+  Sender thread publishes ring_bytes_pending, queue_bytes_pending, connection_state
+  after each duty cycle → ServiceClients read atomically
+
 Send ring buffer remaining:
   Service client reads directly from ring buffer trailer in broker metadata file (no broker involvement)
 
@@ -919,9 +1175,9 @@ Local service remaining (for local ServiceClient):
 
 ---
 
-## 10. Configuration
+## 11. Configuration
 
-### 10.1 Broker Configuration
+### 11.1 Broker Configuration
 
 | Property | Default | Description |
 |---|---|---|
@@ -933,16 +1189,21 @@ Local service remaining (for local ServiceClient):
 | `broker.flow.control.normal.refresh.interval.ms` | `2000` | Periodic refresh interval while NORMAL |
 | `broker.flow.control.check.interval.ms` | `1` | How often control loop checks ring buffer positions |
 | `broker.flow.control.slot.reuse.delay.ms` | `10000` | Grace period before reclaiming a RECLAIMED slot |
+| `broker.flow.control.peer.send.counters.enabled` | `false` | Enable per-peer send counters region |
+| `broker.flow.control.peer.send.counters.max.peers` | `32` | Max peer entries (determines region size) |
 
 When `broker.flow.control.enabled` is `true`, the broker allocates the flow control counters region in the metadata file (`fcBufferLength = 64 + max_entries × 64`).
 
-### 10.2 ServiceClient Configuration
+When `broker.flow.control.peer.send.counters.enabled` is `true`, the broker additionally allocates the per-peer send counters region (`peerSendCountersLength = 128 + max_peers × 128`).
+
+### 11.2 ServiceClient Configuration
 
 | Property | Default | Description |
 |---|---|---|
 | `flow.control.strategy` | `drop` | `drop` or `spin` |
 | `flow.control.spin.timeout.ms` | `1` | Max spin-wait time before returning timeout error |
 | `flow.control.min.remaining` | `0` | Min remaining bytes threshold (0 = disabled) |
+| `flow.control.per.peer.pending.threshold` | `0` | Per-peer congestion threshold in bytes (0 = disabled) |
 
 These are set per `ServiceClient` instance by the application:
 
@@ -953,14 +1214,15 @@ client.fc_config = .{
     .strategy = .spin,
     .spin_timeout_ns = 1_000_000,  // 1ms
     .min_remaining_threshold = 4096,
+    .per_peer_pending_threshold = 512 * 1024,  // 512KB — adjust based on write queue capacity
 };
 ```
 
 ---
 
-## 11. New Counters & Monitoring
+## 12. New Counters & Monitoring
 
-### 11.1 System Counters
+### 12.1 System Counters
 
 | ID | Name | Description |
 |---|---|---|
@@ -972,8 +1234,10 @@ client.fc_config = .{
 | 26 | `fc_client_spin_timeouts` | ServiceClient spin-waits that timed out |
 | 27 | `fc_slot_allocations` | Flow control slots allocated |
 | 28 | `fc_slot_reclamations` | Flow control slots reclaimed |
+| 29 | `fc_peer_congestion_events` | ServiceClient sends blocked by per-peer congestion |
+| 30 | `fc_peer_disconnected_sends_avoided` | ServiceClient sends avoided due to disconnected peer |
 
-### 11.2 Per-Service Observable State
+### 12.2 Per-Service Observable State
 
 Each flow control entry in shared memory provides per-service observability:
 
@@ -982,33 +1246,45 @@ Each flow control entry in shared memory provides per-service observability:
 - `pressure_state`: UNKNOWN / NORMAL / PRESSURED
 - `last_update_ns`: freshness indicator
 
-External monitoring tools can mmap the broker metadata file and read the flow control region directly.
+Each per-peer send counter entry provides per-peer observability:
+
+- `ring_bytes_pending`: bytes in send ring buffer destined for this peer
+- `queue_bytes_pending`: bytes in this peer's write queue
+- `queue_capacity`: write queue capacity (static)
+- `connection_state`: connected / disconnected
+- `total_bytes_sent`: lifetime bytes sent (monotonic)
+- `total_bytes_dropped`: lifetime bytes dropped (monotonic)
+- `last_update_ns`: freshness indicator
+
+External monitoring tools can mmap the broker metadata file and read both regions directly.
 
 ---
 
-## 12. Edge Cases & Staleness Analysis
+## 13. Edge Cases & Staleness Analysis
 
-### 12.1 Staleness by Path
+### 13.1 Staleness by Path
 
 | Path | Data Source | Staleness | Impact |
 |---|---|---|---|
 | Local target | Ring buffer trailer (shared memory) | Exact at read time; other producers may write between check and send | Minimal — ring buffer's `BufferFull` is the ultimate guard |
-| Send buffer | Ring buffer trailer (shared memory) | Same as above | Minimal |
+| Peer connectivity | Per-peer send counters (shared memory) | Bounded by sender duty cycle (~10µs under load) | Minimal — stale "connected" causes write + drop (existing behavior); stale "disconnected" delays send briefly |
+| Per-peer congestion | Per-peer send counters (shared memory) | Bounded by sender duty cycle (~10µs under load) | Low — advisory; send ring `BufferFull` is the ultimate guard |
+| Send buffer | Ring buffer trailer (shared memory) | Same as local target | Minimal |
 | Remote target | Propagated counter | Bounded by: check interval (1ms) + command queue latency (~µs) + TCP write latency (~µs) + network RTT (~10-50µs) + receiver processing (~µs) | ~1-50ms. Reduced by periodic refresh while pressured |
 
-### 12.2 Counter Stale After Reconnect
+### 13.2 Counter Stale After Reconnect
 
 **Scenario:** Peer disconnects while a service is pressured. After reconnection, the local counter still shows the old (low) remaining value.
 
-**Mitigation:** On peer reconnection, the reconnecting broker immediately sends a full `RemainingBytesUpdate` for all its local services (§8.4). Additionally, if no update has been received within `peer_liveness_timeout / 2`, the counter's `pressure_state` reverts to `UNKNOWN` and the service client treats it as "no data" (no backpressure).
+**Mitigation:** On peer reconnection, the reconnecting broker immediately sends a full `RemainingBytesUpdate` for all its local services (§9.4). Additionally, if no update has been received within `peer_liveness_timeout / 2`, the counter's `pressure_state` reverts to `UNKNOWN` and the service client treats it as "no data" (no backpressure).
 
-### 12.3 Counter Stale After Service Restart
+### 13.3 Counter Stale After Service Restart
 
 **Scenario:** Remote service restarts. Its ring buffer is now empty, but the local counter still shows "pressured."
 
 **Mitigation:** Service restart triggers deregistration + re-registration → `ServiceRemoved` + `ServiceAdded` admin messages → local broker reclaims old flow control slot and allocates a new one with fresh values from the `ServiceAdded` message.
 
-### 12.4 Multiple Producers Race
+### 13.4 Multiple Producers Race
 
 **Scenario:** Multiple local services check the remaining-bytes counter for the same target, all see sufficient capacity, and all write simultaneously, potentially overflowing the buffer.
 
@@ -1016,7 +1292,7 @@ External monitoring tools can mmap the broker metadata file and read the flow co
 
 **Acceptable:** This matches the behavior of any advisory admission control system (cf. TCP window, semaphore-based flow control).
 
-### 12.5 Flow Control Disabled Peer
+### 13.5 Flow Control Disabled Peer
 
 **Scenario:** Broker A has flow control enabled, Broker B does not.
 
@@ -1024,27 +1300,64 @@ External monitoring tools can mmap the broker metadata file and read the flow co
 
 **Behavior:** ServiceClient sees `UNKNOWN` pressure state → treats as "no flow control data" → sends without backpressure (same as current behavior). No functional regression.
 
+### 13.6 Per-Peer Counter Staleness
+
+**Scenario:** The sender thread is busy with a long write queue flush for one peer, delaying
+counter publication for other peers.
+
+**Impact:** Per-peer counters can be stale by up to one full sender duty cycle. Under heavy
+load, the duty cycle is bounded by the sender's I/O budget. For peers with large write queues,
+`queue_bytes_pending` may lag behind actual TCP send completion.
+
+**Mitigation:** The `last_update_ns` field allows ServiceClients (or monitoring tools) to
+detect staleness. If `monotonic_clock() - last_update_ns > stale_threshold`, the ServiceClient
+can treat the counter as unknown and fall back to global send ring buffer checks only.
+
+### 13.7 Measurement Checklist: When to Reconsider Per-Peer Rings
+
+The hybrid approach (single ring + per-peer counters) is optimal under expected workloads.
+If future profiling reveals any of the following, per-peer send ring buffers should be
+reconsidered:
+
+1. **CAS contention on `tail_position`**: If `@atomicRmw` retries on the send ring buffer
+   exceed 5% of total send attempts, per-peer rings would eliminate this contention.
+   Measure: counter for CAS retries vs. successful claims.
+
+2. **Head-of-line blocking**: If one slow peer causes the send ring to fill up, blocking
+   messages to healthy peers for > 1ms on average. Measure: histogram of send ring buffer
+   wait times, correlated with per-peer queue depths.
+
+3. **Sender fairness issues**: If the sender's drain loop starves some peers' messages.
+   Measure: per-peer drain latency distribution (time from ring write to write queue enqueue).
+
+4. **Cross-host traffic dominance**: If cross-host messages constitute > 60% of total
+   message volume (currently expected to be < 20%), the single send ring becomes a hotter
+   contention point. Measure: ratio of local vs. remote sends.
+
 ---
 
-## 13. Migration & Backward Compatibility
+## 14. Migration & Backward Compatibility
 
-### 13.1 Metadata File Layout
+### 14.1 Metadata File Layout
 
 - The `fcBufferLength` field at offset +292 in the metadata header is in existing padding space (between `nextServiceId` at +288 and the end of the 512-byte header). Old brokers/services write 0 to this area, which correctly means "flow control disabled."
-- The flow control region is appended after the send ring buffer. Old code that only reads up to `512 + (controlBufferLength + 768) + (messagesBufferLength + 768)` is unaffected.
+- The `peerSendCountersLength` field at offset +296 is similarly in existing padding. Old brokers/services write 0, meaning "per-peer counters disabled."
+- The flow control region is appended after the send ring buffer. The per-peer send counters region is appended after the flow control region. Old code that only reads up to `512 + (controlBufferLength + 768) + (messagesBufferLength + 768)` is unaffected.
 
-### 13.2 Wire Protocol
+### 14.2 Wire Protocol
 
 - `RemainingBytesUpdate` (template_id=9), `FlowControlSnapshot` (template_id=10), and `ServiceCapacityUpdate` (template_id=11) are framed as standard admin messages. Old brokers encounter unrecognized template_ids in `dispatchAdminMessage()`, which are logged and ignored via the `else => {}` arm. No connection disruption.
 - `ServiceAdded` (template_id=6) is **not modified**. Its `ServiceAddedBody` extern struct and comptime size assert remain unchanged. Capacity information is sent separately via `ServiceCapacityUpdate`.
 - Extended `ServiceInstances` (template_id=4) payload: the decoder checks remaining payload length before reading FC extension fields. Short payloads (old broker) result in default values (`fc_slot_id = -1`), meaning services gracefully skip flow control for that target.
 
-### 13.3 Rolling Upgrade
+### 14.3 Rolling Upgrade
 
 1. Deploy new broker code with `broker.flow.control.enabled = false` (default).
 2. Verify cluster stability.
 3. Enable flow control on each broker: `broker.flow.control.enabled = true`.
-4. Update service client code to set `fc_config.enabled = true` and desired strategy.
+4. Optionally enable per-peer counters: `broker.flow.control.peer.send.counters.enabled = true`.
+5. Update service client code to set `fc_config.enabled = true` and desired strategy.
+6. Optionally set `fc_config.per_peer_pending_threshold` for per-peer congestion detection.
 
 No flag-day required. Mixed clusters (some flow-control-enabled, some not) are safe.
 
@@ -1063,25 +1376,34 @@ Service A (Host 1)                    Broker 1                              Brok
      │     Service B (remote)            │                                     │                             │
      │     → remaining = 800KB ✓         │                                     │                             │
      │                                   │                                     │                             │
-     │  3. Read send_rb remaining        │                                     │                             │
+     │  3. Check peer connectivity       │                                     │                             │
+     │     → connection_state = 1 ✓      │                                     │                             │
+     │                                   │                                     │                             │
+     │  4. Check per-peer congestion     │                                     │                             │
+     │     → pending = 50KB < 512KB ✓    │                                     │                             │
+     │                                   │                                     │                             │
+     │  5. Read send_rb remaining        │                                     │                             │
      │     → remaining = 600KB ✓         │                                     │                             │
      │                                   │                                     │                             │
-     │  4. Write to send ring buffer ───►│                                     │                             │
-     │                                   │  5. Drain send RB                   │                             │
-     │                                   │  6. TCP write ─────────────────────►│                             │
-     │                                   │                                     │  7. Read TCP frame          │
-     │                                   │                                     │  8. Route to Service B ────►│
+     │  6. Write to send ring buffer ───►│                                     │                             │
+     │                                   │  7. Drain send RB                   │                             │
+     │                                   │  8. Update peer counters            │                             │
+     │                                   │     (ring_bytes_pending,            │                             │
+     │                                   │      queue_bytes_pending)           │                             │
+     │                                   │  9. TCP write ─────────────────────►│                             │
+     │                                   │                                     │  10. Read TCP frame         │
+     │                                   │                                     │  11. Route to Service B ───►│
      │                                   │                                     │                             │
-     │                                   │                                     │  9. remaining drops below   │
-     │                                   │                                     │     low watermark (25%)     │
+     │                                   │                                     │  12. remaining drops below  │
+     │                                   │                                     │      low watermark (25%)    │
      │                                   │                                     │                             │
-     │                                   │  10. RemainingBytesUpdate ◄─────────│                             │
+     │                                   │  13. RemainingBytesUpdate ◄─────────│                             │
      │                                   │      (svc_b: remaining=200KB)       │                             │
      │                                   │                                     │                             │
-     │                                   │  11. Write 200KB to fc_counter      │                             │
+     │                                   │  14. Write 200KB to fc_counter      │                             │
      │                                   │      for Service B                  │                             │
      │                                   │                                     │                             │
-     │  12. Next send():                 │                                     │                             │
+     │  15. Next send():                 │                                     │                             │
      │      Read fc_counter → 200KB      │                                     │                             │
      │      Message needs 300KB          │                                     │                             │
      │      → BackPressure! (drop/spin)  │                                     │                             │

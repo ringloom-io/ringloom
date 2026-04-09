@@ -7,6 +7,8 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const platform = @import("../platform.zig");
+const FlowControlRegion = @import("flow_control.zig").FlowControlRegion;
+const PeerSendCountersRegion = @import("peer_send_counters.zig").PeerSendCountersRegion;
 
 /// Overlay for the first 32 bytes of the broker metadata header.
 /// Read/written once at creation; immutable after that (except volatile fields).
@@ -22,6 +24,11 @@ pub const BrokerMetadataHeader = extern struct {
     comptime {
         // The fixed fields must pack to exactly 32 bytes.
         std.debug.assert(@sizeOf(BrokerMetadataHeader) == 32);
+        // Ensure the struct doesn't grow past the volatile field offsets.
+        std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.heartbeat_offset_within_header);
+        std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.next_service_id_offset_within_header);
+        std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.fc_buffer_length_offset);
+        std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.peer_send_counters_length_offset);
     }
 };
 
@@ -38,12 +45,24 @@ pub const BrokerMetadataFile = struct {
     /// Byte slice covering the send ring buffer region.
     send_buffer: []u8,
 
+    /// Flow control counters region (null if disabled).
+    fc_region: ?FlowControlRegion = null,
+
+    /// Per-peer send counters region (null if disabled).
+    peer_send_counters: ?PeerSendCountersRegion = null,
+
     /// File descriptor (kept open for the lifetime of the mapping).
     fd: std.posix.fd_t,
 
     const Self = @This();
 
     // ── Construction ──────────────────────────────────────────────────
+
+    /// Options for flow control region allocation (optional).
+    pub const FlowControlOptions = struct {
+        fc_max_entries: u32 = 0,
+        peer_send_max_peers: u32 = 0,
+    };
 
     /// Create and initialize a new broker metadata file.
     ///
@@ -52,12 +71,32 @@ pub const BrokerMetadataFile = struct {
     /// - `node_id`: this broker's node identifier
     /// - `control_buffer_length`: must be a power of two
     /// - `messages_buffer_length`: must be a power of two
+    /// - `fc_options`: optional flow control region sizes (0 = disabled)
     pub fn create(
         storage_path: []const u8,
         group: []const u8,
         node_id: i16,
         control_buffer_length: usize,
         messages_buffer_length: usize,
+    ) !BrokerMetadataFile {
+        return createWithFlowControl(
+            storage_path,
+            group,
+            node_id,
+            control_buffer_length,
+            messages_buffer_length,
+            .{},
+        );
+    }
+
+    /// Create and initialize a new broker metadata file with flow control.
+    pub fn createWithFlowControl(
+        storage_path: []const u8,
+        group: []const u8,
+        node_id: i16,
+        control_buffer_length: usize,
+        messages_buffer_length: usize,
+        fc_options: FlowControlOptions,
     ) !BrokerMetadataFile {
         if (!constants.isPowerOfTwo(control_buffer_length))
             return error.ControlBufferNotPowerOfTwo;
@@ -70,8 +109,18 @@ pub const BrokerMetadataFile = struct {
         const ctrl_region = control_buffer_length + trailer;
         const msgs_region = messages_buffer_length + trailer;
 
+        // Compute flow control region sizes.
+        const fc_buf_len: usize = if (fc_options.fc_max_entries > 0)
+            FlowControlRegion.regionSize(fc_options.fc_max_entries)
+        else
+            0;
+        const peer_send_len: usize = if (fc_options.peer_send_max_peers > 0)
+            PeerSendCountersRegion.regionSize(fc_options.peer_send_max_peers)
+        else
+            0;
+
         const total_size = constants.alignUp(
-            constants.metadata_header_length + ctrl_region + msgs_region,
+            constants.metadata_header_length + ctrl_region + msgs_region + fc_buf_len + peer_send_len,
             constants.page_size,
         );
 
@@ -93,11 +142,31 @@ pub const BrokerMetadataFile = struct {
         // Zero-fill.
         @memset(mapped, 0);
 
+        const fc_region_offset = constants.metadata_header_length + ctrl_region + msgs_region;
+        const peer_send_region_offset = fc_region_offset + fc_buf_len;
+
+        // Initialize FC regions if requested.
+        var fc_region: ?FlowControlRegion = null;
+        if (fc_buf_len > 0) {
+            const fc_slice = mapped[fc_region_offset..][0..fc_buf_len];
+            fc_region = FlowControlRegion.initNew(fc_slice, fc_options.fc_max_entries) catch
+                return error.FlowControlInitFailed;
+        }
+
+        var peer_send_counters: ?PeerSendCountersRegion = null;
+        if (peer_send_len > 0) {
+            const peer_slice = mapped[peer_send_region_offset..][0..peer_send_len];
+            peer_send_counters = PeerSendCountersRegion.initNew(peer_slice, fc_options.peer_send_max_peers) catch
+                return error.PeerSendCountersInitFailed;
+        }
+
         var self = BrokerMetadataFile{
             .mapped_bytes = mapped,
             .header = @ptrCast(@alignCast(mapped.ptr)),
             .control_buffer = mapped[constants.metadata_header_length..][0..ctrl_region],
             .send_buffer = mapped[constants.metadata_header_length + ctrl_region ..][0..msgs_region],
+            .fc_region = fc_region,
+            .peer_send_counters = peer_send_counters,
             .fd = fd,
         };
 
@@ -108,6 +177,10 @@ pub const BrokerMetadataFile = struct {
         self.header.node_id = node_id;
         self.header.pid = platform.getPid();
         self.header.start_timestamp_ms = platform.epochMillis();
+
+        // Store FC region sizes in the header (at fixed offsets beyond 32-byte struct).
+        self.storeFcBufferLength(@intCast(fc_buf_len));
+        self.storePeerSendCountersLength(@intCast(peer_send_len));
 
         // Initialize next_service_id to 1 (0 is reserved for broker).
         self.storeNextServiceId(1);
@@ -120,6 +193,7 @@ pub const BrokerMetadataFile = struct {
 
     /// Open an existing broker metadata file (read-write).
     /// Validates that the header fields are internally consistent.
+    /// Detects flow control regions if present (backward compatible with older files).
     pub fn open(
         storage_path: []const u8,
         group: []const u8,
@@ -151,20 +225,48 @@ pub const BrokerMetadataFile = struct {
         const ctrl_region = ctrl_len + trailer;
         const msgs_region = msgs_len + trailer;
 
-        const expected = constants.alignUp(
-            constants.metadata_header_length + ctrl_region + msgs_region,
-            constants.page_size,
-        );
+        const base_size = constants.metadata_header_length + ctrl_region + msgs_region;
+        const expected = constants.alignUp(base_size, constants.page_size);
         if (file_size < expected)
             return error.FileSizeMismatch;
 
-        return BrokerMetadataFile{
+        // Read FC region lengths from header (0 = absent, backward compatible).
+        var self = BrokerMetadataFile{
             .mapped_bytes = mapped,
             .header = header,
             .control_buffer = mapped[constants.metadata_header_length..][0..ctrl_region],
             .send_buffer = mapped[constants.metadata_header_length + ctrl_region ..][0..msgs_region],
             .fd = fd,
         };
+
+        const fc_buf_len: usize = @intCast(self.loadFcBufferLength());
+        const peer_send_len: usize = @intCast(self.loadPeerSendCountersLength());
+
+        const fc_region_offset = base_size;
+        const peer_send_region_offset = fc_region_offset + fc_buf_len;
+
+        // Validate that the file is large enough for FC regions.
+        const total_expected = constants.alignUp(
+            base_size + fc_buf_len + peer_send_len,
+            constants.page_size,
+        );
+        if (file_size < total_expected)
+            return error.FileSizeMismatch;
+
+        // Initialize FC region overlays.
+        if (fc_buf_len > 0) {
+            const fc_slice = mapped[fc_region_offset..][0..fc_buf_len];
+            self.fc_region = FlowControlRegion.initExisting(fc_slice) catch
+                return error.FlowControlInitFailed;
+        }
+
+        if (peer_send_len > 0) {
+            const peer_slice = mapped[peer_send_region_offset..][0..peer_send_len];
+            self.peer_send_counters = PeerSendCountersRegion.initExisting(peer_slice) catch
+                return error.PeerSendCountersInitFailed;
+        }
+
+        return self;
     }
 
     // ── Atomic Accessors ──────────────────────────────────────────────
@@ -202,6 +304,42 @@ pub const BrokerMetadataFile = struct {
         return prev + 1;
     }
 
+    /// Load the flow control buffer region length from the header (0 = absent).
+    pub fn loadFcBufferLength(self: *const BrokerMetadataFile) i32 {
+        const ptr = self.fcBufferLengthPtr();
+        return @atomicLoad(i32, ptr, .acquire);
+    }
+
+    /// Store the flow control buffer region length in the header.
+    pub fn storeFcBufferLength(self: *BrokerMetadataFile, value: i32) void {
+        const ptr = self.fcBufferLengthPtr();
+        @atomicStore(i32, ptr, value, .release);
+    }
+
+    /// Load the peer send counters region length from the header (0 = absent).
+    pub fn loadPeerSendCountersLength(self: *const BrokerMetadataFile) i32 {
+        const ptr = self.peerSendCountersLengthPtr();
+        return @atomicLoad(i32, ptr, .acquire);
+    }
+
+    /// Store the peer send counters region length in the header.
+    pub fn storePeerSendCountersLength(self: *BrokerMetadataFile, value: i32) void {
+        const ptr = self.peerSendCountersLengthPtr();
+        @atomicStore(i32, ptr, value, .release);
+    }
+
+    // ── Flow Control Accessors ───────────────────────────────────────
+
+    /// Returns the flow control region, or null if not present.
+    pub fn getFlowControlRegion(self: *const BrokerMetadataFile) ?FlowControlRegion {
+        return self.fc_region;
+    }
+
+    /// Returns the peer send counters region, or null if not present.
+    pub fn getPeerSendCountersRegion(self: *const BrokerMetadataFile) ?PeerSendCountersRegion {
+        return self.peer_send_counters;
+    }
+
     // ── Buffer Accessors ──────────────────────────────────────────────
 
     /// Returns the byte slice backing the control ring buffer.
@@ -234,6 +372,18 @@ pub const BrokerMetadataFile = struct {
     fn nextServiceIdPtr(self: *const BrokerMetadataFile) *volatile i32 {
         const base: [*]u8 = self.mapped_bytes.ptr;
         const offset = constants.next_service_id_offset_within_header;
+        return @ptrCast(@alignCast(base + offset));
+    }
+
+    fn fcBufferLengthPtr(self: *const BrokerMetadataFile) *volatile i32 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        const offset = constants.fc_buffer_length_offset;
+        return @ptrCast(@alignCast(base + offset));
+    }
+
+    fn peerSendCountersLengthPtr(self: *const BrokerMetadataFile) *volatile i32 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        const offset = constants.peer_send_counters_length_offset;
         return @ptrCast(@alignCast(base + offset));
     }
 
@@ -442,4 +592,98 @@ test "concurrent incrementAndGetNextServiceId from multiple threads" {
     // Initial value was 1, plus 8 * 1000 increments.
     const expected: i32 = 1 + num_threads * increments_per_thread;
     try testing.expectEqual(expected, file.loadNextServiceId());
+}
+
+test "create with flow control regions" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(storage_path);
+    try tmp_dir.dir.makePath("test-group/services");
+
+    var file = try BrokerMetadataFile.createWithFlowControl(
+        storage_path,
+        "test-group",
+        1,
+        4096,
+        4096,
+        .{ .fc_max_entries = 8, .peer_send_max_peers = 4 },
+    );
+    defer file.close();
+
+    // Verify FC region is present.
+    try testing.expect(file.fc_region != null);
+    try testing.expect(file.peer_send_counters != null);
+
+    // Verify header stores the region lengths.
+    const expected_fc_len: i32 = @intCast(FlowControlRegion.regionSize(8));
+    const expected_peer_len: i32 = @intCast(PeerSendCountersRegion.regionSize(4));
+    try testing.expectEqual(expected_fc_len, file.loadFcBufferLength());
+    try testing.expectEqual(expected_peer_len, file.loadPeerSendCountersLength());
+
+    // Use the FC region: allocate a slot.
+    var fc = file.fc_region.?;
+    const slot = fc.allocateSlot(42, 1, 100_000);
+    try testing.expect(slot != null);
+    const entry = fc.getEntry(slot.?).?;
+    try testing.expectEqual(@as(i32, 42), entry.service_id);
+}
+
+test "open reads back flow control regions" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(storage_path);
+    try tmp_dir.dir.makePath("test-group/services");
+
+    // Create with FC.
+    var file1 = try BrokerMetadataFile.createWithFlowControl(
+        storage_path,
+        "test-group",
+        1,
+        4096,
+        4096,
+        .{ .fc_max_entries = 4, .peer_send_max_peers = 2 },
+    );
+
+    // Write data into FC region.
+    var fc1 = file1.fc_region.?;
+    const slot_idx = fc1.allocateSlot(99, 1, 500_000).?;
+    const entry1 = fc1.getEntry(slot_idx).?;
+    entry1.storeRemainingBytes(123_456);
+
+    file1.close();
+
+    // Re-open and verify FC region is detected.
+    var file2 = try BrokerMetadataFile.open(storage_path, "test-group");
+    defer file2.close();
+
+    try testing.expect(file2.fc_region != null);
+    try testing.expect(file2.peer_send_counters != null);
+
+    // Verify data survived.
+    const fc2 = file2.fc_region.?;
+    const entry2 = fc2.getEntry(slot_idx).?;
+    try testing.expectEqual(@as(u32, 123_456), entry2.loadRemainingBytes());
+}
+
+test "open backward compat with no FC regions" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(storage_path);
+    try tmp_dir.dir.makePath("test-group/services");
+
+    // Create without FC (old-style).
+    var file1 = try BrokerMetadataFile.create(storage_path, "test-group", 1, 4096, 4096);
+    file1.close();
+
+    // Open should succeed, FC regions should be null.
+    var file2 = try BrokerMetadataFile.open(storage_path, "test-group");
+    defer file2.close();
+
+    try testing.expect(file2.fc_region == null);
+    try testing.expect(file2.peer_send_counters == null);
+    try testing.expectEqual(@as(i32, 0), file2.loadFcBufferLength());
+    try testing.expectEqual(@as(i32, 0), file2.loadPeerSendCountersLength());
 }

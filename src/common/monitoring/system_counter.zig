@@ -41,8 +41,20 @@ pub const SystemCounter = enum(u8) {
     sender_cycle_time_max = 21,
     receiver_cycle_time_max = 22,
 
+    // ── Flow control counters ───────────────────────────────────
+    fc_updates_sent = 23,
+    fc_updates_received = 24,
+    fc_pressure_events = 25,
+    fc_recovery_events = 26,
+    fc_client_backpressure = 27,
+    fc_client_spin_timeouts = 28,
+    fc_slot_allocations = 29,
+    fc_slot_reclamations = 30,
+    fc_peer_congestion_events = 31,
+    fc_peer_disconnected_sends_avoided = 32,
+
     /// Total number of well-known counters.
-    pub const count: usize = 23;
+    pub const count: usize = 33;
 
     /// Human-readable label for each counter.
     pub fn label(self: SystemCounter) []const u8 {
@@ -70,6 +82,16 @@ pub const SystemCounter = enum(u8) {
             .control_loop_cycle_time_max => "control-loop-cycle-time-max-ns",
             .sender_cycle_time_max => "sender-cycle-time-max-ns",
             .receiver_cycle_time_max => "receiver-cycle-time-max-ns",
+            .fc_updates_sent => "fc-updates-sent",
+            .fc_updates_received => "fc-updates-received",
+            .fc_pressure_events => "fc-pressure-events",
+            .fc_recovery_events => "fc-recovery-events",
+            .fc_client_backpressure => "fc-client-backpressure",
+            .fc_client_spin_timeouts => "fc-client-spin-timeouts",
+            .fc_slot_allocations => "fc-slot-allocations",
+            .fc_slot_reclamations => "fc-slot-reclamations",
+            .fc_peer_congestion_events => "fc-peer-congestion-events",
+            .fc_peer_disconnected_sends_avoided => "fc-peer-disconnected-sends-avoided",
         };
     }
 };

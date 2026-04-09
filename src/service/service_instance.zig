@@ -23,8 +23,26 @@ pub const ServiceInstance = struct {
     /// messages ring buffer.
     ipc_producer: ?*IpcProducer = null,
 
+    // ── Flow Control Fields ──────────────────────────────────────
+
+    /// Index into the flow control counters region.
+    /// -1 = not assigned (local instances use direct ring buffer access).
+    fc_slot_id: i32 = -1,
+
+    /// Generation counter for the assigned FC slot (detect stale references).
+    fc_slot_generation: u16 = 0,
+
+    /// Total capacity of this instance's messages ring buffer (bytes).
+    /// Used to interpret remaining-bytes as a ratio.
+    messages_buffer_capacity: u32 = 0,
+
     /// Returns true if this instance is on the local host.
     pub fn isLocal(self: *const ServiceInstance, local_node_id: i16) bool {
         return self.node_id == local_node_id;
+    }
+
+    /// Returns true if this instance has an assigned FC slot.
+    pub fn hasFcSlot(self: *const ServiceInstance) bool {
+        return self.fc_slot_id >= 0;
     }
 };

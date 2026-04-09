@@ -36,6 +36,10 @@ pub const ServiceInstance = service_instance.ServiceInstance;
 pub const load_balancer = @import("load_balancer.zig");
 pub const ClientLoadBalancer = load_balancer.ClientLoadBalancer;
 
+pub const flow_control_config = @import("flow_control_config.zig");
+pub const FlowControlConfig = flow_control_config.FlowControlConfig;
+pub const BackpressureStrategy = flow_control_config.BackpressureStrategy;
+
 // ── IPC (same-host shared-memory transport) ──────────────────────────
 
 pub const ipc = struct {
@@ -72,6 +76,7 @@ comptime {
     _ = @import("service_instance.zig");
     _ = @import("load_balancer.zig");
     _ = @import("service_client_test.zig");
+    _ = @import("flow_control_config.zig");
 
     // IPC
     _ = @import("ipc/ipc_producer.zig");

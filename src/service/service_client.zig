@@ -13,6 +13,12 @@ const message_header = brz_common.message.message_header;
 const memory = brz_common.memory;
 const constants = brz_common.memory.constants;
 const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
+const FlowControlRegion = memory.FlowControlRegion;
+const FlowControlEntry = memory.FlowControlEntry;
+const PeerSendCountersRegion = memory.PeerSendCountersRegion;
+const fc_config_mod = @import("flow_control_config.zig");
+const FlowControlConfig = fc_config_mod.FlowControlConfig;
+const BackpressureStrategy = fc_config_mod.BackpressureStrategy;
 
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const MessageHeader = message_header.MessageHeader;
@@ -28,6 +34,15 @@ pub const ServiceClient = struct {
     local_node_id: i16,
     local_service_id: i32,
 
+    /// Flow control configuration.
+    fc_config: FlowControlConfig = .{},
+
+    /// Cached pointer to the flow control counters region (null if FC disabled).
+    fc_region: ?FlowControlRegion = null,
+
+    /// Cached pointer to the per-peer send counters region (null if disabled).
+    peer_send_counters: ?PeerSendCountersRegion = null,
+
     const Self = @This();
 
     pub const SendError = error{
@@ -35,6 +50,10 @@ pub const ServiceClient = struct {
         ProducerNotInitialized,
         SendBufferFull,
         NoLeaderAvailable,
+        BackPressure,
+        BackPressureTimeout,
+        PeerCongested,
+        PeerDisconnected,
     } || RingBuffer.WriteError;
 
     pub fn init(
@@ -55,11 +74,40 @@ pub const ServiceClient = struct {
         };
     }
 
+    /// Initialize with flow control configuration.
+    pub fn initWithFlowControl(
+        allocator: std.mem.Allocator,
+        service_name: []const u8,
+        broker_meta: ?*BrokerMetadataFile,
+        local_node_id: i16,
+        local_service_id: i32,
+        fc_config: FlowControlConfig,
+        fc_region: ?FlowControlRegion,
+        peer_send_counters_region: ?PeerSendCountersRegion,
+    ) Self {
+        return .{
+            .service_name = service_name,
+            .instances = .empty,
+            .allocator = allocator,
+            .balancer = .{ .round_robin = .{} },
+            .broker_meta = broker_meta,
+            .local_node_id = local_node_id,
+            .local_service_id = local_service_id,
+            .fc_config = fc_config,
+            .fc_region = fc_region,
+            .peer_send_counters = peer_send_counters_region,
+        };
+    }
+
     /// Send a message to one instance of this service, selected by the
     /// load balancer.
     pub fn send(self: *Self, payload: []const u8) SendError!void {
         const instance = self.balancer.next(self.instances.items) orelse
             return error.NoAvailableInstance;
+
+        if (self.fc_config.enabled) {
+            try self.applyFlowControl(instance, payload.len);
+        }
 
         if (instance.node_id == self.local_node_id) {
             // Same-host direct path.
@@ -81,6 +129,10 @@ pub const ServiceClient = struct {
         const instance = self.findInstance(target_service_id) orelse
             return error.NoAvailableInstance;
 
+        if (self.fc_config.enabled) {
+            try self.applyFlowControl(instance, payload.len);
+        }
+
         if (instance.node_id == self.local_node_id) {
             const producer = instance.ipc_producer orelse
                 return error.ProducerNotInitialized;
@@ -98,6 +150,10 @@ pub const ServiceClient = struct {
     pub fn sendToLeader(self: *Self, payload: []const u8) SendError!void {
         for (self.instances.items) |*inst| {
             if (inst.is_leader) {
+                if (self.fc_config.enabled) {
+                    try self.applyFlowControl(inst, payload.len);
+                }
+
                 if (inst.node_id == self.local_node_id) {
                     const producer = inst.ipc_producer orelse
                         return error.ProducerNotInitialized;
@@ -151,6 +207,146 @@ pub const ServiceClient = struct {
 
     pub fn deinit(self: *Self) void {
         self.instances.deinit(self.allocator);
+    }
+
+    // ── Flow Control API ─────────────────────────────────────────────
+
+    /// Returns the estimated remaining bytes in the target's buffer.
+    /// For local instances: exact (from ring buffer via IpcProducer).
+    /// For remote instances: advisory (from propagated counter in FC region).
+    pub fn remainingBytes(self: *const Self, instance: *const ServiceInstance) usize {
+        if (instance.fc_slot_id < 0) {
+            // Local instance — read ring buffer directly.
+            const producer = instance.ipc_producer orelse return 0;
+            return producer.remainingCapacity();
+        } else {
+            // Remote instance — read from flow control counters region.
+            return self.readFcCounter(instance);
+        }
+    }
+
+    /// Returns the estimated remaining bytes in the broker's send ring buffer.
+    pub fn sendBufferRemaining(self: *const Self) usize {
+        const broker = self.broker_meta orelse return 0;
+        const send_buf = broker.getSendBuffer();
+        var send_rb = RingBuffer.init(
+            @alignCast(send_buf),
+            false,
+            null,
+            null,
+        ) catch return 0;
+        return send_rb.getCapacity() - send_rb.size();
+    }
+
+    /// Returns the total bytes pending in the outbound pipeline for a specific peer.
+    /// Returns null if per-peer counters are disabled or the peer is not found.
+    pub fn peerSendPending(self: *const Self, node_id: i16) ?u64 {
+        const region = self.peer_send_counters orelse return null;
+        const entry = region.findPeer(node_id) orelse return null;
+        const ring_pending = @atomicLoad(u64, &entry.ring_bytes_pending, .acquire);
+        const queue_pending = @atomicLoad(u64, &entry.queue_bytes_pending, .acquire);
+        return ring_pending + queue_pending;
+    }
+
+    /// Returns true if the peer broker is currently connected.
+    /// Returns null if per-peer counters are disabled or the peer is not found.
+    pub fn isPeerConnected(self: *const Self, node_id: i16) ?bool {
+        const region = self.peer_send_counters orelse return null;
+        const entry = region.findPeer(node_id) orelse return null;
+        return @atomicLoad(u8, &entry.connection_state, .acquire) == 1;
+    }
+
+    // ── Internal: Flow Control ───────────────────────────────────────
+
+    /// Pre-send flow control check for all five paths.
+    fn applyFlowControl(self: *Self, instance: *const ServiceInstance, payload_len: usize) SendError!void {
+        // Path 1/3: Target service remaining capacity.
+        const remaining = self.remainingBytes(instance);
+        const required = ringCost(payload_len);
+        const threshold = @max(required, self.fc_config.min_remaining_bytes);
+
+        if (remaining < threshold) {
+            try self.applyStrategy(remaining, required);
+        }
+
+        // Paths 2/4/5: Only apply to remote instances.
+        if (instance.node_id != self.local_node_id) {
+            const send_cost = ringCost(MessageHeader.encoded_length + payload_len);
+
+            // Path 5: Peer connectivity (cheapest — single byte read).
+            if (self.fc_config.check_peer_connectivity) {
+                if (self.isPeerConnected(instance.node_id)) |connected| {
+                    if (!connected) return error.PeerDisconnected;
+                }
+            }
+
+            // Path 4: Per-peer send congestion (two u64 reads).
+            if (self.fc_config.per_peer_pending_threshold > 0) {
+                if (self.peerSendPending(instance.node_id)) |pending| {
+                    if (pending + send_cost > self.fc_config.per_peer_pending_threshold) {
+                        return error.PeerCongested;
+                    }
+                }
+            }
+
+            // Path 2: Global send ring buffer remaining.
+            const send_remaining = self.sendBufferRemaining();
+            if (send_remaining < send_cost) {
+                try self.applyStrategy(send_remaining, send_cost);
+            }
+        }
+    }
+
+    /// Apply the configured backpressure strategy.
+    fn applyStrategy(self: *Self, remaining: usize, required: usize) SendError!void {
+        switch (self.fc_config.strategy) {
+            .drop => return error.BackPressure,
+            .spin => try self.spinUntilCapacity(remaining, required),
+        }
+    }
+
+    /// Spin-wait until capacity is available or timeout expires.
+    fn spinUntilCapacity(self: *Self, initial_remaining: usize, required: usize) SendError!void {
+        _ = initial_remaining;
+        const timeout_ns: u64 = @as(u64, self.fc_config.spin_timeout_ms) * 1_000_000;
+        const start = std.time.Instant.now() catch return error.BackPressureTimeout;
+        const deadline_ns = timeout_ns;
+
+        while (true) {
+            // Re-read remaining capacity (may have changed).
+            const send_remaining = self.sendBufferRemaining();
+            if (send_remaining >= required) return;
+
+            const elapsed = (std.time.Instant.now() catch return error.BackPressureTimeout).since(start);
+            if (elapsed >= deadline_ns) {
+                return error.BackPressureTimeout;
+            }
+
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    /// Read the FC counter for a remote instance, validating generation.
+    fn readFcCounter(self: *const Self, instance: *const ServiceInstance) usize {
+        const region = self.fc_region orelse return 0;
+        const slot_id: u32 = if (instance.fc_slot_id >= 0) @intCast(instance.fc_slot_id) else return 0;
+        const entry = region.getEntry(slot_id) orelse return 0;
+
+        // Validate generation atomically to detect stale slot references.
+        if (entry.loadGeneration() != instance.fc_slot_generation) return 0;
+        if (entry.loadState() != .allocated) return 0;
+
+        return entry.loadRemainingBytes();
+    }
+
+    /// Calculate the ring buffer cost of a message (record header + alignment).
+    fn ringCost(payload_len: usize) usize {
+        // Ring buffer record: 8-byte header + payload, aligned to 8 bytes.
+        return alignUp(8 + payload_len, 8);
+    }
+
+    fn alignUp(value: usize, alignment: usize) usize {
+        return (value + alignment - 1) & ~(alignment - 1);
     }
 
     // ── Internal: Cross-Host Send ─────────────────────────────────────

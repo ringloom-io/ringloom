@@ -16,6 +16,18 @@ pub const ServiceMetadataHeader = service_metadata.ServiceMetadataHeader;
 pub const BlockingTrailer = service_metadata.BlockingTrailer;
 pub const BlockingTrailerSlot = service_metadata.BlockingTrailerSlot;
 
+pub const flow_control = @import("memory/flow_control.zig");
+pub const FlowControlRegion = flow_control.FlowControlRegion;
+pub const FlowControlEntry = flow_control.FlowControlEntry;
+pub const FlowControlHeader = flow_control.FlowControlHeader;
+pub const SlotState = flow_control.SlotState;
+pub const PressureState = flow_control.PressureState;
+
+pub const peer_send_counters = @import("memory/peer_send_counters.zig");
+pub const PeerSendCountersRegion = peer_send_counters.PeerSendCountersRegion;
+pub const PeerEntry = peer_send_counters.PeerEntry;
+pub const PeerSendCountersHeader = peer_send_counters.PeerSendCountersHeader;
+
 pub const service_scanner = @import("memory/service_scanner.zig");
 pub const ServiceScanner = service_scanner.ServiceScanner;
 pub const ServiceInstance = service_scanner.ServiceInstance;
@@ -32,6 +44,8 @@ comptime {
     _ = @import("memory/constants.zig");
     _ = @import("memory/broker_metadata.zig");
     _ = @import("memory/service_metadata.zig");
+    _ = @import("memory/flow_control.zig");
+    _ = @import("memory/peer_send_counters.zig");
     _ = @import("memory/service_scanner.zig");
     _ = @import("memory/metadata_descriptor_provider.zig");
     _ = @import("memory/buffers_provider.zig");
