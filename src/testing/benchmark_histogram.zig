@@ -118,12 +118,13 @@ pub const Histogram = struct {
         self.sorted = true;
     }
 
-    /// Convenience: returns (p50, p95, p99, max) in a single call.
-    pub fn summaryPercentiles(self: *Histogram) struct { p50: u64, p95: u64, p99: u64, max_val: u64 } {
+    /// Convenience: returns (p50, p95, p99, p99_9, max) in a single call.
+    pub fn summaryPercentiles(self: *Histogram) struct { p50: u64, p95: u64, p99: u64, p99_9: u64, max_val: u64 } {
         return .{
             .p50 = self.percentile(50.0),
             .p95 = self.percentile(95.0),
             .p99 = self.percentile(99.0),
+            .p99_9 = self.percentile(99.9),
             .max_val = self.max(),
         };
     }
@@ -278,7 +279,7 @@ test "summaryPercentiles returns consistent snapshot" {
     defer h.deinit();
 
     var i: u64 = 1;
-    while (i <= 200) : (i += 1) {
+    while (i <= 1000) : (i += 1) {
         try h.record(i);
     }
 
@@ -286,10 +287,11 @@ test "summaryPercentiles returns consistent snapshot" {
     const s = h.summaryPercentiles();
 
     // Then
-    try std.testing.expectEqual(@as(u64, 100), s.p50);
-    try std.testing.expectEqual(@as(u64, 190), s.p95);
-    try std.testing.expectEqual(@as(u64, 198), s.p99);
-    try std.testing.expectEqual(@as(u64, 200), s.max_val);
+    try std.testing.expectEqual(@as(u64, 500), s.p50);
+    try std.testing.expectEqual(@as(u64, 950), s.p95);
+    try std.testing.expectEqual(@as(u64, 990), s.p99);
+    try std.testing.expectEqual(@as(u64, 1000), s.p99_9);
+    try std.testing.expectEqual(@as(u64, 1000), s.max_val);
 }
 
 test "percentile clamps out-of-range inputs" {

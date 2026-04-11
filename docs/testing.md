@@ -126,12 +126,57 @@ under realistic topologies (single-broker and two-broker clusters).
 **When to run:** Manually before/after performance-sensitive changes, or on a
 scheduled nightly basis. These are the slowest tests.
 
+### Option A: Automated harness (zig build)
+
 ```bash
 zig build perf
 ```
 
 > Performance benchmarks are compiled with `ReleaseFast` optimization. They are
-> **never** included in the default `test` step.
+> **never** included in the default `test` step. Note: the zig test runner
+> suppresses stdout for passing tests, so result JSON files are not easily
+> inspectable. Use the manual script (Option B) to capture results.
+
+### Option B: Manual benchmark script
+
+The `scripts/run-benchmarks.sh` script builds binaries and orchestrates brokers
+and services directly, writing JSON result files to an output directory.
+
+```bash
+# Build binaries first
+zig build install && zig build test-bins
+
+# Run all benchmarks (local + cross-broker)
+./scripts/run-benchmarks.sh
+
+# Run only local (single-broker) benchmarks
+./scripts/run-benchmarks.sh --local-only
+
+# Run only cross-broker benchmarks
+./scripts/run-benchmarks.sh --remote-only
+
+# Custom output directory
+./scripts/run-benchmarks.sh --output-dir ./my-results
+```
+
+Results are written to `/tmp/brz-bench-results/` by default. Each test produces
+two JSON files:
+
+- `local-latency-ping-<size>.json` — send-side metrics (throughput, send latency)
+- `local-latency-echo-<size>.json` — receiver-side metrics (end-to-end one-way latency)
+
+The script tests message sizes: 32, 128, 512, 1024, and 4096 bytes.
+
+### Interpreting results
+
+- **End-to-end latency** (echo JSON): One-way latency from ping to echo,
+  measured using monotonic timestamps embedded in the message payload.
+  This is the primary latency metric.
+- **Send latency** (ping JSON): Time to write a message into the local
+  broker's ring buffer. Lower bound on end-to-end latency.
+- **Spinning backpressure**: With `--spin-timeout-ms`, the sender retries
+  on `BufferFull` instead of counting a failure. The timestamp is
+  re-embedded on each retry so latency excludes spin-wait time.
 
 ### Benchmark categories (30 tests in 6 files)
 
@@ -139,8 +184,8 @@ zig build perf
 
 | Benchmark | Topology | Message sizes |
 |-----------|----------|---------------|
-| Local round-trip latency | 1 broker + ping + echo (same host) | 32, 128, 512, 1024, 4096 B |
-| Cross-broker round-trip latency | 2 brokers + ping on A + echo on B | 32, 128, 512, 1024, 4096 B |
+| Local one-way latency | 1 broker + ping + echo (same host) | 32, 128, 512, 1024, 4096 B |
+| Cross-broker send latency | 2 brokers + ping on A + echo on B | 32, 128, 512, 1024, 4096 B |
 
 #### Throughput benchmarks
 
@@ -175,21 +220,14 @@ Each benchmark writes a JSON result file:
 
 ```json
 {
-    "suite": "brz-perf",
-    "scenario": "local-roundtrip-latency",
-    "build_mode": "ReleaseFast",
-    "message_size_bytes": 128,
-    "warmup_messages": 10000,
-    "measured_messages": 100000,
-    "throughput_msgs_per_sec": 850000,
-    "throughput_bytes_per_sec": 108800000,
-    "latency_p50_ns": 4200,
-    "latency_p95_ns": 7100,
-    "latency_p99_ns": 9800,
-    "latency_max_ns": 45100,
-    "messages_sent": 100000,
-    "messages_received": 100000,
-    "send_failures": 0
+    "service_name": "echo",
+    "total_received": 110000,
+    "total_measured": 100000,
+    "latency_p50_ns": 351,
+    "latency_p95_ns": 481,
+    "latency_p99_ns": 651,
+    "latency_p99_9_ns": 24766,
+    "latency_max_ns": 68046
 }
 ```
 
@@ -264,6 +302,8 @@ On failure, upload:
 ### Source layout
 
 ```text
+scripts/
+└── run-benchmarks.sh          # Manual benchmark orchestration script
 src/
 ├── bin/                    # Executable entry points
 │   ├── brz_broker_main.zig
@@ -322,17 +362,10 @@ src/
 
 ## 8. Current Status
 
-As of the initial baseline, the broker runtime is not yet fully wired — the
-broker process exits immediately on startup. This means:
-
-- **Unit tests:** All **480 tests pass** ✅
-- **E2E tests:** Compile and run, but **30/31 fail** at runtime (broker process
-  exits before readiness). 1 test passes (compilation check). ⚠️
-- **Perf benchmarks:** Compile and run, but **29/30 fail** at runtime (same
-  root cause). 1 test passes (compilation check). ⚠️
-
-Once the broker runtime startup is completed (see
-`docs/impl/14-broker-binary-and-runtime-wiring.md`), these tests will begin
-passing and producing real benchmark results.
+- **Unit tests:** All **482 tests pass** ✅
+- **E2E tests:** All pass ✅
+- **Perf benchmarks:** All pass (exit code 0) ✅
+- **Manual benchmarks:** `scripts/run-benchmarks.sh` captures JSON results
+  for local and cross-broker scenarios.
 
 See `docs/benchmark-results.md` for the current benchmark results baseline.

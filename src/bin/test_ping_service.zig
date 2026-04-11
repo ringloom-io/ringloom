@@ -100,6 +100,7 @@ pub fn main() !void {
     const message_size = parseIntArg(usize, args, "--message-size", 64);
     const warmup_count = parseIntArg(u64, args, "--warmup-count", 10);
     const result_file = parseOptionalStringArg(args, "--result-file");
+    const spin_timeout_ms = parseIntArg(u64, args, "--spin-timeout-ms", 0);
 
     installSignalHandler();
 
@@ -146,6 +147,11 @@ pub fn main() !void {
     var warmup_failed: u64 = 0;
 
     for (0..warmup_count) |_| {
+        // Embed monotonic timestamp + warmup phase flag.
+        if (payload.len >= 9) {
+            std.mem.writeInt(u64, payload[0..8], @intCast(Clock.monotonicNanos()), .little);
+            payload[8] = 0; // warmup phase
+        }
         client.send(payload) catch {
             warmup_failed += 1;
             continue;
@@ -178,11 +184,56 @@ pub fn main() !void {
     const start_mono = std.time.nanoTimestamp();
 
     for (0..message_count) |_| {
+        // Embed monotonic timestamp + measured phase flag.
+        if (payload.len >= 9) {
+            std.mem.writeInt(u64, payload[0..8], @intCast(Clock.monotonicNanos()), .little);
+            payload[8] = 1; // measured phase
+        }
+
         const send_start = std.time.nanoTimestamp();
+        var succeeded = false;
+
         client.send(payload) catch {
-            failed += 1;
+            // Spinning backpressure: retry for up to spin_timeout_ms.
+            if (spin_timeout_ms > 0) {
+                const deadline_ns: u64 = spin_timeout_ms * std.time.ns_per_ms;
+                const spin_start = std.time.Instant.now() catch {
+                    failed += 1;
+                    continue;
+                };
+
+                while (true) {
+                    // Re-embed timestamp before each retry so echo measures
+                    // pipeline latency, not including spin wait.
+                    if (payload.len >= 9) {
+                        std.mem.writeInt(u64, payload[0..8], @intCast(Clock.monotonicNanos()), .little);
+                    }
+
+                    client.send(payload) catch {
+                        const elapsed = (std.time.Instant.now() catch break).since(spin_start);
+                        if (elapsed >= deadline_ns) break;
+                        std.atomic.spinLoopHint();
+                        continue;
+                    };
+                    succeeded = true;
+                    break;
+                }
+            }
+
+            if (!succeeded) {
+                failed += 1;
+                continue;
+            }
+
+            // Fall through: retry succeeded.
+            const send_end = std.time.nanoTimestamp();
+            const delta: u64 = @intCast(send_end - send_start);
+            histogram.record(delta) catch {};
+            sent += 1;
             continue;
         };
+
+        // First attempt succeeded.
         const send_end = std.time.nanoTimestamp();
         const delta: u64 = @intCast(send_end - send_start);
         histogram.record(delta) catch {};
@@ -216,7 +267,7 @@ pub fn main() !void {
 
     try stdout.print("ping: sent={d}, failed={d}, elapsed_ms={d}\n", .{ sent, failed, elapsed_ms });
     try stdout.print("ping: throughput={d} msgs/s, {d} bytes/s\n", .{ throughput_msgs_per_sec, throughput_bytes_per_sec });
-    try stdout.print("ping: send_latency p50={d}ns p95={d}ns p99={d}ns max={d}ns\n", .{ latency.p50, latency.p95, latency.p99, latency.max_val });
+    try stdout.print("ping: send_latency p50={d}ns p95={d}ns p99={d}ns p99.9={d}ns max={d}ns\n", .{ latency.p50, latency.p95, latency.p99, latency.p99_9, latency.max_val });
     try stdout.print("ping: message_size={d}, target={s}\n", .{ message_size, target_service });
     try stdout.flush();
 
@@ -240,6 +291,7 @@ pub fn main() !void {
             latency.p50,
             latency.p95,
             latency.p99,
+            latency.p99_9,
             latency.max_val,
         ) catch |err| {
             try stderr.print("ping: failed to write result file '{s}': {}\n", .{ path, err });
@@ -268,6 +320,7 @@ fn writeResultsJson(
     latency_p50_ns: u64,
     latency_p95_ns: u64,
     latency_p99_ns: u64,
+    latency_p99_9_ns: u64,
     latency_max_ns: u64,
 ) !void {
     const file = try std.fs.cwd().createFile(path, .{});
@@ -293,6 +346,7 @@ fn writeResultsJson(
         \\  "send_latency_p50_ns": {d},
         \\  "send_latency_p95_ns": {d},
         \\  "send_latency_p99_ns": {d},
+        \\  "send_latency_p99_9_ns": {d},
         \\  "send_latency_max_ns": {d}
         \\}}
         \\
@@ -312,6 +366,7 @@ fn writeResultsJson(
         latency_p50_ns,
         latency_p95_ns,
         latency_p99_ns,
+        latency_p99_9_ns,
         latency_max_ns,
     });
     try writer.flush();

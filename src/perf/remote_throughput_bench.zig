@@ -83,17 +83,19 @@ fn runRemoteThroughputScenario(
     );
     defer allocator.free(result_path);
 
-    // When — launch ping service on broker A with high message count.
+    // When — launch ping service on broker A with high message count and
+    //        spinning backpressure to reduce send failures.
     const ping = try harness.startService(.{
         .executable_name = "brz-test-ping-service",
         .service_name = "ping",
         .broker_node_id = 1,
         .extra_args = &.{
-            "--target-service",  "echo",
-            "--message-count",   "200000",
-            "--message-size",    size_str,
-            "--warmup-count",    "20000",
-            "--result-file",     result_path,
+            "--target-service",   "echo",
+            "--message-count",    "200000",
+            "--message-size",     size_str,
+            "--warmup-count",     "20000",
+            "--result-file",      result_path,
+            "--spin-timeout-ms",  "100",
         },
     });
     try harness.waitForServiceReady(ping, 5000);

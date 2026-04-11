@@ -66,12 +66,19 @@ fn runRemoteLatencyBench(
     // Allow the cluster to discover peers and stabilise.
     std.Thread.sleep(cluster_settle_ns);
 
-    // Given — echo service registered on broker B.
+    const echo_result_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/remote-latency-echo-{s}.json",
+        .{ harness.env.results_path, tag },
+    );
+    defer allocator.free(echo_result_path);
+
+    // Given — echo service registered on broker B with latency measurement.
     const echo = try harness.startService(.{
         .executable_name = "brz-test-echo-service",
         .service_name = "echo",
         .broker_node_id = broker_b_node_id,
-        .extra_args = &.{"--quiet"},
+        .extra_args = &.{ "--quiet", "--result-file", echo_result_path },
     });
     try harness.waitForServiceReady(echo, service_ready_timeout_ms);
 
@@ -82,17 +89,19 @@ fn runRemoteLatencyBench(
     );
     defer allocator.free(result_path);
 
-    // When — ping service on broker A sends round-trip messages across brokers.
+    // When — ping service on broker A sends messages across brokers with
+    //        spinning backpressure to reduce send failures.
     const ping = try harness.startService(.{
         .executable_name = "brz-test-ping-service",
         .service_name = "ping",
         .broker_node_id = broker_a_node_id,
         .extra_args = &.{
-            "--target-service",  "echo",
-            "--message-count",   message_count,
-            "--message-size",    size_str,
-            "--warmup-count",    warmup_count,
-            "--result-file",     result_path,
+            "--target-service",   "echo",
+            "--message-count",    message_count,
+            "--message-size",     size_str,
+            "--warmup-count",     warmup_count,
+            "--result-file",      result_path,
+            "--spin-timeout-ms",  "100",
         },
     });
     try harness.waitForServiceReady(ping, service_ready_timeout_ms);
@@ -100,6 +109,9 @@ fn runRemoteLatencyBench(
     // Then — ping completes successfully.
     const exit_code = try ping.waitForExit(ping_completion_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), exit_code);
+
+    // Allow in-flight messages to drain through the TCP pipeline.
+    std.Thread.sleep(2 * std.time.ns_per_s);
 
     // Cleanup — stop services first, then brokers in reverse order.
     try harness.stopProcess(echo);
@@ -117,68 +129,10 @@ test "cross-broker round-trip latency - 32B" {
 }
 
 test "cross-broker round-trip latency - 128B" {
-    const allocator = std.testing.allocator;
-    var harness = try TestHarness.init(allocator, "perf-remote-latency-128");
-    defer harness.deinit();
-    errdefer harness.markFailed();
-
-    // Given — two brokers forming a cluster on loopback.
-    const broker_a = try harness.startBroker(.{
-        .node_id = broker_a_node_id,
-        .port = broker_a_port,
-        .peers = &.{.{ .node_id = broker_b_node_id, .host = "127.0.0.1", .port = broker_b_port }},
-    });
-    try harness.waitForBrokerReady(broker_a, broker_ready_timeout_ms);
-
-    const broker_b = try harness.startBroker(.{
-        .node_id = broker_b_node_id,
-        .port = broker_b_port,
-        .peers = &.{.{ .node_id = broker_a_node_id, .host = "127.0.0.1", .port = broker_a_port }},
-    });
-    try harness.waitForBrokerReady(broker_b, broker_ready_timeout_ms);
-
-    // Allow the cluster to discover peers and stabilise.
-    std.Thread.sleep(cluster_settle_ns);
-
-    // Given — echo service registered on broker B.
-    const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
-        .service_name = "echo",
-        .broker_node_id = broker_b_node_id,
-        .extra_args = &.{"--quiet"},
-    });
-    try harness.waitForServiceReady(echo, service_ready_timeout_ms);
-
-    const result_path = try std.fmt.allocPrint(
-        allocator,
-        "{s}/remote-latency-128.json",
-        .{harness.env.results_path},
-    );
-    defer allocator.free(result_path);
-
-    // When — ping service on broker A sends round-trip messages to echo on broker B.
-    const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
-        .service_name = "ping",
-        .broker_node_id = broker_a_node_id,
-        .extra_args = &.{
-            "--target-service",  "echo",
-            "--message-count",   message_count,
-            "--message-size",    "128",
-            "--warmup-count",    warmup_count,
-            "--result-file",     result_path,
-        },
-    });
-    try harness.waitForServiceReady(ping, service_ready_timeout_ms);
-
-    // Then — ping completes with exit code 0.
-    const exit_code = try ping.waitForExit(ping_completion_timeout_ms);
-    try std.testing.expectEqual(@as(u32, 0), exit_code);
-
-    // Cleanup — services first, then brokers in reverse start order.
-    try harness.stopProcess(echo);
-    try harness.stopProcess(broker_b);
-    try harness.stopProcess(broker_a);
+    // Given — two brokers on loopback, echo on B, ping on A (128-byte messages).
+    // When  — ping sends 100 000 messages across brokers with spinning backpressure.
+    // Then  — ping exits successfully; echo writes one-way latency results.
+    try runRemoteLatencyBench(std.testing.allocator, "128", "128");
 }
 
 test "cross-broker round-trip latency - 512B" {

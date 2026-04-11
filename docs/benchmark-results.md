@@ -3,7 +3,8 @@
 Tracked performance benchmark results for regression detection and improvement
 comparison. Update this file after each significant performance-related change.
 
-> **How to run:** `zig build perf` (see `docs/testing.md` for full instructions)
+> **How to run:** `scripts/run-benchmarks.sh` or `zig build perf`
+> (see `docs/testing.md` for full instructions)
 
 ---
 
@@ -13,8 +14,9 @@ comparison. Update this file after each significant performance-related change.
 **Zig version:** 0.15.2
 **Build mode:** ReleaseFast
 **OS:** Linux x86_64
-**Status:** Local IPC and cross-broker TCP transport fully operational.
-Per-message send-latency histograms instrumented in the ping service.
+**Status:** Local IPC fully operational with end-to-end latency measurement.
+Cross-broker TCP control plane operational; data-plane forwarding pending.
+Spinning backpressure eliminates send failures on the local path.
 
 ---
 
@@ -22,15 +24,22 @@ Per-message send-latency histograms instrumented in the ping service.
 
 Topology: 1 broker + ping service + echo service
 
-| Message size | Warmup |  Measured |   msgs/sec |    MB/sec | p50 (ns) | p95 (ns) | p99 (ns) | max (ns) |
-|-------------:|-------:|----------:|-----------:|----------:|---------:|---------:|---------:|---------:|
-| 32 B         | 50,000 |  500,000  | 11,180,679 |    341.1  |       70 |       81 |      100 |    6,532 |
-| 128 B        | 50,000 |  500,000  | 10,669,853 |  1,302.5  |       70 |       90 |      140 |    5,620 |
-| 512 B        | 50,000 |  500,000  |  9,570,660 |  4,673.2  |       80 |      121 |      170 |   10,459 |
-| 1,024 B      | 50,000 |  500,000  |  6,764,160 |  6,605.6  |      120 |      210 |      250 |   20,228 |
-| 4,096 B      | 50,000 |  499,911  |  6,931,078 | 27,074.5  |      100 |      321 |      370 |    9,497 |
+End-to-end one-way latency measured at the echo (receiver) service. The ping
+service embeds a monotonic timestamp in each message payload; the echo service
+reads it on receipt and records the difference. This measures the full path:
+`ping → ring buffer → broker → ring buffer → echo`.
 
-> 4,096 B: 89 send failures (ring buffer full at 4 MB capacity).
+| Message size | Warmup |  Measured | Sent | Failed | p50 (ns) | p95 (ns) | p99 (ns) | p99.9 (ns) | max (ns) |
+|-------------:|-------:|----------:|-----:|-------:|---------:|---------:|---------:|-----------:|---------:|
+| 32 B         | 10,000 |  100,000  | 100K |      0 |      340 |      421 |      581 |     59,651 |   85,920 |
+| 128 B        | 10,000 |  100,000  | 100K |      0 |      351 |      481 |      651 |     24,766 |   68,046 |
+| 512 B        | 10,000 |  100,000  | 100K |      0 |      401 |      451 |      520 |      3,377 |   35,316 |
+| 1,024 B      | 10,000 |  100,000  | 100K |      0 |      451 |      541 |    1,022 |     23,213 |   41,076 |
+| 4,096 B      |  5,000 |   50,000  |  50K |      0 |      671 |    1,243 |    1,353 |      9,428 |   19,697 |
+
+> Spinning backpressure (100 ms timeout) ensures 0 send failures. The sender
+> re-embeds the timestamp on each retry so latency excludes spin-wait time.
+> p99.9 tail latency reflects occasional kernel scheduling jitter.
 
 ## Local IPC Throughput (single broker, same host)
 
@@ -38,47 +47,55 @@ Topology: 1 broker + ping service + echo service
 
 | Message size | Warmup |  Measured |   msgs/sec |    MB/sec |
 |-------------:|-------:|----------:|-----------:|----------:|
-| 32 B         | 50,000 |  500,000  | 11,180,679 |    341.1  |
-| 128 B        | 50,000 |  500,000  | 10,669,853 |  1,302.5  |
-| 512 B        | 50,000 |  500,000  |  9,570,660 |  4,673.2  |
-| 1,024 B      | 50,000 |  500,000  |  6,764,160 |  6,605.6  |
-| 4,096 B      | 50,000 |  499,911  |  6,931,078 | 27,074.5  |
+| 32 B         | 10,000 |  100,000  |  2,308,935 |     70.5  |
+| 128 B        | 10,000 |  100,000  |  2,157,776 |    263.4  |
+| 512 B        | 10,000 |  100,000  |  2,152,111 |  1,050.8  |
+| 1,024 B      | 10,000 |  100,000  |  1,898,073 |  1,853.6  |
+| 4,096 B      |  5,000 |   50,000  |  1,385,195 |  5,411.7  |
 
 > Throughput and latency runs are unified — the same run captures both.
+> Throughput is lower than prior baselines because spinning backpressure
+> paces the sender to match the broker's consumer rate (0 failures).
 
-## Cross-Broker Latency (two brokers on loopback)
+## Cross-Broker Send Latency (two brokers on loopback)
 
 Topology: broker A (node 1) ↔ broker B (node 2), ping on A, echo on B
 
-| Message size | Warmup |    Sent |  Failed | p50 (ns) | p95 (ns) | p99 (ns) |  max (ns) |
-|-------------:|-------:|--------:|--------:|---------:|---------:|---------:|----------:|
-| 32 B         | 20,000 |  72,831 | 127,169 |       30 |       40 |       50 |    14,807 |
-| 128 B        | 20,000 |  32,037 | 167,963 |       30 |       41 |       60 |    29,474 |
-| 512 B        | 20,000 |  12,062 | 187,938 |       31 |       41 |       60 |       290 |
-| 1,024 B      | 20,000 |   7,939 | 192,061 |       31 |       50 |       91 |       811 |
-| 4,096 B      | 20,000 |   3,889 | 196,111 |       70 |      200 |      320 |     5,821 |
+Send-side latency: time for ping to write a message into the local broker's
+ring buffer. With spinning backpressure, the sender retries on `BufferFull`
+for up to 100 ms, eliminating send failures.
 
-> Latency measures time to write into the send ring buffer (not end-to-end TCP
-> round-trip). High failure counts reflect ring-buffer backpressure: the sender
-> event loop flushes to TCP slower than the producer writes, so the buffer fills
-> and subsequent sends fail with `BufferFull`.
+| Message size | Warmup |    Sent | Failed |   msgs/sec | p50 (ns) | p95 (ns) | p99 (ns) | p99.9 (ns) |  max (ns) |
+|-------------:|-------:|--------:|-------:|-----------:|---------:|---------:|---------:|-----------:|----------:|
+| 32 B         | 10,000 | 100,000 |      0 |  1,021,586 |      280 |      340 |   41,978 |     48,220 |   125,402 |
+| 128 B        | 10,000 | 100,000 |      0 |    857,059 |      310 |      401 |   46,326 |     50,984 |    63,568 |
+| 512 B        | 10,000 | 100,000 |      0 |    664,526 |      281 |      380 |   63,458 |     79,237 |   110,535 |
+| 1,024 B      | 10,000 | 100,000 |      0 |    707,779 |      300 |      400 |   59,030 |     66,654 |    81,000 |
+| 4,096 B      | 10,000 | 100,000 |      0 |    543,779 |      340 |      410 |   82,743 |     91,830 |   106,037 |
+
+> **Known limitation:** The cross-broker data-plane (TCP message forwarding)
+> does not yet deliver messages to the echo service on the remote broker.
+> The control plane (peer discovery, service advertisement) works correctly.
+> The latency numbers above reflect send-side ring buffer writes only. The
+> high p99 (40–80 µs) is caused by spinning retries when the ring buffer is
+> full and the broker's TCP sender is draining it.
 
 ## Cross-Broker Throughput (two brokers on loopback)
 
 Topology: broker A (node 1) ↔ broker B (node 2), ping on A, echo on B
 
-| Message size | Warmup |    Sent |  Failed |   msgs/sec |    MB/sec |
-|-------------:|-------:|--------:|--------:|-----------:|----------:|
-| 32 B         | 20,000 |  72,831 | 127,169 | 10,891,431 |    332.3  |
-| 128 B        | 20,000 |  32,037 | 167,963 |  5,652,258 |    690.0  |
-| 512 B        | 20,000 |  12,062 | 187,938 |  2,734,527 |  1,335.2  |
-| 1,024 B      | 20,000 |   7,939 | 192,061 |  1,841,995 |  1,798.8  |
-| 4,096 B      | 20,000 |   3,889 | 196,111 |    858,688 |  3,354.3  |
+| Message size | Warmup |    Sent | Failed |   msgs/sec |    MB/sec |
+|-------------:|-------:|--------:|-------:|-----------:|----------:|
+| 32 B         | 10,000 | 100,000 |      0 |  1,021,586 |     31.2  |
+| 128 B        | 10,000 | 100,000 |      0 |    857,059 |    104.6  |
+| 512 B        | 10,000 | 100,000 |      0 |    664,526 |    324.5  |
+| 1,024 B      | 10,000 | 100,000 |      0 |    707,779 |    691.2  |
+| 4,096 B      | 10,000 | 100,000 |      0 |    543,779 |  2,124.1  |
 
-> Throughput is the peak burst rate of successful sends. The high failure
-> counts are expected: the producer saturates the ring buffer far faster than
-> TCP can drain it. In a real deployment, application-level flow control
-> (retry loops, rate limiting) would smooth the effective throughput.
+> Throughput reflects the sustained send rate with spinning backpressure.
+> All 100K messages are accepted into the local ring buffer (0 failures),
+> but end-to-end delivery to the remote echo service is pending data-plane
+> implementation.
 
 ## Backpressure Onset (escalating load)
 
@@ -157,6 +174,7 @@ Topology: 1 broker + slow consumer (configurable delay) + ping producer
 | 2026-04-11 | Initial baseline created | No results yet — broker runtime pending | — |
 | 2025-07-08 | Local IPC path fixed; first real benchmark results | Local: 5.8M msgs/s (32B), 9.3 GB/s (4096B) | — |
 | 2025-07-10 | Cross-broker TCP transport + service discovery + per-message latency | Local: 11.2M msgs/s (32B); Remote: 10.9M burst msgs/s (32B); latency p50=70ns local, 30ns remote | — |
+| 2025-07-10 | End-to-end latency at echo side, spinning backpressure, p99.9 | Local e2e p50=340ns (32B); 0 send failures; cross-broker data-plane pending | — |
 
 <!-- Template for adding new entries:
 | YYYY-MM-DD | Description of change | e.g. "p99 latency -15%" | abc1234 |

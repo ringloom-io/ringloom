@@ -1,11 +1,15 @@
-//! Local Round-Trip Latency Benchmark
+//! Local End-to-End Latency Benchmark
 //!
-//! Measures round-trip latency for messages routed through a single local broker.
+//! Measures one-way latency for messages routed through a single local broker,
+//! from the moment the sender embeds a monotonic timestamp to the moment the
+//! echo service receives and records the message.
+//!
 //! Topology: 1 broker + ping service + echo service on the same host.
 //!
 //! Each test varies the message size while keeping the topology fixed.
-//! The ping service sends a configurable number of messages (with warmup),
-//! records per-message round-trip times, and writes structured JSON results.
+//! The ping service embeds a monotonic timestamp and phase flag in each
+//! message payload; the echo service extracts the timestamp on receipt and
+//! records the one-way latency in a histogram.
 
 const std = @import("std");
 const testing_mod = @import("brz_testing");
@@ -42,10 +46,18 @@ fn runLocalLatencyBench(
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
 
+    const echo_result_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/local-latency-echo-{s}B.json",
+        .{ harness.env.results_path, cfg.label },
+    );
+    defer allocator.free(echo_result_path);
+
+    // Given — echo service with one-way latency measurement enabled.
     const echo = try harness.startService(.{
         .executable_name = "brz-test-echo-service",
         .service_name = "echo",
-        .extra_args = &.{"--quiet"},
+        .extra_args = &.{ "--quiet", "--result-file", echo_result_path },
     });
     try harness.waitForServiceReady(echo, 5000);
 
@@ -56,7 +68,8 @@ fn runLocalLatencyBench(
     );
     defer allocator.free(result_filename);
 
-    // When — run ping service with warmup and measurement phases
+    // When — ping service sends messages with spinning backpressure and
+    //        monotonic timestamp embedding for one-way latency measurement.
     const ping = try harness.startService(.{
         .executable_name = "brz-test-ping-service",
         .service_name = "ping",
@@ -66,15 +79,19 @@ fn runLocalLatencyBench(
             "--message-size",    cfg.label,
             "--warmup-count",    cfg.warmup_count,
             "--result-file",     result_filename,
+            "--spin-timeout-ms", "100",
         },
     });
     try harness.waitForServiceReady(ping, 5000);
 
-    // Then — ping service completes successfully within the timeout
+    // Then — ping service completes successfully within the timeout.
     const exit_code = try ping.waitForExit(60_000);
     try std.testing.expectEqual(@as(u32, 0), exit_code);
 
-    // Cleanup — stop services then broker (reverse start order)
+    // Allow in-flight messages to drain before stopping echo.
+    std.Thread.sleep(2 * std.time.ns_per_s);
+
+    // Cleanup — stop services then broker (reverse start order).
     try harness.stopProcess(echo);
     try harness.stopProcess(broker);
 }
