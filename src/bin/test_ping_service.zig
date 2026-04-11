@@ -12,11 +12,33 @@
 const std = @import("std");
 const brz_service = @import("brz_service");
 const brz_common = @import("brz_common");
+const brz_testing = @import("brz_testing");
 
 const BrzEngine = brz_service.BrzEngine;
 const ServiceConfig = brz_service.ServiceConfig;
 const ServiceClient = brz_service.ServiceClient;
 const Clock = brz_common.Clock;
+const Histogram = brz_testing.Histogram;
+
+// ── Mutable file-level state ─────────────────────────────────────────
+
+var shutdown_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+// ── Signal handling ──────────────────────────────────────────────────
+
+fn installSignalHandler() void {
+    const handler: std.posix.Sigaction = .{
+        .handler = .{ .handler = signalHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TERM, &handler, null);
+    std.posix.sigaction(std.posix.SIG.INT, &handler, null);
+}
+
+fn signalHandler(_: c_int) callconv(.c) void {
+    shutdown_flag.store(true, .release);
+}
 
 // ── Arg Parsing Helpers ──────────────────────────────────────────────
 
@@ -73,10 +95,13 @@ pub fn main() !void {
     const group = parseStringArg(args, "--group", "default");
     const service_name = parseStringArg(args, "--service-name", "ping");
     const target_service = parseStringArg(args, "--target-service", "echo");
+    const broker_node_id: i16 = @intCast(parseIntArg(u64, args, "--broker-node-id", 1));
     const message_count = parseIntArg(u64, args, "--message-count", 100);
     const message_size = parseIntArg(usize, args, "--message-size", 64);
     const warmup_count = parseIntArg(u64, args, "--warmup-count", 10);
     const result_file = parseOptionalStringArg(args, "--result-file");
+
+    installSignalHandler();
 
     // ── Start engine ─────────────────────────────────────────────────
 
@@ -84,6 +109,7 @@ pub fn main() !void {
         .storage_path = storage_path,
         .group = group,
         .service_name = service_name,
+        .broker_node_id = broker_node_id,
     };
 
     const engine = BrzEngine.start(allocator, config) catch |err| {
@@ -142,14 +168,24 @@ pub fn main() !void {
     var sent: u64 = 0;
     var failed: u64 = 0;
 
+    // Per-message send latency histogram.
+    var histogram = Histogram.initCapacity(allocator, message_count) catch blk: {
+        break :blk Histogram.init(allocator);
+    };
+    defer histogram.deinit();
+
     const start_time_ms = Clock.epochMillis();
     const start_mono = std.time.nanoTimestamp();
 
     for (0..message_count) |_| {
+        const send_start = std.time.nanoTimestamp();
         client.send(payload) catch {
             failed += 1;
             continue;
         };
+        const send_end = std.time.nanoTimestamp();
+        const delta: u64 = @intCast(send_end - send_start);
+        histogram.record(delta) catch {};
         sent += 1;
     }
 
@@ -172,10 +208,15 @@ pub fn main() !void {
     else
         0;
 
+    // ── Compute latency percentiles ──────────────────────────────────
+
+    const latency = histogram.summaryPercentiles();
+
     // ── Print summary ────────────────────────────────────────────────
 
     try stdout.print("ping: sent={d}, failed={d}, elapsed_ms={d}\n", .{ sent, failed, elapsed_ms });
     try stdout.print("ping: throughput={d} msgs/s, {d} bytes/s\n", .{ throughput_msgs_per_sec, throughput_bytes_per_sec });
+    try stdout.print("ping: send_latency p50={d}ns p95={d}ns p99={d}ns max={d}ns\n", .{ latency.p50, latency.p95, latency.p99, latency.max_val });
     try stdout.print("ping: message_size={d}, target={s}\n", .{ message_size, target_service });
     try stdout.flush();
 
@@ -196,6 +237,10 @@ pub fn main() !void {
             end_time_ms,
             service_name,
             target_service,
+            latency.p50,
+            latency.p95,
+            latency.p99,
+            latency.max_val,
         ) catch |err| {
             try stderr.print("ping: failed to write result file '{s}': {}\n", .{ path, err });
             try stderr.flush();
@@ -220,6 +265,10 @@ fn writeResultsJson(
     end_time_ms: i64,
     service_name: []const u8,
     target_service: []const u8,
+    latency_p50_ns: u64,
+    latency_p95_ns: u64,
+    latency_p99_ns: u64,
+    latency_max_ns: u64,
 ) !void {
     const file = try std.fs.cwd().createFile(path, .{});
     defer file.close();
@@ -240,7 +289,11 @@ fn writeResultsJson(
         \\  "throughput_msgs_per_sec": {d},
         \\  "throughput_bytes_per_sec": {d},
         \\  "start_time_ms": {d},
-        \\  "end_time_ms": {d}
+        \\  "end_time_ms": {d},
+        \\  "send_latency_p50_ns": {d},
+        \\  "send_latency_p95_ns": {d},
+        \\  "send_latency_p99_ns": {d},
+        \\  "send_latency_max_ns": {d}
         \\}}
         \\
     , .{
@@ -256,6 +309,10 @@ fn writeResultsJson(
         throughput_bytes_per_sec,
         start_time_ms,
         end_time_ms,
+        latency_p50_ns,
+        latency_p95_ns,
+        latency_p99_ns,
+        latency_max_ns,
     });
     try writer.flush();
 }

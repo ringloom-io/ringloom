@@ -50,6 +50,7 @@ fn setupTwoBrokerTopology(harness: *TestHarness) !TwoBrokerTopology {
         .executable_name = "brz-test-echo-service",
         .service_name = "echo",
         .broker_node_id = 2,
+        .extra_args = &.{"--quiet"},
     });
     try harness.waitForServiceReady(echo, 5000);
 

@@ -31,6 +31,9 @@ pub const AdminCommand = union(enum) {
     service_leader_designated: struct {
         data: [@sizeOf(admin.ServiceLeaderDesignatedBody)]u8,
     },
+    peer_connected: struct {
+        node_id: u8,
+    },
 
     /// Maximum snapshot payload (body after header): 1 byte node_id +
     /// 4 bytes group header + 256 entries × 35 bytes = 8965 bytes.

@@ -124,9 +124,9 @@ pub const BrokerMetadataFile = struct {
             constants.page_size,
         );
 
-        // Build path: <storage_path>/<group>/services/broker_0.dat
+        // Build path: <storage_path>/<group>/services/broker_<node_id>.dat
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try buildBrokerPath(&path_buf, storage_path, group);
+        const path = try buildBrokerPath(&path_buf, storage_path, group, node_id);
 
         // Ensure parent directory exists.
         try ensureDirectoryExists(path);
@@ -197,9 +197,10 @@ pub const BrokerMetadataFile = struct {
     pub fn open(
         storage_path: []const u8,
         group: []const u8,
+        node_id: i16,
     ) !BrokerMetadataFile {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try buildBrokerPath(&path_buf, storage_path, group);
+        const path = try buildBrokerPath(&path_buf, storage_path, group, node_id);
 
         const fd = try platform.openFile(path);
         errdefer std.posix.close(fd);
@@ -391,11 +392,25 @@ pub const BrokerMetadataFile = struct {
         buf: *[std.fs.max_path_bytes]u8,
         storage_path: []const u8,
         group: []const u8,
+        node_id: i16,
     ) ![]const u8 {
-        return std.fmt.bufPrint(buf, "{s}/{s}/services/broker_0.dat", .{
+        return std.fmt.bufPrint(buf, "{s}/{s}/services/broker_{d}.dat", .{
             storage_path,
             group,
+            node_id,
         }) catch return error.PathTooLong;
+    }
+
+    /// Returns true if a filename matches the broker metadata naming convention
+    /// (e.g. "broker_0.dat", "broker_1.dat", "broker_42.dat").
+    pub fn isBrokerMetadataFile(name: []const u8) bool {
+        if (!std.mem.startsWith(u8, name, "broker_")) return false;
+        if (!std.mem.endsWith(u8, name, ".dat")) return false;
+        // Check that the middle part is a valid integer.
+        const middle = name["broker_".len .. name.len - ".dat".len];
+        if (middle.len == 0) return false;
+        _ = std.fmt.parseInt(i16, middle, 10) catch return false;
+        return true;
     }
 
     fn ensureDirectoryExists(file_path: []const u8) !void {
@@ -517,7 +532,7 @@ test "two threads share a broker metadata file" {
     @memcpy(broker_file.control_buffer[0..8], std.mem.asBytes(&pattern));
 
     // Thread 2 (service): open the same file.
-    var service_view = try BrokerMetadataFile.open(storage_path, "test-group");
+    var service_view = try BrokerMetadataFile.open(storage_path, "test-group", 1);
     defer service_view.close();
 
     // Verify the service sees the same data.
@@ -543,7 +558,7 @@ test "atomic nextServiceId visible across mappings" {
     var file1 = try BrokerMetadataFile.create(storage_path, "test-group", 1, 4096, 4096);
     defer file1.close();
 
-    var file2 = try BrokerMetadataFile.open(storage_path, "test-group");
+    var file2 = try BrokerMetadataFile.open(storage_path, "test-group", 1);
     defer file2.close();
 
     // file1 sets nextServiceId.
@@ -655,7 +670,7 @@ test "open reads back flow control regions" {
     file1.close();
 
     // Re-open and verify FC region is detected.
-    var file2 = try BrokerMetadataFile.open(storage_path, "test-group");
+    var file2 = try BrokerMetadataFile.open(storage_path, "test-group", 1);
     defer file2.close();
 
     try testing.expect(file2.fc_region != null);
@@ -679,11 +694,56 @@ test "open backward compat with no FC regions" {
     file1.close();
 
     // Open should succeed, FC regions should be null.
-    var file2 = try BrokerMetadataFile.open(storage_path, "test-group");
+    var file2 = try BrokerMetadataFile.open(storage_path, "test-group", 1);
     defer file2.close();
 
     try testing.expect(file2.fc_region == null);
     try testing.expect(file2.peer_send_counters == null);
     try testing.expectEqual(@as(i32, 0), file2.loadFcBufferLength());
     try testing.expectEqual(@as(i32, 0), file2.loadPeerSendCountersLength());
+}
+
+test "different node_ids create independent files" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(storage_path);
+    try tmp_dir.dir.makePath("test-group/services");
+
+    // Create broker metadata for node 1 and node 2 under the same group.
+    var broker1 = try BrokerMetadataFile.create(storage_path, "test-group", 1, 4096, 4096);
+    defer broker1.close();
+
+    var broker2 = try BrokerMetadataFile.create(storage_path, "test-group", 2, 4096, 4096);
+    defer broker2.close();
+
+    // Verify they have different node_ids.
+    try testing.expectEqual(@as(i16, 1), broker1.header.node_id);
+    try testing.expectEqual(@as(i16, 2), broker2.header.node_id);
+
+    // Verify independent mappings: writing to one doesn't affect the other.
+    broker1.storeNextServiceId(100);
+    broker2.storeNextServiceId(200);
+    try testing.expectEqual(@as(i32, 100), broker1.loadNextServiceId());
+    try testing.expectEqual(@as(i32, 200), broker2.loadNextServiceId());
+
+    // Open each by node_id and verify isolation.
+    var opened1 = try BrokerMetadataFile.open(storage_path, "test-group", 1);
+    defer opened1.close();
+    var opened2 = try BrokerMetadataFile.open(storage_path, "test-group", 2);
+    defer opened2.close();
+
+    try testing.expectEqual(@as(i16, 1), opened1.header.node_id);
+    try testing.expectEqual(@as(i16, 2), opened2.header.node_id);
+    try testing.expectEqual(@as(i32, 100), opened1.loadNextServiceId());
+    try testing.expectEqual(@as(i32, 200), opened2.loadNextServiceId());
+}
+
+test "isBrokerMetadataFile identifies broker files" {
+    try testing.expect(BrokerMetadataFile.isBrokerMetadataFile("broker_0.dat"));
+    try testing.expect(BrokerMetadataFile.isBrokerMetadataFile("broker_1.dat"));
+    try testing.expect(BrokerMetadataFile.isBrokerMetadataFile("broker_42.dat"));
+    try testing.expect(!BrokerMetadataFile.isBrokerMetadataFile("echo_1.dat"));
+    try testing.expect(!BrokerMetadataFile.isBrokerMetadataFile("broker_.dat"));
+    try testing.expect(!BrokerMetadataFile.isBrokerMetadataFile("broker_abc.dat"));
 }

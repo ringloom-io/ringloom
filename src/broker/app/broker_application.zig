@@ -25,10 +25,11 @@ const ClusterManager = cluster.ClusterManager;
 const SenderEventLoop = sender.SenderEventLoop;
 const ReceiverEventLoop = receiver.ReceiverEventLoop;
 const BrokerThreads = threading.BrokerThreads;
-const ServiceRegistry = control.ServiceRegistry;
 const RoutingRegistry = receiver.ServiceRegistry;
 const CommandQueue = brz_common.concurrent.command_queue.CommandQueue;
 const Command = brz_common.concurrent.command_queue.Command;
+const admin_dispatch = cluster.admin_dispatch;
+const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
 
 pub const ExitCode = enum(u8) {
     success = 0,
@@ -37,6 +38,9 @@ pub const ExitCode = enum(u8) {
     startup_error = 3,
     runtime_error = 4,
 };
+
+/// Global signal flag for SIGTERM — async-signal-safe.
+var g_shutdown_signal: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 pub const BrokerApplication = struct {
     allocator: std.mem.Allocator,
@@ -54,7 +58,9 @@ pub const BrokerApplication = struct {
     control_command_storage: ?[]Command = null,
     control_command_queue: ?CommandQueue = null,
 
-    service_registry: ?ServiceRegistry = null,
+    admin_cmd_queue: ?AdminCommandQueue(64) = null,
+    peer_node_ids: ?[]u8 = null,
+
     routing_registry: ?RoutingRegistry = null,
     cluster_manager: ?ClusterManager = null,
     control_loop: ?ControlLoop = null,
@@ -95,9 +101,34 @@ pub const BrokerApplication = struct {
             self.shutdown();
         }
 
-        if (self.control_command_queue) |*queue| {
-            _ = queue;
-            self.control_command_queue = null;
+        // After shutdown(), threads have stopped and their onClose callbacks
+        // have already run (ControlLoop.onClose cleans up its own registry).
+        // We only clean up shared resources here — never re-call onClose/deinit
+        // on event loops that threads already finalized.
+
+        if (self.sender_loop) |*loop| {
+            loop.deinit();
+            self.sender_loop = null;
+        }
+
+        if (self.receiver_loop) |*loop| {
+            loop.deinit();
+            self.receiver_loop = null;
+        }
+
+        self.control_loop = null;
+        self.broker_threads = null;
+
+        self.cluster_manager = null;
+        self.routing_registry = null;
+
+        self.control_command_queue = null;
+
+        self.admin_cmd_queue = null;
+
+        if (self.peer_node_ids) |ids| {
+            self.allocator.free(ids);
+            self.peer_node_ids = null;
         }
 
         if (self.control_command_storage) |storage| {
@@ -105,28 +136,7 @@ pub const BrokerApplication = struct {
             self.control_command_storage = null;
         }
 
-        self.receiver_loop = null;
-
-        if (self.sender_loop) |*loop| {
-            loop.deinit();
-            self.sender_loop = null;
-        }
-
-        if (self.control_loop) |*loop| {
-            loop.onClose();
-            self.control_loop = null;
-        }
-
-        if (self.cluster_manager) |_| {
-            self.cluster_manager = null;
-        }
-
-        if (self.service_registry) |*registry| {
-            registry.deinit();
-            self.service_registry = null;
-        }
-
-        self.routing_registry = null;
+        self.counters = null;
 
         if (self.counter_values_buffer) |buf| {
             self.allocator.free(buf);
@@ -145,22 +155,82 @@ pub const BrokerApplication = struct {
     }
 
     pub fn run(self: *Self) !u8 {
+        // Validate configuration
+        if (self.config.node_id == 0) {
+            std.log.err("invalid configuration: node_id must be > 0", .{});
+            return @intFromEnum(ExitCode.config_error);
+        }
+
+        self.installSignalHandler();
+
         try self.start();
         defer self.shutdown();
 
         self.logStartup();
 
-        while (!self.shutdown_requested.load(.acquire)) {
-            std.Thread.sleep(100 * std.time.ns_per_ms);
+        while (!self.shutdown_requested.load(.acquire) and
+            !g_shutdown_signal.load(.acquire))
+        {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
         }
 
         return @intFromEnum(ExitCode.success);
     }
 
+    /// Create event loops and start worker threads.
+    ///
+    /// Event loops are created here (not in bootstrap/init) because `self`
+    /// is now at its final address, so internal pointers remain valid.
     pub fn start(self: *Self) !void {
         if (self.started) return;
 
-        var threads = BrokerThreads.init(
+        self.control_loop = ControlLoop.init(.{
+            .control_rb = &self.control_ring_buffer.?,
+            .cmd_queue = &self.control_command_queue.?,
+            .cluster_manager = &self.cluster_manager.?,
+            .counters = &self.counters.?,
+            .local_node_id = self.config.node_id,
+            .storage_path = self.config.storage_path,
+            .group = self.config.group_name,
+            .allocator = self.allocator,
+            .admin_cmd_queue = &self.admin_cmd_queue.?,
+            .send_ring_buffer = &self.send_ring_buffer.?,
+            .peer_node_ids = self.peer_node_ids orelse &.{},
+        });
+
+        self.sender_loop = try SenderEventLoop.initWithGroup(
+            &self.send_ring_buffer.?,
+            &self.counters.?,
+            self.config.node_id,
+            self.allocator,
+            self.config.group_name,
+        );
+        errdefer {
+            self.sender_loop.?.deinit();
+            self.sender_loop = null;
+        }
+
+        self.receiver_loop = ReceiverEventLoop.initWithGroup(
+            &self.routing_registry.?,
+            &self.counters.?,
+            self.config.node_id,
+            self.allocator,
+            self.config.group_name,
+            &self.admin_cmd_queue.?,
+        );
+
+        // Wire up TCP: add peer endpoints to the sender, init listener on receiver.
+        for (self.config.peer_endpoints) |ep| {
+            const addr = std.net.Address.parseIp4(ep.host, ep.port) catch continue;
+            self.sender_loop.?.addPeer(ep.node_id, addr) catch continue;
+        }
+        if (self.config.peer_endpoints.len > 0) {
+            self.receiver_loop.?.initListener(self.config.local_host, self.config.local_port) catch |err| {
+                std.log.warn("Failed to init TCP listener: {}", .{err});
+            };
+        }
+
+        self.broker_threads = BrokerThreads.init(
             EventLoop{
                 .context = @ptrCast(&self.control_loop.?),
                 .doWorkFn = &ControlLoop.doWorkFn,
@@ -176,13 +246,12 @@ pub const BrokerApplication = struct {
                 .doWorkFn = &receiverDoWorkFn,
                 .onCloseFn = &receiverOnCloseFn,
             },
-            self.toIdleStrategy(self.config.idle_strategy_name),
-            self.toIdleStrategy(self.config.idle_strategy_name),
-            self.toIdleStrategy(self.config.idle_strategy_name),
+            toIdleStrategy(self.config.idle_strategy_name),
+            toIdleStrategy(self.config.idle_strategy_name),
+            toIdleStrategy(self.config.idle_strategy_name),
         );
 
-        try threads.start();
-        self.broker_threads = threads;
+        try self.broker_threads.?.start();
         self.started = true;
     }
 
@@ -205,6 +274,10 @@ pub const BrokerApplication = struct {
         return self.started and !self.shutdown_requested.load(.acquire);
     }
 
+    /// Allocate shared resources: metadata, ring buffers, counters, command
+    /// queues, registries.  Event loops are NOT created here — they are
+    /// deferred to `start()` so that `self` is at its final address and
+    /// internal pointers (e.g. `&self.control_ring_buffer.?`) remain valid.
     fn bootstrap(self: *Self) !void {
         var broker_metadata = try BrokerMetadataFile.create(
             self.config.storage_path,
@@ -215,14 +288,14 @@ pub const BrokerApplication = struct {
         );
         errdefer broker_metadata.close();
 
-        var control_rb = try RingBuffer.init(
+        self.control_ring_buffer = try RingBuffer.init(
             @alignCast(broker_metadata.getControlBuffer()),
             false,
             null,
             null,
         );
 
-        var send_rb = try RingBuffer.init(
+        self.send_ring_buffer = try RingBuffer.init(
             @alignCast(broker_metadata.getSendBuffer()),
             false,
             null,
@@ -243,64 +316,50 @@ pub const BrokerApplication = struct {
         errdefer self.allocator.free(metadata_buffer);
         @memset(metadata_buffer, 0);
 
-        var counters = CountersManager.init(values_buffer, metadata_buffer);
+        self.counters = CountersManager.init(values_buffer, metadata_buffer);
 
         const command_capacity = commandQueueCapacity();
         const command_storage = try self.allocator.alloc(Command, command_capacity);
         errdefer self.allocator.free(command_storage);
 
-        var command_queue = CommandQueue.init(command_storage);
+        self.control_command_queue = CommandQueue.init(command_storage);
 
-        var service_registry = ServiceRegistry.init(self.allocator);
-        errdefer service_registry.deinit();
+        self.admin_cmd_queue = .{};
 
-        var routing_registry = RoutingRegistry.init();
+        // Build peer_node_ids slice from config.
+        if (self.config.peer_endpoints.len > 0) {
+            const ids = try self.allocator.alloc(u8, self.config.peer_endpoints.len);
+            for (self.config.peer_endpoints, 0..) |ep, i| {
+                ids[i] = ep.node_id;
+            }
+            self.peer_node_ids = ids;
+        }
 
-        var cluster_manager = ClusterManager.initSingleNode(self.config.node_id);
-
-        const control_loop = ControlLoop.init(.{
-            .control_rb = &control_rb,
-            .cmd_queue = &command_queue,
-            .cluster_manager = &cluster_manager,
-            .counters = &counters,
-            .local_node_id = self.config.node_id,
-            .storage_path = self.config.storage_path,
-            .group = self.config.group_name,
-            .allocator = self.allocator,
-        });
-
-        var sender_loop = try SenderEventLoop.init(
-            &send_rb,
-            &counters,
-            self.config.node_id,
-            self.allocator,
-        );
-        errdefer sender_loop.deinit();
-
-        const receiver_loop = ReceiverEventLoop.init(
-            &routing_registry,
-            &counters,
-            self.config.node_id,
-            self.allocator,
-        );
+        self.routing_registry = RoutingRegistry.init();
+        self.cluster_manager = ClusterManager.initSingleNode(self.config.node_id);
 
         self.broker_metadata = broker_metadata;
-        self.control_ring_buffer = control_rb;
-        self.send_ring_buffer = send_rb;
         self.counter_values_buffer = values_buffer;
         self.counter_metadata_buffer = metadata_buffer;
-        self.counters = counters;
         self.control_command_storage = command_storage;
-        self.control_command_queue = command_queue;
-        self.service_registry = service_registry;
-        self.routing_registry = routing_registry;
-        self.cluster_manager = cluster_manager;
-        self.control_loop = control_loop;
-        self.sender_loop = sender_loop;
-        self.receiver_loop = receiver_loop;
     }
 
+    /// Write the readiness marker to stdout (for the test harness) and
+    /// a structured message to stderr (via std.log).
     fn logStartup(self: *const Self) void {
+        // stdout marker — the e2e test harness polls stdout for "broker started".
+        var buf: [4096]u8 = undefined;
+        var stdout_w = std.fs.File.stdout().writer(&buf);
+        const stdout = &stdout_w.interface;
+        stdout.print("broker started: node_id={}, bind={s}:{}, group={s}\n", .{
+            self.config.node_id,
+            self.config.local_host,
+            self.config.local_port,
+            self.config.group_name,
+        }) catch {};
+        stdout.flush() catch {};
+
+        // stderr structured log
         std.log.info(
             "broker started: node_id={}, bind={s}:{}, group={s}, storage={s}, threading={s}, peers={}",
             .{
@@ -315,7 +374,18 @@ pub const BrokerApplication = struct {
         );
     }
 
-    fn toIdleStrategy(_: *const Self, name: config_mod.IdleStrategyName) IdleStrategy {
+    fn installSignalHandler(self: *Self) void {
+        _ = self;
+        const act = std.posix.Sigaction{
+            .handler = .{ .handler = sigterm_handler },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        std.posix.sigaction(std.posix.SIG.TERM, &act, null);
+        std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    }
+
+    fn toIdleStrategy(name: config_mod.IdleStrategyName) IdleStrategy {
         return switch (name) {
             .busy_spin => .busy_spin,
             .yielding => .yielding,
@@ -326,15 +396,17 @@ pub const BrokerApplication = struct {
     }
 };
 
+fn sigterm_handler(_: c_int) callconv(.c) void {
+    g_shutdown_signal.store(true, .release);
+}
+
 fn senderDoWorkFn(ctx: *anyopaque) u32 {
     const loop: *SenderEventLoop = @ptrCast(@alignCast(ctx));
     return loop.doWork();
 }
 
-fn senderOnCloseFn(ctx: *anyopaque) void {
-    const loop: *SenderEventLoop = @ptrCast(@alignCast(ctx));
-    loop.deinit();
-}
+// No-op: sender cleanup is handled by BrokerApplication.deinit()
+fn senderOnCloseFn(_: *anyopaque) void {}
 
 fn receiverDoWorkFn(ctx: *anyopaque) u32 {
     const loop: *ReceiverEventLoop = @ptrCast(@alignCast(ctx));

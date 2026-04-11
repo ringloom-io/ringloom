@@ -55,7 +55,9 @@ test "broker creates metadata directory on startup" {
     try harness.waitForBrokerReady(broker, 5000);
 
     // Then — metadata directory exists on the filesystem
-    try testing_mod.readiness.waitForFileExists("/dev/shm/broker-meta-test/services", 5000);
+    const expected_path = try std.fmt.allocPrint(allocator, "{s}/broker-meta-test/services", .{harness.env.storage_path});
+    defer allocator.free(expected_path);
+    try testing_mod.readiness.waitForFileExists(expected_path, 5000);
 
     // Cleanup
     try harness.stopProcess(broker);

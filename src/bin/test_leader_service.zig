@@ -21,7 +21,7 @@ const Clock = brz_common.platform.Clock;
 
 var received_leader_changes: u64 = 0;
 var is_leader: bool = false;
-var shutdown_requested: bool = false;
+var shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 // ── Message handler ──────────────────────────────────────────────────
 
@@ -66,6 +66,22 @@ fn parseIntArg(comptime T: type, args: []const []const u8, flag: []const u8, def
     return default;
 }
 
+// ── Signal handling ──────────────────────────────────────────────────
+
+fn installSignalHandler() void {
+    const handler: std.posix.Sigaction = .{
+        .handler = .{ .handler = signalHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TERM, &handler, null);
+    std.posix.sigaction(std.posix.SIG.INT, &handler, null);
+}
+
+fn signalHandler(_: c_int) callconv(.c) void {
+    shutdown_requested.store(true, .release);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────
 
 pub fn main() !void {
@@ -81,6 +97,7 @@ pub fn main() !void {
     const storage_path = parseStringArg(args, "--storage-path", "/dev/shm");
     const group = parseStringArg(args, "--group", "default");
     const service_name = parseStringArg(args, "--service-name", "leader-test");
+    const broker_node_id: i16 = @intCast(parseIntArg(u64, args, "--broker-node-id", 1));
     const max_runtime_ms: u64 = parseIntArg(u64, args, "--max-runtime-ms", 30000);
 
     var stdout_buf: [4096]u8 = undefined;
@@ -104,6 +121,7 @@ pub fn main() !void {
         .storage_path = storage_path,
         .group = group,
         .service_name = service_name,
+        .broker_node_id = broker_node_id,
         .leader_election_enabled = true,
     };
 
@@ -123,6 +141,7 @@ pub fn main() !void {
     // ── Set message handler ──────────────────────────────────────────
 
     engine.setMessageHandler(&messageHandler);
+    installSignalHandler();
 
     // ── Main loop — periodic leader status logging ───────────────────
 
@@ -131,7 +150,7 @@ pub fn main() !void {
     const status_interval_ms: i64 = 1000;
     const max_runtime_i64: i64 = @intCast(max_runtime_ms);
 
-    while (!shutdown_requested) {
+    while (!shutdown_requested.load(.acquire)) {
         const now = Clock.epochMillis();
         const elapsed = now - start_time;
 

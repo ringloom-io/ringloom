@@ -97,6 +97,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "brz_common", .module = brz_common },
                     .{ .name = "brz_service", .module = brz_service },
+                    .{ .name = "brz_testing", .module = brz_testing },
                 },
             }),
         });
@@ -120,6 +121,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .imports = &.{
                 .{ .name = "brz_common", .module = brz_common },
+                .{ .name = "brz_tcp", .module = brz_tcp },
             },
         }),
     });

@@ -71,6 +71,7 @@ fn runRemoteLatencyBench(
         .executable_name = "brz-test-echo-service",
         .service_name = "echo",
         .broker_node_id = broker_b_node_id,
+        .extra_args = &.{"--quiet"},
     });
     try harness.waitForServiceReady(echo, service_ready_timeout_ms);
 
@@ -144,6 +145,7 @@ test "cross-broker round-trip latency - 128B" {
         .executable_name = "brz-test-echo-service",
         .service_name = "echo",
         .broker_node_id = broker_b_node_id,
+        .extra_args = &.{"--quiet"},
     });
     try harness.waitForServiceReady(echo, service_ready_timeout_ms);
 

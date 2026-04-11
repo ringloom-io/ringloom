@@ -20,11 +20,18 @@ const CountersManager = brz_common.concurrent.counters.CountersManager;
 const frame_parser = brz_common.protocol.frame_parser;
 const TcpFrameHeader = frame_parser.TcpFrameHeader;
 
+const tcp = @import("brz_tcp");
+const HandshakeFrame = tcp.HandshakeFrame;
+const SocketConfig = tcp.SocketConfig;
+
 const PeerReceiver = @import("peer_receiver.zig").PeerReceiver;
 const LivenessState = @import("peer_receiver.zig").LivenessState;
 const ReadState = @import("peer_receiver.zig").ReadState;
 const message_router = @import("message_router.zig");
 const ServiceRegistry = message_router.ServiceRegistry;
+
+const admin_dispatch = @import("../cluster/admin_dispatch.zig");
+const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
 
 // ── Counter IDs ───────────────────────────────────────────────────────
 
@@ -142,13 +149,45 @@ pub const ReceiverEventLoop = struct {
     /// Allocator for dynamic peer allocation.
     allocator: std.mem.Allocator,
 
+    /// TCP listener socket file descriptor (-1 if not listening).
+    listener_fd: std.posix.fd_t,
+
+    /// FNV-1a hash of the cluster group name (for handshake validation).
+    group_name_hash: u32,
+
+    /// Pending connections awaiting handshake completion.
+    pending_connections: [max_pending]PendingConnection,
+    pending_count: u32,
+
+    /// Admin command queue — forward admin messages to control loop.
+    admin_cmd_queue: ?*AdminCommandQueue(64),
+
     const Self = @This();
+    const max_pending = 16;
+
+    const PendingConnection = struct {
+        fd: std.posix.fd_t,
+        address: std.net.Address,
+        handshake_buf: [HandshakeFrame.size]u8,
+        bytes_read: u8,
+    };
 
     pub fn init(
         service_registry: *ServiceRegistry,
         counters: *CountersManager,
         local_node_id: u8,
         allocator: std.mem.Allocator,
+    ) Self {
+        return Self.initWithGroup(service_registry, counters, local_node_id, allocator, "brz", null);
+    }
+
+    pub fn initWithGroup(
+        service_registry: *ServiceRegistry,
+        counters: *CountersManager,
+        local_node_id: u8,
+        allocator: std.mem.Allocator,
+        group_name: []const u8,
+        admin_queue: ?*AdminCommandQueue(64),
     ) Self {
         return .{
             .peers = PeerMap.init(),
@@ -158,16 +197,52 @@ pub const ReceiverEventLoop = struct {
             .local_node_id = local_node_id,
             .running = AtomicBool.init(true),
             .allocator = allocator,
+            .listener_fd = -1,
+            .group_name_hash = HandshakeFrame.hashGroupName(group_name),
+            .pending_connections = undefined,
+            .pending_count = 0,
+            .admin_cmd_queue = admin_queue,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        // Close listener.
+        if (self.listener_fd >= 0) {
+            std.posix.close(self.listener_fd);
+            self.listener_fd = -1;
+        }
+        // Close pending connections.
+        for (self.pending_connections[0..self.pending_count]) |*pc| {
+            if (pc.fd >= 0) std.posix.close(pc.fd);
+        }
+        self.pending_count = 0;
+        // Close and free peers.
         var iter = self.peers.iterator();
         while (iter.next()) |peer| {
             self.allocator.free(peer.read_state.payload_buf);
             peer.close();
             self.allocator.destroy(peer);
         }
+    }
+
+    // ── Listener Setup ───────────────────────────────────────────────
+
+    pub fn initListener(self: *Self, host: []const u8, port: u16) !void {
+        const addr = try std.net.Address.parseIp4(host, port);
+        const fd = try std.posix.socket(
+            addr.any.family,
+            std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
+            0,
+        );
+        errdefer std.posix.close(fd);
+
+        const cfg = SocketConfig{ .reuse_addr = true, .tcp_nodelay = false, .keepalive = false };
+        try cfg.apply(fd);
+
+        try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
+        try std.posix.listen(fd, 128);
+
+        self.listener_fd = fd;
     }
 
     // ── Duty Cycle ────────────────────────────────────────────────────
@@ -177,10 +252,234 @@ pub const ReceiverEventLoop = struct {
         var work_count: u32 = 0;
         const now_ns = Clock.monotonicNanos();
 
-        // ── Phase 1: Check heartbeat timeouts ─────────────────────────
+        // ── Phase 1: Accept new connections ───────────────────────────
+        work_count += self.acceptNewConnections();
+
+        // ── Phase 2: Complete pending handshakes ──────────────────────
+        work_count += self.processPendingHandshakes();
+
+        // ── Phase 3: Read from connected peers ───────────────────────
+        work_count += self.readFromPeers();
+
+        // ── Phase 4: Check heartbeat timeouts ─────────────────────────
         work_count += self.checkHeartbeatTimeouts(now_ns);
 
         return work_count;
+    }
+
+    // ── TCP Accept ────────────────────────────────────────────────────
+
+    fn acceptNewConnections(self: *Self) u32 {
+        if (self.listener_fd < 0) return 0;
+        var accepted: u32 = 0;
+
+        while (self.pending_count < max_pending) {
+            var addr: std.net.Address = undefined;
+            var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+            const fd = std.posix.accept(
+                self.listener_fd,
+                &addr.any,
+                &addr_len,
+                std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
+            ) catch |err| {
+                switch (err) {
+                    error.WouldBlock => break,
+                    else => break,
+                }
+            };
+
+            const sock_cfg = SocketConfig{};
+            sock_cfg.apply(fd) catch {
+                std.posix.close(fd);
+                continue;
+            };
+
+            self.pending_connections[self.pending_count] = .{
+                .fd = fd,
+                .address = addr,
+                .handshake_buf = std.mem.zeroes([HandshakeFrame.size]u8),
+                .bytes_read = 0,
+            };
+            self.pending_count += 1;
+            accepted += 1;
+        }
+
+        return accepted;
+    }
+
+    // ── Pending Handshake Processing ─────────────────────────────────
+
+    fn processPendingHandshakes(self: *Self) u32 {
+        var completed: u32 = 0;
+        var i: u32 = 0;
+
+        while (i < self.pending_count) {
+            var pc = &self.pending_connections[i];
+            const remaining = pc.handshake_buf[pc.bytes_read..];
+            const n = std.posix.read(pc.fd, remaining) catch |err| {
+                switch (err) {
+                    error.WouldBlock => {
+                        i += 1;
+                        continue;
+                    },
+                    else => {
+                        std.posix.close(pc.fd);
+                        self.removePendingAt(i);
+                        self.counters.increment(self.counter_ids.handshake_failures);
+                        continue;
+                    },
+                }
+            };
+
+            if (n == 0) {
+                // EOF before handshake complete.
+                std.posix.close(pc.fd);
+                self.removePendingAt(i);
+                self.counters.increment(self.counter_ids.handshake_failures);
+                continue;
+            }
+
+            pc.bytes_read += @intCast(n);
+
+            if (pc.bytes_read >= HandshakeFrame.size) {
+                // Handshake complete — validate.
+                const frame = HandshakeFrame.fromBytes(&pc.handshake_buf).*;
+                HandshakeFrame.validate(frame, self.local_node_id, self.group_name_hash) catch {
+                    std.posix.close(pc.fd);
+                    self.removePendingAt(i);
+                    self.counters.increment(self.counter_ids.handshake_failures);
+                    continue;
+                };
+
+                // Valid — add as peer.
+                const epoch: u32 = @truncate(frame.session_epoch);
+                self.addPeer(frame.source_node_id, pc.fd, pc.address, epoch) catch {
+                    std.posix.close(pc.fd);
+                    self.removePendingAt(i);
+                    self.counters.increment(self.counter_ids.connection_errors);
+                    continue;
+                };
+
+                self.removePendingAt(i);
+                completed += 1;
+                continue;
+            }
+
+            i += 1;
+        }
+
+        return completed;
+    }
+
+    fn removePendingAt(self: *Self, index: u32) void {
+        if (self.pending_count > 0) {
+            self.pending_connections[index] = self.pending_connections[self.pending_count - 1];
+            self.pending_count -= 1;
+        }
+    }
+
+    // ── TCP Read ──────────────────────────────────────────────────────
+
+    fn readFromPeers(self: *Self) u32 {
+        var work_count: u32 = 0;
+
+        var peer_iter = self.peers.iterator();
+        while (peer_iter.next()) |peer| {
+            if (!peer.connected or peer.socket_fd < 0) continue;
+
+            var budget: u32 = constants.read_budget_per_peer;
+            while (budget > 0) : (budget -= 1) {
+                const read_result = self.readOnePeerStep(peer);
+                if (!read_result.progress) break;
+                work_count += read_result.frames_completed;
+            }
+        }
+
+        return work_count;
+    }
+
+    const ReadResult = struct { progress: bool, frames_completed: u32 };
+
+    fn readOnePeerStep(self: *Self, peer: *PeerReceiver) ReadResult {
+        var rs = &peer.read_state;
+
+        switch (rs.phase) {
+            .reading_header => {
+                const remaining = rs.header_buf[rs.header_bytes_read..];
+                const n = std.posix.read(peer.socket_fd, remaining) catch |err| {
+                    switch (err) {
+                        error.WouldBlock => return .{ .progress = false, .frames_completed = 0 },
+                        else => {
+                            self.disconnectPeer(peer);
+                            return .{ .progress = false, .frames_completed = 0 };
+                        },
+                    }
+                };
+                if (n == 0) {
+                    self.disconnectPeer(peer);
+                    return .{ .progress = false, .frames_completed = 0 };
+                }
+
+                rs.header_bytes_read += @intCast(n);
+                if (rs.header_bytes_read < TcpFrameHeader.size) {
+                    return .{ .progress = true, .frames_completed = 0 };
+                }
+
+                // Header complete — extract frame_length.
+                const header: *const TcpFrameHeader = @ptrCast(@alignCast(&rs.header_buf));
+                rs.frame_length = header.frame_length;
+
+                if (rs.frame_length < TcpFrameHeader.size or rs.frame_length > constants.tcp_max_frame_length) {
+                    self.disconnectPeer(peer);
+                    self.counters.increment(self.counter_ids.invalid_frame_drops);
+                    return .{ .progress = false, .frames_completed = 0 };
+                }
+
+                const payload_len = rs.payloadLength();
+                if (payload_len == 0) {
+                    // Header-only frame (e.g. heartbeat).
+                    self.processCompleteFrame(peer.node_id, &rs.header_buf, &.{});
+                    rs.reset();
+                    return .{ .progress = true, .frames_completed = 1 };
+                }
+
+                rs.phase = .reading_payload;
+                rs.payload_bytes_read = 0;
+                return .{ .progress = true, .frames_completed = 0 };
+            },
+            .reading_payload => {
+                const payload_len = rs.payloadLength();
+                const remaining = rs.payload_buf[rs.payload_bytes_read..payload_len];
+                const n = std.posix.read(peer.socket_fd, remaining) catch |err| {
+                    switch (err) {
+                        error.WouldBlock => return .{ .progress = false, .frames_completed = 0 },
+                        else => {
+                            self.disconnectPeer(peer);
+                            return .{ .progress = false, .frames_completed = 0 };
+                        },
+                    }
+                };
+                if (n == 0) {
+                    self.disconnectPeer(peer);
+                    return .{ .progress = false, .frames_completed = 0 };
+                }
+
+                rs.payload_bytes_read += @intCast(n);
+                if (rs.payload_bytes_read < payload_len) {
+                    return .{ .progress = true, .frames_completed = 0 };
+                }
+
+                // Frame complete.
+                self.processCompleteFrame(peer.node_id, &rs.header_buf, rs.payload_buf[0..payload_len]);
+                rs.reset();
+                return .{ .progress = true, .frames_completed = 1 };
+            },
+        }
+    }
+
+    fn disconnectPeer(self: *Self, peer: *PeerReceiver) void {
+        peer.close();
+        self.counters.increment(self.counter_ids.connection_errors);
     }
 
     // ── Frame Processing ──────────────────────────────────────────────
@@ -259,19 +558,15 @@ pub const ReceiverEventLoop = struct {
     // ── Admin Messages ────────────────────────────────────────────────
 
     fn handleAdminMessage(self: *Self, header: *const TcpFrameHeader, payload: []const u8) void {
-        _ = payload;
-        const broker_service = self.service_registry.lookup(@intCast(constants.broker_service_id)) orelse {
+        const queue = self.admin_cmd_queue orelse {
             self.counters.increment(self.counter_ids.admin_message_errors);
             return;
         };
 
-        const frame_len: usize = @intCast(header.frame_length);
-        const header_bytes: *const [TcpFrameHeader.size]u8 = @ptrCast(header);
-        broker_service.messages_ring_buffer.write(2, header_bytes[0..@min(frame_len, TcpFrameHeader.size)]) catch {
-            self.counters.increment(self.counter_ids.admin_message_errors);
-            return;
-        };
+        // Validate source_node_id from TCP header matches admin payload
+        admin_dispatch.dispatchAdminMessage(payload, queue, Clock.monotonicNanos());
 
+        _ = header;
         self.counters.increment(self.counter_ids.admin_messages_received);
     }
 
@@ -319,6 +614,11 @@ pub const ReceiverEventLoop = struct {
         peer.* = PeerReceiver.init(node_id, socket_fd, address, session_epoch, payload_buf);
         self.peers.put(node_id, peer);
         self.counters.increment(self.counter_ids.connections_accepted);
+
+        // Notify control loop of new peer so it re-broadcasts local services.
+        if (self.admin_cmd_queue) |q| {
+            _ = q.enqueue(.{ .peer_connected = .{ .node_id = node_id } });
+        }
     }
 
     pub fn removePeer(self: *Self, node_id: u8) void {

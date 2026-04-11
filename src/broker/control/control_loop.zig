@@ -24,7 +24,12 @@ const Command = brz_common.concurrent.command_queue.Command;
 const ServiceInstance = @import("service_registry.zig").ServiceInstance;
 const ClusterManager = @import("../cluster/cluster_manager.zig").ClusterManager;
 const CountersManager = brz_common.concurrent.counters.CountersManager;
-const msg = @import("control_messages.zig");
+const encoding = brz_common.message.control_encoding;
+const admin = @import("../cluster/admin_messages.zig");
+const admin_dispatch = @import("../cluster/admin_dispatch.zig");
+const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
+const AdminCommand = admin_dispatch.AdminCommand;
+const TcpFrameHeader = brz_common.protocol.frame_parser.TcpFrameHeader;
 const log = std.log.scoped(.control_loop);
 
 // ── File-level state for RingBuffer callback dispatch ─────────────────
@@ -87,6 +92,15 @@ pub const ControlLoop = struct {
     /// Allocator used for BuffersProvider instances (page allocator).
     allocator: std.mem.Allocator,
 
+    /// Admin command queue — receiver posts admin messages here.
+    admin_cmd_queue: ?*AdminCommandQueue(64),
+
+    /// Send ring buffer — used for broadcasting admin messages to peers.
+    send_ring_buffer: ?*RingBuffer,
+
+    /// Peer node IDs — used to iterate peers for broadcasting.
+    peer_node_ids: []const u8,
+
     const Self = @This();
 
     // ── Timing constants (imported from platform/constants.zig) ──
@@ -109,6 +123,9 @@ pub const ControlLoop = struct {
         storage_path: []const u8,
         group: []const u8,
         allocator: std.mem.Allocator,
+        admin_cmd_queue: ?*AdminCommandQueue(64) = null,
+        send_ring_buffer: ?*RingBuffer = null,
+        peer_node_ids: []const u8 = &.{},
     };
 
     pub fn init(opts: InitOptions) Self {
@@ -126,6 +143,9 @@ pub const ControlLoop = struct {
             .next_timeout_check_ns = 0,
             .next_heartbeat_check_ns = 0,
             .allocator = opts.allocator,
+            .admin_cmd_queue = opts.admin_cmd_queue,
+            .send_ring_buffer = opts.send_ring_buffer,
+            .peer_node_ids = opts.peer_node_ids,
         };
     }
 
@@ -142,6 +162,9 @@ pub const ControlLoop = struct {
 
         // 1. Drain inter-event-loop commands (max 1 per cycle to limit jitter)
         work_count += self.cmd_queue.drain(@ptrCast(self), dispatchCommandThunk, COMMAND_DRAIN_LIMIT);
+
+        // 1b. Drain admin commands from receiver event loop
+        work_count += self.processAdminCommands();
 
         // 2. Poll broker's control ring buffer for service messages.
         //    We set file-level state so the bare function pointer can find us.
@@ -207,19 +230,19 @@ pub const ControlLoop = struct {
     fn onControlMessage(self: *Self, _msg_type_id: i32, payload: []const u8) void {
         _ = _msg_type_id;
 
-        if (payload.len < msg.header_size) {
+        if (payload.len < 2) {
             log.warn("control message too short: {} bytes", .{payload.len});
             return;
         }
 
-        const header: *const msg.ControlMessageHeader = @ptrCast(@alignCast(payload.ptr));
+        const template_id = encoding.readTemplateId(payload);
 
-        switch (header.template_id) {
+        switch (template_id) {
             1 => self.handleRegisterService(payload),
             3 => self.handleSubscribeToServiceUpdates(payload),
             5 => self.handleUnregisterService(payload),
             else => {
-                log.warn("unknown control template_id: {}", .{header.template_id});
+                log.warn("unknown control template_id: {}", .{template_id});
             },
         }
     }
@@ -240,31 +263,32 @@ pub const ControlLoop = struct {
     // ─────────────────────────────────────────────────────────────
 
     fn handleRegisterService(self: *Self, payload: []const u8) void {
-        if (payload.len < @sizeOf(msg.RegisterServiceMsg)) {
+        // Minimum size: template_id(2) + service_id(4) + leader_election(1) + name_len(2) = 9
+        if (payload.len < 9) {
             log.warn("RegisterService message too short: {} bytes", .{payload.len});
             return;
         }
 
-        const register_msg: *const msg.RegisterServiceMsg = @ptrCast(@alignCast(payload.ptr));
-        const service_name = msg.decodeRegisterServiceName(payload);
+        const data = encoding.decodeRegisterService(payload);
+        const service_name = data.service_name;
 
         log.info("registering service: name={s}, id={}, leader_election={}", .{
             service_name,
-            register_msg.service_id,
-            register_msg.leader_election_enabled != 0,
+            data.service_id,
+            data.leader_election_enabled,
         });
 
         // 1. Register in ServiceRegistry
         self.service_registry.register(.{
-            .service_id = register_msg.service_id,
+            .service_id = data.service_id,
             .node_id = self.local_node_id,
             .service_name = service_name,
-            .leader_election_enabled = register_msg.leader_election_enabled != 0,
+            .leader_election_enabled = data.leader_election_enabled,
             .is_local = true,
         }) catch |err| {
             log.err("failed to register service {s} (id={}): {}", .{
                 service_name,
-                register_msg.service_id,
+                data.service_id,
                 err,
             });
             return;
@@ -273,49 +297,53 @@ pub const ControlLoop = struct {
         // 2. Open the service's metadata file and create a BuffersProvider
         const buffers = BuffersProvider.getInstance(
             self.allocator,
-            register_msg.service_id,
+            data.service_id,
             service_name,
             self.storage_path,
             self.group,
         ) catch |err| {
             log.err("failed to open metadata file for service {s} (id={}): {}", .{
                 service_name,
-                register_msg.service_id,
+                data.service_id,
                 err,
             });
             // Undo the registration.
-            _ = self.service_registry.remove(register_msg.service_id, self.local_node_id);
+            if (self.service_registry.remove(data.service_id, self.local_node_id)) |removed| {
+                self.allocator.free(@constCast(removed.service_name));
+            }
             return;
         };
 
         // 3. Associate the BuffersProvider with the service in the registry
-        self.service_registry.setLocalBuffers(register_msg.service_id, buffers);
+        self.service_registry.setLocalBuffers(data.service_id, buffers);
 
         // 4. Evaluate service leader (if leader election is enabled for this service)
         var is_leader = false;
-        if (register_msg.leader_election_enabled != 0) {
+        if (data.leader_election_enabled) {
             if (self.cluster_manager.isClusterLeader()) {
                 is_leader = self.leader_election.evaluate(
                     &self.service_registry,
                     service_name,
                     self.local_node_id,
-                    register_msg.service_id,
+                    data.service_id,
                 );
             }
         }
 
         // 5. Send RegistrationResponse to the service's control ring buffer
-        self.sendRegistrationResponse(buffers, register_msg.service_id, is_leader);
+        self.sendRegistrationResponse(buffers, data.service_id, is_leader);
 
-        // 6. Broadcast ServiceAdded to peer brokers (via cluster manager)
-        self.cluster_manager.broadcastServiceAdded(
-            register_msg.service_id,
+        // 6. Broadcast ServiceAdded to peer brokers (via send ring buffer)
+        self.broadcastServiceAdded(
+            data.service_id,
             service_name,
-            register_msg.leader_election_enabled != 0,
+            data.leader_election_enabled,
         );
 
         // 7. Notify all local subscribers watching this service name
         self.notifySubscribers(service_name);
+
+        log.info("service registered: name={s}, id={}", .{ service_name, data.service_id });
     }
 
     /// Write a RegistrationResponse to the service's control ring buffer.
@@ -325,12 +353,12 @@ pub const ControlLoop = struct {
         service_id: i32,
         is_leader: bool,
     ) void {
-        const len = msg.encodeRegistrationResponse(
-            &self.encode_buf,
-            service_id,
-            @intCast(self.local_node_id),
-            is_leader,
-        );
+        _ = is_leader;
+        const len = encoding.encodeRegistrationResponse(&self.encode_buf, .{
+            .service_id = service_id,
+            .node_id = @intCast(self.local_node_id),
+            .success = true,
+        });
 
         var control_rb = RingBuffer.init(
             @alignCast(buffers.getControlBuffer()),
@@ -361,27 +389,30 @@ pub const ControlLoop = struct {
     // ─────────────────────────────────────────────────────────────
 
     fn handleUnregisterService(self: *Self, payload: []const u8) void {
-        if (payload.len < @sizeOf(msg.UnregisterServiceMsg)) {
+        // Minimum size: template_id(2) + service_id(4) = 6
+        if (payload.len < 6) {
             log.warn("UnregisterService message too short: {} bytes", .{payload.len});
             return;
         }
 
-        const unregister_msg: *const msg.UnregisterServiceMsg = @ptrCast(
-            @alignCast(payload.ptr),
-        );
+        const data = encoding.decodeUnregisterService(payload);
 
-        log.info("unregistering service: id={}", .{unregister_msg.service_id});
-        self.handleServiceRemoved(unregister_msg.service_id);
+        log.info("unregistering service: id={}", .{data.service_id});
+        self.handleServiceRemoved(data.service_id);
+        log.info("service unregistered: id={}", .{data.service_id});
     }
 
     /// Shared path for both graceful and forced deregistration.
     /// Performs all cleanup and notifications.
     fn handleServiceRemoved(self: *Self, service_id: i32) void {
         // 1. Remove from ServiceRegistry. Returns the instance if it existed.
+        //    The returned instance's service_name is an owned allocation that
+        //    we must free when done.
         const removed = self.service_registry.remove(service_id, self.local_node_id) orelse {
             log.warn("attempted to remove unknown service: id={}", .{service_id});
             return;
         };
+        defer self.allocator.free(@constCast(removed.service_name));
 
         log.info("service removed: name={s}, id={}", .{
             removed.service_name,
@@ -394,8 +425,8 @@ pub const ControlLoop = struct {
         }
         self.service_registry.removeLocalBuffers(service_id);
 
-        // 3. Broadcast ServiceRemoved to peer brokers.
-        self.cluster_manager.broadcastServiceRemoved(service_id, removed.service_name);
+        // 3. Broadcast ServiceRemoved to peer brokers (via send ring buffer).
+        self.broadcastServiceRemoved(service_id, removed.service_name);
 
         // 4. Notify all local subscribers watching this service name.
         //    They'll receive an updated ServiceInstances list (possibly empty).
@@ -415,27 +446,175 @@ pub const ControlLoop = struct {
     }
 
     // ─────────────────────────────────────────────────────────────
+    // Admin Command Processing (cross-broker service discovery)
+    // ─────────────────────────────────────────────────────────────
+
+    fn processAdminCommands(self: *Self) u32 {
+        const queue = self.admin_cmd_queue orelse return 0;
+        var count: u32 = 0;
+        while (queue.dequeue()) |cmd| {
+            switch (cmd) {
+                .service_added => |e| self.handleRemoteServiceAdded(e.data),
+                .service_removed => |e| self.handleRemoteServiceRemoved(e.data),
+                .peer_connected => |e| self.handlePeerConnected(e.node_id),
+                else => {},
+            }
+            count += 1;
+        }
+        return count;
+    }
+
+    fn handleRemoteServiceAdded(self: *Self, data: [@sizeOf(admin.ServiceAddedBody)]u8) void {
+        var body: admin.ServiceAddedBody = undefined;
+        @memcpy(@as(*[@sizeOf(admin.ServiceAddedBody)]u8, @ptrCast(&body)), &data);
+
+        const name = admin.trimServiceName(&body.service_name);
+
+        log.info("remote service added: name={s}, id={}, node={}", .{
+            name, body.service_id, body.node_id,
+        });
+
+        self.service_registry.register(.{
+            .service_id = @as(i32, @intCast(body.service_id)),
+            .node_id = body.node_id,
+            .service_name = name,
+            .leader_election_enabled = body.leader_election_enabled == 1,
+            .is_local = false,
+        }) catch |err| {
+            log.err("failed to register remote service {s}: {}", .{ name, err });
+            return;
+        };
+
+        self.notifySubscribers(name);
+    }
+
+    fn handleRemoteServiceRemoved(self: *Self, data: [@sizeOf(admin.ServiceRemovedBody)]u8) void {
+        var body: admin.ServiceRemovedBody = undefined;
+        @memcpy(@as(*[@sizeOf(admin.ServiceRemovedBody)]u8, @ptrCast(&body)), &data);
+
+        const name = admin.trimServiceName(&body.service_name);
+        const removed = self.service_registry.remove(
+            @as(i32, @intCast(body.service_id)),
+            body.node_id,
+        ) orelse return;
+
+        defer self.allocator.free(@constCast(removed.service_name));
+
+        log.info("remote service removed: name={s}, id={}, node={}", .{
+            name, body.service_id, body.node_id,
+        });
+
+        self.notifySubscribers(name);
+    }
+
+    /// When a new peer connects, re-broadcast all local services so they
+    /// learn about us (handles the late-join case where the initial broadcast
+    /// was lost because the TCP link wasn't up yet).
+    fn handlePeerConnected(self: *Self, node_id: u8) void {
+        log.info("peer connected notification: node={}, re-broadcasting {} local services", .{
+            node_id,
+            self.service_registry.localServiceCount(),
+        });
+        self.broadcastAllLocalServices();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Admin Broadcast (outbound to peers)
+    // ─────────────────────────────────────────────────────────────
+
+    fn broadcastServiceAdded(self: *Self, service_id: i32, service_name: []const u8, leader_election_enabled: bool) void {
+        self.broadcastAdminMessage(
+            admin.ServiceAddedBody,
+            admin.TEMPLATE_SERVICE_ADDED,
+            admin.ServiceAddedBody{
+                .node_id = self.local_node_id,
+                .service_id = @intCast(service_id),
+                .service_name = admin.padServiceName(service_name),
+                .leader_election_enabled = if (leader_election_enabled) @as(u8, 1) else @as(u8, 0),
+            },
+        );
+    }
+
+    fn broadcastServiceRemoved(self: *Self, service_id: i32, service_name: []const u8) void {
+        self.broadcastAdminMessage(
+            admin.ServiceRemovedBody,
+            admin.TEMPLATE_SERVICE_REMOVED,
+            admin.ServiceRemovedBody{
+                .node_id = self.local_node_id,
+                .service_id = @intCast(service_id),
+                .service_name = admin.padServiceName(service_name),
+            },
+        );
+    }
+
+    fn broadcastAdminMessage(
+        self: *Self,
+        comptime BodyType: type,
+        template_id: u16,
+        body: BodyType,
+    ) void {
+        const srb = self.send_ring_buffer orelse return;
+        if (self.peer_node_ids.len == 0) return;
+
+        // Encode admin payload (AdminMessageHeader + body) into scratch buffer
+        const admin_payload_len = admin.encodeAdminMessage(
+            self.encode_buf[TcpFrameHeader.size..],
+            BodyType,
+            template_id,
+            body,
+        );
+
+        const frame_length: u32 = @intCast(TcpFrameHeader.size + admin_payload_len);
+
+        for (self.peer_node_ids) |peer_id| {
+            const header = TcpFrameHeader{
+                .frame_length = frame_length,
+                .flags = constants.flag_admin,
+                .source_node_id = self.local_node_id,
+                .target_node_id = peer_id,
+                .source_service_id = 0,
+                .target_service_id = 0,
+            };
+            const header_bytes: *const [TcpFrameHeader.size]u8 = @ptrCast(&header);
+            @memcpy(self.encode_buf[0..TcpFrameHeader.size], header_bytes);
+
+            srb.write(1, self.encode_buf[0..frame_length]) catch {
+                log.warn("send ring buffer full — dropping admin broadcast to node {}", .{peer_id});
+            };
+        }
+    }
+
+    fn broadcastAllLocalServices(self: *Self) void {
+        var inst_iter = self.service_registry.instances.valueIterator();
+        while (inst_iter.next()) |inst| {
+            if (inst.is_local) {
+                self.broadcastServiceAdded(inst.service_id, inst.service_name, inst.leader_election_enabled);
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
     // Service Discovery (Section 6)
     // ─────────────────────────────────────────────────────────────
 
     fn handleSubscribeToServiceUpdates(self: *Self, payload: []const u8) void {
-        if (payload.len < @sizeOf(msg.SubscribeMsg)) {
+        // Minimum size: template_id(2) + subscriber_id(4) + name_len(2) = 8
+        if (payload.len < 8) {
             log.warn("SubscribeToServiceUpdates message too short: {} bytes", .{payload.len});
             return;
         }
 
-        const subscribe_msg: *const msg.SubscribeMsg = @ptrCast(@alignCast(payload.ptr));
-        const service_name = msg.decodeSubscribeServiceName(payload);
+        const data = encoding.decodeSubscribeToServiceUpdates(payload);
 
         log.info("subscription: service {} subscribing to '{s}'", .{
-            subscribe_msg.local_service_id,
-            service_name,
+            data.subscriber_service_id,
+            data.target_service_name,
         });
 
         // 1. Register the subscription in the registry.
-        self.service_registry.addSubscription(service_name, subscribe_msg.local_service_id) catch |err| {
+        self.service_registry.addSubscription(data.target_service_name, data.subscriber_service_id) catch |err| {
             log.err("failed to register subscription for service {}: {}", .{
-                subscribe_msg.local_service_id,
+                data.subscriber_service_id,
                 err,
             });
             return;
@@ -443,7 +622,7 @@ pub const ControlLoop = struct {
 
         // 2. Immediately send the current instance list.
         //    Even if there are zero instances, the service needs to know.
-        self.sendServiceInstances(subscribe_msg.local_service_id, service_name);
+        self.sendServiceInstances(data.subscriber_service_id, data.target_service_name);
     }
 
     /// Send the complete current instance list for a service name to a single subscriber.
@@ -460,26 +639,7 @@ pub const ControlLoop = struct {
         var instance_buf: [constants.default_max_services]ServiceInstance = undefined;
         const count = self.service_registry.getInstancesByNameBuf(service_name, &instance_buf);
 
-        // Build ServiceInstanceEntry array on the stack.
-        var entries: [constants.default_max_services]msg.ServiceInstanceEntry = undefined;
-        for (instance_buf[0..count], 0..) |inst, i| {
-            const is_leader_id = self.service_registry.getLeader(service_name);
-            entries[i] = .{
-                .service_id = inst.service_id,
-                .node_id = @intCast(inst.node_id),
-                .is_leader = if (is_leader_id != null and is_leader_id.? == inst.service_id) @as(u8, 1) else @as(u8, 0),
-            };
-        }
-
-        // Encode the ServiceInstances message.
-        const len = msg.encodeServiceInstances(
-            &self.encode_buf,
-            subscriber_id,
-            service_name,
-            entries[0..count],
-        );
-
-        // Write to the subscriber's control ring buffer.
+        // Open the subscriber's control ring buffer.
         var control_rb = RingBuffer.init(
             @alignCast(subscriber_buffers.getControlBuffer()),
             false,
@@ -492,11 +652,26 @@ pub const ControlLoop = struct {
             });
             return;
         };
-        control_rb.write(CONTROL_MSG_TYPE, self.encode_buf[0..len]) catch {
-            log.warn("subscriber {} control ring buffer full — dropping ServiceInstances", .{
-                subscriber_id,
+
+        // Send one ServiceInstance message per instance (matches service-side decoder).
+        for (instance_buf[0..count]) |inst| {
+            const is_leader_id = self.service_registry.getLeader(service_name);
+            const is_leader = is_leader_id != null and is_leader_id.? == inst.service_id;
+
+            const len = encoding.encodeServiceInstance(&self.encode_buf, .{
+                .service_id = inst.service_id,
+                .node_id = @intCast(inst.node_id),
+                .is_leader = is_leader,
+                .service_name = service_name,
             });
-        };
+
+            control_rb.write(CONTROL_MSG_TYPE, self.encode_buf[0..len]) catch {
+                log.warn("subscriber {} control ring buffer full — dropping ServiceInstance", .{
+                    subscriber_id,
+                });
+                return;
+            };
+        }
     }
 
     /// Called whenever the instance set for a service name changes. Sends the
@@ -521,14 +696,13 @@ pub const ControlLoop = struct {
         leader_node_id: u8,
         service_name: []const u8,
     ) void {
+        _ = leader_node_id;
         const subscriber_set = self.service_registry.getSubscribers(service_name) orelse return;
 
-        const len = msg.encodeLeaderChanged(
-            &self.encode_buf,
-            leader_service_id,
-            @intCast(leader_node_id),
-            service_name,
-        );
+        const len = encoding.encodeLeaderChanged(&self.encode_buf, .{
+            .leader_service_id = leader_service_id,
+            .service_name = service_name,
+        });
 
         var sub_iter = subscriber_set.keyIterator();
         while (sub_iter.next()) |subscriber_id_ptr| {
@@ -615,15 +789,23 @@ const TestFixture = struct {
         var f: TestFixture = undefined;
         @memset(&f.values_buf, 0);
         @memset(&f.meta_buf, 0);
-        f.counters_mgr = CountersManager.init(&f.values_buf, &f.meta_buf);
-        f.cluster_mgr = ClusterManager.initSingleNode(1);
-        f.cmd_queue = CommandQueue.init(&f.cmd_buf);
         @memset(&f.rb_buf, 0);
-        f.rb = RingBuffer.init(&f.rb_buf, false, null, null) catch unreachable;
+        f.cluster_mgr = ClusterManager.initSingleNode(1);
+        // Do NOT init counters_mgr, cmd_queue, rb here — their internal
+        // pointers would dangle after the return-by-value copy.
+        // Call fixup() after the fixture is at its final address.
         return f;
     }
 
+    /// Must be called after create() to fix up internal pointers.
+    fn fixup(self: *TestFixture) void {
+        self.counters_mgr = CountersManager.init(&self.values_buf, &self.meta_buf);
+        self.cmd_queue = CommandQueue.init(&self.cmd_buf);
+        self.rb = RingBuffer.init(&self.rb_buf, false, null, null) catch unreachable;
+    }
+
     fn makeControlLoop(self: *TestFixture) ControlLoop {
+        self.fixup();
         return ControlLoop.init(.{
             .control_rb = &self.rb,
             .cmd_queue = &self.cmd_queue,

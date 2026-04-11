@@ -29,9 +29,11 @@ pub const ServiceHeartbeatChecker = struct {
     pub fn check(
         self: *Self,
         registry: *ServiceRegistry,
-        now_ns: i64,
+        _: i64,
     ) []const i32 {
-        const now_ms = @divFloor(now_ns, std.time.ns_per_ms);
+        // Services store heartbeat timestamps as epoch millis, so we must
+        // compare against epoch millis — not monotonic nanos converted to ms.
+        const now_ms = platform.Clock.epochMillis();
         var remove_count: u32 = 0;
 
         var buffers_iter = registry.local_buffers.iterator();

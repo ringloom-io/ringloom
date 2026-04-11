@@ -181,7 +181,8 @@ pub const ProcessHandle = struct {
     }
 
     /// Performs a non-blocking read from the child's stderr pipe,
-    /// mirroring any available bytes to the stderr log file.
+    /// appending to `stdout_capture` (so waitForLogLine can match
+    /// log output) and mirroring to the stderr log file.
     ///
     /// Returns the number of bytes read (0 if nothing was available).
     pub fn readAvailableStderr(self: *ProcessHandle) !usize {
@@ -196,9 +197,15 @@ pub const ProcessHandle = struct {
 
         if (n == 0) return 0;
 
+        const data = buf[0..n];
+
+        // Append to the combined capture so waitForLogLine can match
+        // log output (Zig's std.log writes to stderr).
+        try self.stdout_capture.append(data);
+
         // Mirror to the stderr log file.
         if (self.stderr_file) |f| {
-            f.writeAll(buf[0..n]) catch {};
+            f.writeAll(data) catch {};
         }
 
         return n;
@@ -209,11 +216,10 @@ pub const ProcessHandle = struct {
     pub fn drainAvailableOutput(self: *ProcessHandle) !usize {
         var total: usize = 0;
         while (true) {
-            const n = try self.readAvailableOutput();
-            // Also drain stderr while we are at it.
-            _ = self.readAvailableStderr() catch 0;
-            if (n == 0) break;
-            total += n;
+            const n_out = try self.readAvailableOutput();
+            const n_err = self.readAvailableStderr() catch 0;
+            if (n_out == 0 and n_err == 0) break;
+            total += n_out + n_err;
         }
         return total;
     }

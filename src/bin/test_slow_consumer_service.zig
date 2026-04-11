@@ -15,7 +15,7 @@ const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 // ── Mutable file-level state (acceptable for a test binary) ──────────
 
 var received_count: u64 = 0;
-var shutdown_requested: bool = false;
+var shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var max_messages: u64 = 0;
 var delay_per_message_ms: u64 = 100;
 
@@ -34,7 +34,7 @@ fn messageHandler(_: i32, payload: []const u8) void {
     }
 
     if (max_messages > 0 and received_count >= max_messages) {
-        shutdown_requested = true;
+        shutdown_requested.store(true, .release);
     }
 }
 
@@ -60,6 +60,22 @@ fn parseU64Arg(args: []const []const u8, flag: []const u8, default: u64) u64 {
     return default;
 }
 
+// ── Signal handling ──────────────────────────────────────────────────
+
+fn installSignalHandler() void {
+    const handler: std.posix.Sigaction = .{
+        .handler = .{ .handler = signalHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TERM, &handler, null);
+    std.posix.sigaction(std.posix.SIG.INT, &handler, null);
+}
+
+fn signalHandler(_: c_int) callconv(.c) void {
+    shutdown_requested.store(true, .release);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────
 
 pub fn main() !void {
@@ -73,6 +89,7 @@ pub fn main() !void {
     const storage_path = parseStringArg(args, "--storage-path", "/dev/shm");
     const group = parseStringArg(args, "--group", "default");
     const service_name = parseStringArg(args, "--service-name", "slow-consumer");
+    const broker_node_id: i16 = @intCast(parseU64Arg(args, "--broker-node-id", 1));
     delay_per_message_ms = parseU64Arg(args, "--delay-per-message-ms", 100);
     max_messages = parseU64Arg(args, "--max-messages", 0);
 
@@ -95,6 +112,7 @@ pub fn main() !void {
         .storage_path = storage_path,
         .group = group,
         .service_name = service_name,
+        .broker_node_id = broker_node_id,
     }) catch |err| {
         try stderr.print("slow-consumer: failed to start engine: {}\n", .{err});
         try stderr.flush();
@@ -111,10 +129,11 @@ pub fn main() !void {
     // ── Install handler ──────────────────────────────────────────────
 
     engine.setMessageHandler(&messageHandler);
+    installSignalHandler();
 
     // ── Main loop — sleep and check for shutdown ─────────────────────
 
-    while (!shutdown_requested) {
+    while (!shutdown_requested.load(.acquire)) {
         std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 

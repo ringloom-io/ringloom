@@ -7,6 +7,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const ServiceMetadataFile = @import("service_metadata.zig").ServiceMetadataFile;
+const BrokerMetadataFile = @import("broker_metadata.zig").BrokerMetadataFile;
 const platform = @import("../platform.zig");
 
 /// Information about a discovered live service.
@@ -103,8 +104,8 @@ pub const ServiceScanner = struct {
         while (try iter.next()) |entry| {
             if (!std.mem.endsWith(u8, entry.name, ".dat")) continue;
 
-            // Skip the broker's own file.
-            if (std.mem.eql(u8, entry.name, "broker_0.dat")) continue;
+            // Skip broker metadata files (broker_0.dat, broker_1.dat, etc.).
+            if (BrokerMetadataFile.isBrokerMetadataFile(entry.name)) continue;
 
             // Parse service name and ID from filename: <name>_<id>.dat
             const parsed = parseFileName(entry.name) orelse continue;

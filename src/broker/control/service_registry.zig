@@ -59,23 +59,37 @@ pub const ServiceRegistry = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        // Clean up name_index ArrayLists.
-        var name_iter = self.name_index.valueIterator();
-        while (name_iter.next()) |list| {
-            list.deinit(self.allocator);
+        // Free owned instance names.
+        var inst_iter = self.instances.valueIterator();
+        while (inst_iter.next()) |inst| {
+            self.allocator.free(@constCast(inst.service_name));
+        }
+        self.instances.deinit();
+
+        // Free owned name_index keys and lists.
+        var name_iter = self.name_index.iterator();
+        while (name_iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+            self.allocator.free(@constCast(entry.key_ptr.*));
         }
         self.name_index.deinit();
 
-        // Clean up subscription sets.
-        var sub_iter = self.subscriptions.valueIterator();
-        while (sub_iter.next()) |set| {
-            set.deinit();
+        // Free owned subscription keys and sets.
+        var sub_iter = self.subscriptions.iterator();
+        while (sub_iter.next()) |entry| {
+            entry.value_ptr.deinit();
+            self.allocator.free(@constCast(entry.key_ptr.*));
         }
         self.subscriptions.deinit();
 
-        self.instances.deinit();
-        self.local_buffers.deinit();
+        // Free owned leader keys.
+        var leader_iter = self.service_leaders.keyIterator();
+        while (leader_iter.next()) |key_ptr| {
+            self.allocator.free(@constCast(key_ptr.*));
+        }
         self.service_leaders.deinit();
+
+        self.local_buffers.deinit();
     }
 
     // ── Registration ─────────────────────────────────────────────
@@ -91,18 +105,41 @@ pub const ServiceRegistry = struct {
             return error.AlreadyRegistered;
         }
 
-        try self.instances.put(key, instance);
+        // Own the service name — the caller's slice may point to transient
+        // ring-buffer memory that gets reused after the callback returns.
+        const owned_name = try self.allocator.dupe(u8, instance.service_name);
 
-        // Update the name index.
-        const gop = try self.name_index.getOrPut(instance.service_name);
+        var owned_instance = instance;
+        owned_instance.service_name = owned_name;
+
+        self.instances.put(key, owned_instance) catch |err| {
+            self.allocator.free(owned_name);
+            return err;
+        };
+
+        // instances now owns owned_name. Update name index with a separately
+        // owned key so that removing one instance doesn't invalidate the key
+        // while other instances of the same name remain.
+        const needs_new_key = !self.name_index.contains(owned_name);
+        const owned_key: ?[]u8 = if (needs_new_key)
+            self.allocator.dupe(u8, instance.service_name) catch return error.OutOfMemory
+        else
+            null;
+
+        const gop = self.name_index.getOrPut(if (owned_key) |k| k else owned_name) catch {
+            if (owned_key) |k| self.allocator.free(k);
+            return error.OutOfMemory;
+        };
         if (!gop.found_existing) {
             gop.value_ptr.* = .empty;
         }
-        try gop.value_ptr.append(self.allocator, key);
+        gop.value_ptr.append(self.allocator, key) catch return error.OutOfMemory;
     }
 
     /// Remove a service instance. Returns the removed instance, or null
     /// if no matching instance was found.
+    /// The caller must free the returned instance's `service_name` with
+    /// `self.allocator.free()` after use, since the registry owns it.
     pub fn remove(self: *Self, service_id: i32, node_id: u8) ?ServiceInstance {
         const key = InstanceKey{ .service_id = service_id, .node_id = node_id };
         const kv = self.instances.fetchRemove(key) orelse return null;
@@ -115,6 +152,13 @@ pub const ServiceRegistry = struct {
                     _ = list.orderedRemove(i);
                     break;
                 }
+            }
+            // If the list is now empty, remove the name_index entry and free
+            // the owned key.
+            if (list.items.len == 0) {
+                list.deinit(self.allocator);
+                const entry = self.name_index.fetchRemove(removed.service_name).?;
+                self.allocator.free(@constCast(entry.key));
             }
         }
 
@@ -177,7 +221,16 @@ pub const ServiceRegistry = struct {
     }
 
     pub fn addSubscription(self: *Self, service_name: []const u8, subscriber_id: i32) !void {
-        const gop = try self.subscriptions.getOrPut(service_name);
+        const needs_new_key = !self.subscriptions.contains(service_name);
+        const owned_key: ?[]u8 = if (needs_new_key)
+            try self.allocator.dupe(u8, service_name)
+        else
+            null;
+
+        const gop = self.subscriptions.getOrPut(if (owned_key) |k| k else service_name) catch |err| {
+            if (owned_key) |k| self.allocator.free(k);
+            return err;
+        };
         if (!gop.found_existing) {
             gop.value_ptr.* = std.AutoHashMap(i32, void).init(self.allocator);
         }
@@ -185,17 +238,28 @@ pub const ServiceRegistry = struct {
     }
 
     pub fn removeSubscription(self: *Self, service_name: []const u8, subscriber_id: i32) void {
-        if (self.subscriptions.getPtr(service_name)) |set| {
-            _ = set.remove(subscriber_id);
+        const set = self.subscriptions.getPtr(service_name) orelse return;
+        _ = set.remove(subscriber_id);
+        if (set.count() == 0) {
+            set.deinit();
+            if (self.subscriptions.fetchRemove(service_name)) |entry| {
+                self.allocator.free(@constCast(entry.key));
+            }
         }
     }
 
     pub fn setLeader(self: *Self, service_name: []const u8, leader_service_id: i32) void {
-        self.service_leaders.put(service_name, leader_service_id) catch {};
+        const gop = self.service_leaders.getOrPut(service_name) catch return;
+        if (!gop.found_existing) {
+            gop.key_ptr.* = self.allocator.dupe(u8, service_name) catch return;
+        }
+        gop.value_ptr.* = leader_service_id;
     }
 
     pub fn removeLeader(self: *Self, service_name: []const u8) void {
-        _ = self.service_leaders.remove(service_name);
+        if (self.service_leaders.fetchRemove(service_name)) |entry| {
+            self.allocator.free(@constCast(entry.key));
+        }
     }
 };
 
@@ -243,6 +307,8 @@ test "remove service removes from name index" {
     // Then
     try testing.expect(removed != null);
     try testing.expectEqualStrings("my-service", removed.?.service_name);
+    // Free the owned name returned by remove().
+    testing.allocator.free(@constCast(removed.?.service_name));
 
     var buf: [256]ServiceInstance = undefined;
     const count = registry.getInstancesByNameBuf("my-service", &buf);

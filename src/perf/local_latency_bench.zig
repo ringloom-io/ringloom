@@ -45,6 +45,7 @@ fn runLocalLatencyBench(
     const echo = try harness.startService(.{
         .executable_name = "brz-test-echo-service",
         .service_name = "echo",
+        .extra_args = &.{"--quiet"},
     });
     try harness.waitForServiceReady(echo, 5000);
 

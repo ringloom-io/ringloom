@@ -21,6 +21,10 @@ const CountersManager = brz_common.concurrent.counters.CountersManager;
 const frame_parser = brz_common.protocol.frame_parser;
 const TcpFrameHeader = frame_parser.TcpFrameHeader;
 
+const tcp = @import("brz_tcp");
+const HandshakeFrame = tcp.HandshakeFrame;
+const SocketConfig = tcp.SocketConfig;
+
 const PeerSender = @import("peer_sender.zig").PeerSender;
 const ConnectionState = @import("peer_sender.zig").ConnectionState;
 const SendBufferPool = @import("send_buffer_pool.zig").SendBufferPool;
@@ -150,6 +154,9 @@ pub const SenderEventLoop = struct {
     /// Accumulated work count for the current duty cycle.
     pending_send_count: u32,
 
+    /// FNV-1a hash of the cluster group name (for handshake validation).
+    group_name_hash: u32,
+
     const Self = @This();
 
     pub fn init(
@@ -157,6 +164,16 @@ pub const SenderEventLoop = struct {
         counters: *CountersManager,
         local_node_id: u8,
         allocator: std.mem.Allocator,
+    ) !Self {
+        return Self.initWithGroup(send_ring_buffer, counters, local_node_id, allocator, "brz");
+    }
+
+    pub fn initWithGroup(
+        send_ring_buffer: *RingBuffer,
+        counters: *CountersManager,
+        local_node_id: u8,
+        allocator: std.mem.Allocator,
+        group_name: []const u8,
     ) !Self {
         return .{
             .send_ring_buffer = send_ring_buffer,
@@ -168,6 +185,7 @@ pub const SenderEventLoop = struct {
             .running = AtomicBool.init(true),
             .allocator = allocator,
             .pending_send_count = 0,
+            .group_name_hash = HandshakeFrame.hashGroupName(group_name),
         };
     }
 
@@ -205,6 +223,9 @@ pub const SenderEventLoop = struct {
 
         // ── Phase 3: Process reconnections ───────────────────────────
         self.processReconnections(now_ns);
+
+        // ── Phase 4: Flush write queues to TCP ───────────────────────
+        work_count += self.flushWriteQueues();
 
         work_count += self.pending_send_count;
 
@@ -268,13 +289,83 @@ pub const SenderEventLoop = struct {
             // Only send heartbeat if no data was sent within the interval.
             if (now_ns - peer.last_send_ns < constants.default_heartbeat_interval_ns) continue;
 
-            // Build a heartbeat frame (header only, no payload).
-            // In production this would be written directly to TCP, bypassing
-            // the write queue. For now we just track the heartbeat.
+            // Build and send a heartbeat frame directly to TCP.
+            var heartbeat: TcpFrameHeader = .{
+                .frame_length = constants.tcp_header_length,
+                .flags = 0x01, // heartbeat flag
+                .source_node_id = self.local_node_id,
+                .target_node_id = peer.node_id,
+                .source_service_id = 0,
+                .target_service_id = 0,
+                .template_id = constants.heartbeat_template_id,
+                .correlation_id = 0,
+            };
+            const heartbeat_bytes = std.mem.asBytes(&heartbeat);
+            const written = std.posix.write(peer.socket_fd, heartbeat_bytes) catch |err| {
+                switch (err) {
+                    error.WouldBlock => continue,
+                    else => {
+                        self.disconnectPeer(peer);
+                        continue;
+                    },
+                }
+            };
+            if (written < heartbeat_bytes.len) {
+                // Partial heartbeat write — treat as error, disconnect.
+                self.disconnectPeer(peer);
+                continue;
+            }
+
             peer.last_send_ns = now_ns;
             self.counters.increment(self.counter_ids.heartbeats_sent);
             self.pending_send_count += 1;
         }
+    }
+
+    // ── TCP Write Queue Flush ────────────────────────────────────────
+
+    fn flushWriteQueues(self: *Self) u32 {
+        var work_count: u32 = 0;
+
+        var peer_iter = self.peers.iterator();
+        while (peer_iter.next()) |peer| {
+            if (peer.state != .connected) continue;
+
+            var budget: u32 = constants.write_budget_per_peer;
+            while (budget > 0) : (budget -= 1) {
+                const frame_data = peer.write_queue.peek() orelse break;
+
+                const to_write = frame_data[peer.partial_write_offset..];
+                const written = std.posix.write(peer.socket_fd, to_write) catch |err| {
+                    switch (err) {
+                        error.WouldBlock => {
+                            peer.write_blocked = true;
+                            break;
+                        },
+                        else => {
+                            self.disconnectPeer(peer);
+                            break;
+                        },
+                    }
+                };
+
+                peer.partial_write_offset += written;
+                if (peer.partial_write_offset >= frame_data.len) {
+                    // Frame fully written.
+                    peer.write_queue.dequeue();
+                    peer.partial_write_offset = 0;
+                    peer.write_blocked = false;
+                    peer.last_send_ns = Clock.monotonicNanos();
+                    work_count += 1;
+                } else {
+                    // Partial write — try again next cycle.
+                    peer.write_blocked = true;
+                    break;
+                }
+            }
+        }
+
+        return work_count;
     }
 
     // ── Reconnections ─────────────────────────────────────────────────
@@ -282,14 +373,116 @@ pub const SenderEventLoop = struct {
     fn processReconnections(self: *Self, now_ns: i64) void {
         var peer_iter = self.peers.iterator();
         while (peer_iter.next()) |peer| {
-            if (peer.state != .disconnected) continue;
-            if (now_ns < peer.next_reconnect_ns) continue;
-
-            // In production, this would initiate a TCP connect via IoEngine.
-            // For now, just track the attempt.
-            self.counters.increment(self.counter_ids.reconnect_attempts);
-            peer.advanceBackoff(now_ns);
+            switch (peer.state) {
+                .disconnected => {
+                    if (now_ns < peer.next_reconnect_ns) continue;
+                    self.initiateConnect(peer, now_ns);
+                },
+                .connecting => {
+                    self.checkConnectCompletion(peer);
+                },
+                .connected => {},
+            }
         }
+    }
+
+    fn initiateConnect(self: *Self, peer: *PeerSender, now_ns: i64) void {
+        self.counters.increment(self.counter_ids.reconnect_attempts);
+
+        const fd = std.posix.socket(
+            peer.address.any.family,
+            std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
+            0,
+        ) catch {
+            peer.advanceBackoff(now_ns);
+            return;
+        };
+
+        // Apply socket tuning (TCP_NODELAY, buffer sizes, etc.)
+        const sock_cfg = SocketConfig{};
+        sock_cfg.apply(fd) catch {
+            std.posix.close(fd);
+            peer.advanceBackoff(now_ns);
+            return;
+        };
+
+        // Non-blocking connect — expect EINPROGRESS.
+        std.posix.connect(fd, &peer.address.any, peer.address.getOsSockLen()) catch |err| {
+            switch (err) {
+                error.WouldBlock => {
+                    // EINPROGRESS — connect in progress, will complete async.
+                    peer.socket_fd = fd;
+                    peer.state = .connecting;
+                    return;
+                },
+                else => {
+                    std.posix.close(fd);
+                    peer.advanceBackoff(now_ns);
+                    return;
+                },
+            }
+        };
+
+        // Immediate connect success (rare, e.g. loopback).
+        peer.socket_fd = fd;
+        self.completeConnect(peer);
+    }
+
+    fn checkConnectCompletion(self: *Self, peer: *PeerSender) void {
+        // Poll for connect completion using SO_ERROR.
+        var err_val: [4]u8 = undefined;
+        std.posix.getsockopt(
+            peer.socket_fd,
+            std.posix.SOL.SOCKET,
+            std.posix.SO.ERROR,
+            &err_val,
+        ) catch {
+            self.disconnectPeer(peer);
+            return;
+        };
+        const so_error = std.mem.bytesAsValue(c_int, &err_val);
+        if (so_error.* != 0) {
+            // Connect failed.
+            self.disconnectPeer(peer);
+            return;
+        }
+
+        // SO_ERROR == 0 means connect completed successfully.
+        self.completeConnect(peer);
+    }
+
+    fn completeConnect(self: *Self, peer: *PeerSender) void {
+        // Send the handshake frame.
+        const handshake = HandshakeFrame{
+            .source_node_id = self.local_node_id,
+            .target_node_id = peer.node_id,
+            .direction = .outbound,
+            .session_epoch = @intCast(Clock.monotonicNanos()),
+            .group_name_hash = self.group_name_hash,
+        };
+        const handshake_bytes = handshake.toBytes();
+        _ = std.posix.write(peer.socket_fd, handshake_bytes) catch {
+            self.disconnectPeer(peer);
+            return;
+        };
+
+        peer.state = .connected;
+        peer.resetBackoff();
+        peer.write_blocked = false;
+        peer.partial_write_offset = 0;
+        self.counters.increment(self.counter_ids.peers_connected);
+    }
+
+    fn disconnectPeer(self: *Self, peer: *PeerSender) void {
+        if (peer.socket_fd >= 0) {
+            std.posix.close(peer.socket_fd);
+            peer.socket_fd = -1;
+        }
+        peer.state = .disconnected;
+        peer.write_blocked = false;
+        peer.partial_write_offset = 0;
+        peer.advanceBackoff(Clock.monotonicNanos());
+        self.counters.increment(self.counter_ids.peers_disconnected);
     }
 
     // ── Peer Lifecycle Management ─────────────────────────────────────

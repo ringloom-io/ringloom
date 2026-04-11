@@ -18,6 +18,8 @@ pub const ServiceClientRegistry = struct {
     broker_meta: ?*BrokerMetadataFile,
     local_node_id: i16,
     local_service_id: i32,
+    storage_path: []const u8,
+    group: []const u8,
 
     const Self = @This();
 
@@ -26,6 +28,8 @@ pub const ServiceClientRegistry = struct {
         broker_meta: ?*BrokerMetadataFile,
         local_node_id: i16,
         local_service_id: i32,
+        storage_path: []const u8,
+        group: []const u8,
     ) Self {
         return .{
             .clients = std.StringHashMap(*ServiceClient).init(allocator),
@@ -33,6 +37,8 @@ pub const ServiceClientRegistry = struct {
             .broker_meta = broker_meta,
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
+            .storage_path = storage_path,
+            .group = group,
         };
     }
 
@@ -64,11 +70,23 @@ pub const ServiceClientRegistry = struct {
     }) void {
         const client = self.clients.get(instance_data.service_name) orelse return;
 
-        // For local instances, try to open the target service's metadata file
-        // and create an IpcProducer for direct writes.
+        // Check if this instance already exists — update in place if so.
+        if (client.findInstance(instance_data.service_id)) |existing| {
+            existing.is_leader = instance_data.is_leader;
+            return;
+        }
+
+        // For local instances, open the target service's metadata file
+        // and create an IpcProducer for direct shared-memory writes.
         var ipc_producer: ?*IpcProducer = null;
         if (instance_data.node_id == self.local_node_id) {
-            if (BuffersProvider.getCached(instance_data.service_id)) |provider| {
+            if (BuffersProvider.getInstance(
+                self.allocator,
+                instance_data.service_id,
+                instance_data.service_name,
+                self.storage_path,
+                self.group,
+            )) |provider| {
                 const producer = self.allocator.create(IpcProducer) catch return;
                 producer.* = IpcProducer.init(
                     @alignCast(provider.getMessagesBuffer()),
@@ -77,7 +95,7 @@ pub const ServiceClientRegistry = struct {
                     return;
                 };
                 ipc_producer = producer;
-            }
+            } else |_| {}
         }
 
         client.addInstance(.{

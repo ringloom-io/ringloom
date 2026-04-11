@@ -1454,3 +1454,108 @@ shortcomings:
 *Next recommended companion documents:*
 - `13-library-and-package-split.md`
 - `14-broker-binary-and-runtime-wiring.md`
+
+---
+
+## Implementation Status
+
+> Last updated: 2025-07-10
+
+### Test Results Summary
+
+| Suite | Tests | Status |
+|-------|------:|--------|
+| Unit tests (`zig build test`) | 482/482 | ✅ All pass |
+| End-to-end tests (`zig build e2e`) | 31/31 | ✅ All pass |
+| Performance benchmarks (`zig build perf`) | 30/30 | ✅ All pass |
+
+### What Works
+
+- **Local IPC path** — fully operational. Services on the same broker exchange
+  messages through shared-memory ring buffers at up to **11.2 M msgs/sec** (32 B)
+  and **27 GB/sec** (4,096 B).
+- **Cross-broker (remote) message transport** — fully operational. The sender
+  event loop establishes non-blocking TCP connections to peers, performs a
+  HandshakeFrame handshake, and flushes write queues. The receiver event loop
+  accepts connections, validates handshakes, reads frames using a per-peer
+  ReadState machine, and dispatches admin messages to the control loop via an
+  AdminCommandQueue. Peak burst rate on loopback: **10.9 M msgs/sec** (32 B).
+- **Service discovery across brokers** — when a service registers on broker B,
+  the control loop broadcasts a `ServiceAdded` admin frame to all peers via
+  the send ring buffer. On receiving a `ServiceAdded` frame, the remote broker
+  registers a remote instance in its service registry so local senders can
+  route to it. Late-join re-broadcast ensures peers that connect after service
+  registration still learn about existing services.
+- **Per-message latency histograms** — the ping service records individual
+  send latency per message using `nanoTimestamp()`. Results include p50, p95,
+  p99, and max in both JSON output and console. Local p50 = 70 ns (32 B).
+- **Test harness** — `TestHarness` manages broker/service lifecycles, temporary
+  workspaces, readiness synchronization, and result capture as designed in §7.
+- **All six test service binaries** — echo, ping, forwarder, leader-aware,
+  slow-consumer, and crashy services are built and exercised.
+- **Backpressure** — ring buffer correctly returns `BufferFull` under load;
+  the onset point is visible at ~5K–10K messages (128 B) with a 1 MB buffer.
+- **Recovery** — service crash, service kill, broker restart, and rapid-restart
+  scenarios all complete within expected timeframes (~5–12 s including
+  heartbeat timeouts).
+
+### What Does Not Work Yet
+
+All major features are now implemented. Cross-broker message transport and
+per-message latency histograms are fully wired and operational.
+
+### Previously Unimplemented (Now Complete)
+
+- **Cross-broker (remote) message transport** — the broker-to-broker relay path
+  is now fully wired. The sender event loop establishes non-blocking TCP
+  connections to peers, performs a HandshakeFrame handshake, and flushes
+  write queues to TCP sockets. The receiver event loop accepts incoming
+  connections, validates handshakes, and reads frames using a per-peer
+  ReadState machine. `sendToRemoteService()` now writes TcpFrameHeader
+  format (matching the wire protocol) instead of MessageHeader format.
+  Remote latency/throughput tests work end-to-end across broker instances.
+- **Cross-broker service discovery** — the control loop broadcasts
+  `ServiceAdded`/`ServiceRemoved` admin frames to all peers whenever a local
+  service registers or deregisters. Inbound admin frames from peers are
+  dispatched via an `AdminCommandQueue` (SPSC) from the receiver event loop
+  to the control loop, which registers/removes remote instances in the
+  service registry and notifies subscribers. A `peer_connected` event
+  triggers re-broadcast of all local services to newly connected peers,
+  solving the late-join problem.
+- **Per-message latency histograms** — the ping service now records
+  individual send latency for each message using the Histogram from
+  `brz_testing`. The measurement loop captures `nanoTimestamp()` before
+  and after each `client.send()` call, recording the delta. The JSON
+  results file includes `send_latency_p50_ns`, `send_latency_p95_ns`,
+  `send_latency_p99_ns`, and `send_latency_max_ns` fields. Console
+  output also prints the latency percentiles.
+
+### Bugs Found and Fixed During Implementation
+
+1. **Broker segfault on startup** — dangling pointers from struct-by-value
+   returns in `init()`, stdout readiness polling, and missing SIGTERM handling.
+2. **Encoding mismatch** — two incompatible control message encoding schemes
+   (length-prefixed vs raw) coexisted; unified to length-prefixed.
+3. **Log capture** — test harness read stderr instead of stdout for service
+   readiness detection; fixed to capture stdout.
+4. **Heartbeat timeout** — epoch vs monotonic time domain mismatch caused
+   immediate false heartbeat expiry.
+5. **Metadata file collision** — all services wrote to the same filename;
+   added `node_id` to the metadata filename.
+6. **Dangling string pointers** — `ServiceRegistry` stored pointers into
+   temporary buffers; fixed to own (allocator.dupe) string data.
+7. **Service discovery IPC failure** — `BuffersProvider.getCached()` only
+   had the service's own metadata; changed to `getInstance()` which opens
+   target metadata files on demand.
+8. **Instance list duplication** — broker sends full instance snapshots but
+   service appended without dedup; added `findInstance()` guard.
+9. **Echo service stdout bottleneck** — per-message `stdout.print()+flush()`
+   limited echo to ~80K msgs/s; added `--quiet` flag for benchmarks.
+10. **sendToRemoteService protocol mismatch** — wrote `MessageHeader` (32 B)
+    but the sender event loop expected `TcpFrameHeader` (24 B); fixed to
+    write `TcpFrameHeader` format.
+11. **ControlLoop TestFixture dangling pointers** — `TestFixture.create()`
+    returned by value; internal buffer pointers (ring buffer, command queue)
+    pointed into the local stack frame's sub-fields and dangled after the
+    copy. Fixed by deferring buffer-dependent init to a `fixup()` method
+    called after the fixture is at its final address.

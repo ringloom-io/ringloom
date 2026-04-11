@@ -53,6 +53,7 @@ test "service recovery time after crash" {
     const replacement = try harness.startService(.{
         .executable_name = "brz-test-echo-service",
         .service_name = "crashy",
+        .extra_args = &.{"--quiet"},
     });
     try harness.waitForServiceReady(replacement, 5000);
 
@@ -101,6 +102,7 @@ test "service recovery time after kill" {
     const echo = try harness.startService(.{
         .executable_name = "brz-test-echo-service",
         .service_name = "killable",
+        .extra_args = &.{"--quiet"},
     });
     try harness.waitForServiceReady(echo, 5000);
 
@@ -116,6 +118,7 @@ test "service recovery time after kill" {
     const replacement = try harness.startService(.{
         .executable_name = "brz-test-echo-service",
         .service_name = "killable",
+        .extra_args = &.{"--quiet"},
     });
     try harness.waitForServiceReady(replacement, 5000);
 
@@ -182,6 +185,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
         .executable_name = "brz-test-echo-service",
         .service_name = "echo",
         .broker_node_id = 2,
+        .extra_args = &.{"--quiet"},
     });
     try harness.waitForServiceReady(echo, 5000);
 
@@ -233,6 +237,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
         .executable_name = "brz-test-echo-service",
         .service_name = "echo",
         .broker_node_id = 2,
+        .extra_args = &.{"--quiet"},
     });
     try harness.waitForServiceReady(echo2, 5000);
 
@@ -319,6 +324,7 @@ test "broker recovery - local services survive remote broker restart" {
         .executable_name = "brz-test-echo-service",
         .service_name = "echo",
         .broker_node_id = 1,
+        .extra_args = &.{"--quiet"},
     });
     try harness.waitForServiceReady(echo, 5000);
 
@@ -387,7 +393,8 @@ test "rapid service restart recovery" {
         const svc = try harness.startService(.{
             .executable_name = "brz-test-echo-service",
             .service_name = "rapid",
-        });
+            .extra_args = &.{"--quiet"},
+    });
         try harness.waitForServiceReady(svc, 5000);
 
         harness.killProcess(svc);
@@ -400,7 +407,8 @@ test "rapid service restart recovery" {
         const replacement = try harness.startService(.{
             .executable_name = "brz-test-echo-service",
             .service_name = "rapid",
-        });
+            .extra_args = &.{"--quiet"},
+    });
         try harness.waitForServiceReady(replacement, 5000);
 
         const iter_recovery_ns = std.time.nanoTimestamp() - iter_start;

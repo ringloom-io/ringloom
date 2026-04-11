@@ -16,13 +16,13 @@ const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 // ── Mutable file-level state (acceptable for a test binary) ──────────
 
 var state = State{};
+var shutdown_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 const State = struct {
     received: u64 = 0,
     forwarded: u64 = 0,
     forward_errors: u64 = 0,
     max_messages: u64 = 0,
-    shutdown: bool = false,
     client: ?*ServiceClient = null,
 };
 
@@ -52,7 +52,7 @@ fn onMessage(_: i32, payload: []const u8) void {
     stdout.flush() catch {};
 
     if (state.max_messages > 0 and state.received >= state.max_messages) {
-        state.shutdown = true;
+        shutdown_flag.store(true, .release);
     }
 }
 
@@ -78,6 +78,22 @@ fn parseIntArg(comptime T: type, args: []const []const u8, flag: []const u8, def
     return default;
 }
 
+// ── Signal handling ──────────────────────────────────────────────────
+
+fn installSignalHandler() void {
+    const handler: std.posix.Sigaction = .{
+        .handler = .{ .handler = signalHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TERM, &handler, null);
+    std.posix.sigaction(std.posix.SIG.INT, &handler, null);
+}
+
+fn signalHandler(_: c_int) callconv(.c) void {
+    shutdown_flag.store(true, .release);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────
 
 pub fn main() !void {
@@ -101,6 +117,7 @@ pub fn main() !void {
     const group = parseStringArg(args, "--group", "default");
     const service_name = parseStringArg(args, "--service-name", "forwarder");
     const target_service = parseStringArg(args, "--target-service", "echo");
+    const broker_node_id: i16 = @intCast(parseIntArg(u64, args, "--broker-node-id", 1));
     const max_messages = parseIntArg(u64, args, "--max-messages", 0);
 
     state.max_messages = max_messages;
@@ -111,6 +128,7 @@ pub fn main() !void {
         .storage_path = storage_path,
         .group = group,
         .service_name = service_name,
+        .broker_node_id = broker_node_id,
     };
 
     const engine = BrzEngine.start(allocator, config) catch |err| {
@@ -138,10 +156,11 @@ pub fn main() !void {
     // ── Register message handler ─────────────────────────────────────
 
     engine.setMessageHandler(&onMessage);
+    installSignalHandler();
 
     // ── Main loop: sleep and check for shutdown ──────────────────────
 
-    while (!state.shutdown) {
+    while (!shutdown_flag.load(.acquire)) {
         std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 

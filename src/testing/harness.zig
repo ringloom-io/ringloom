@@ -128,9 +128,7 @@ pub const TestHarness = struct {
         self.freeProcessHandles();
         self.processes.deinit(self.allocator);
 
-        if (self.failed) {
-            self.env.preserve();
-        }
+        if (self.failed) self.env.preserve();
         self.env.deinit();
 
         self.allocator.free(self.bin_dir);
@@ -201,10 +199,15 @@ pub const TestHarness = struct {
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(self.allocator);
 
+        // Format broker_node_id as a string argument.
+        var node_id_buf: [8]u8 = undefined;
+        const node_id_str = std.fmt.bufPrint(&node_id_buf, "{d}", .{spec.broker_node_id}) catch unreachable;
+
         try args.appendSlice(self.allocator, &.{
-            "--storage-path", self.env.storage_path,
-            "--group",        spec.group_name,
-            "--service-name", spec.service_name,
+            "--storage-path",   self.env.storage_path,
+            "--group",          spec.group_name,
+            "--service-name",   spec.service_name,
+            "--broker-node-id", node_id_str,
         });
 
         for (spec.extra_args) |extra| {

@@ -20,6 +20,8 @@ const fc_config_mod = @import("flow_control_config.zig");
 const FlowControlConfig = fc_config_mod.FlowControlConfig;
 const BackpressureStrategy = fc_config_mod.BackpressureStrategy;
 
+const frame_parser = brz_common.protocol.frame_parser;
+const TcpFrameHeader = frame_parser.TcpFrameHeader;
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const MessageHeader = message_header.MessageHeader;
 
@@ -181,7 +183,10 @@ pub const ServiceClient = struct {
         var i: usize = 0;
         while (i < self.instances.items.len) {
             if (self.instances.items[i].service_id == service_id) {
-                _ = self.instances.swapRemove(i);
+                const removed = self.instances.swapRemove(i);
+                if (removed.ipc_producer) |producer| {
+                    self.allocator.destroy(producer);
+                }
                 return;
             }
             i += 1;
@@ -198,7 +203,7 @@ pub const ServiceClient = struct {
         return self.instances.items.len;
     }
 
-    fn findInstance(self: *const Self, service_id: i32) ?*ServiceInstance {
+    pub fn findInstance(self: *const Self, service_id: i32) ?*ServiceInstance {
         for (self.instances.items) |*inst| {
             if (inst.service_id == service_id) return inst;
         }
@@ -206,6 +211,11 @@ pub const ServiceClient = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        for (self.instances.items) |inst| {
+            if (inst.ipc_producer) |producer| {
+                self.allocator.destroy(producer);
+            }
+        }
         self.instances.deinit(self.allocator);
     }
 
@@ -271,7 +281,7 @@ pub const ServiceClient = struct {
 
         // Paths 2/4/5: Only apply to remote instances.
         if (instance.node_id != self.local_node_id) {
-            const send_cost = ringCost(MessageHeader.encoded_length + payload_len);
+            const send_cost = ringCost(TcpFrameHeader.size + payload_len);
 
             // Path 5: Peer connectivity (cheapest — single byte read).
             if (self.fc_config.check_peer_connectivity) {
@@ -369,23 +379,29 @@ pub const ServiceClient = struct {
             null,
         ) catch return error.SendBufferFull;
 
-        const total_len = MessageHeader.encoded_length + payload.len;
+        // Write TcpFrameHeader + app payload — matching the wire format that
+        // the sender event loop expects (it casts the ring buffer payload as
+        // TcpFrameHeader to read target_node_id for routing).
+        const total_len = TcpFrameHeader.size + payload.len;
         var claim = send_rb.tryClaim(constants.application_msg_type_id, total_len) orelse
             return error.SendBufferFull;
 
-        // Write the BRZ message header into the claimed region.
-        MessageHeader.encode(claim.buffer[0..MessageHeader.encoded_length], .{
-            .source_node_id = self.local_node_id,
+        const header: *TcpFrameHeader = @ptrCast(@alignCast(claim.buffer.ptr));
+        header.* = .{
+            .frame_length = @intCast(total_len),
+            .flags = 0,
+            .source_node_id = @intCast(self.local_node_id),
+            .target_node_id = @intCast(target_node_id),
             .source_service_id = @intCast(self.local_service_id),
-            .target_node_id = target_node_id,
             .target_service_id = @intCast(target_service_id),
             .template_id = 0,
             .correlation_id = 0,
-            .flags = 0,
-        });
+        };
 
-        // Copy the application payload immediately after the header.
-        @memcpy(claim.buffer[MessageHeader.encoded_length..][0..payload.len], payload);
+        // Copy the application payload immediately after the TCP frame header.
+        if (payload.len > 0) {
+            @memcpy(claim.buffer[TcpFrameHeader.size..][0..payload.len], payload);
+        }
 
         // Commit — makes the message visible to the broker's sender event loop.
         claim.commit();

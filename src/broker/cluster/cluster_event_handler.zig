@@ -133,6 +133,9 @@ pub const ClusterEventHandler = struct {
                 .service_leader_designated => |_| {
                     // ServiceLeaderDesignated handling will be integrated.
                 },
+                .peer_connected => |_| {
+                    // Handled by the control loop, not the event handler.
+                },
             }
             work_count += 1;
         }

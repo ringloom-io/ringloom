@@ -18,6 +18,7 @@ const ServiceClientRegistry = @import("service_client_registry.zig").ServiceClie
 
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const ServiceMetadataFile = memory.ServiceMetadataFile;
+const BuffersProvider = memory.BuffersProvider;
 const ThreadRunner = platform.ThreadRunner;
 const EventLoop = platform.EventLoop;
 const Clock = platform.Clock;
@@ -27,6 +28,7 @@ pub const ServiceConfig = struct {
     storage_path: []const u8 = constants.default_storage_path,
     group: []const u8 = "default",
     service_name: []const u8,
+    broker_node_id: i16 = 1,
     blocking_mode: bool = false,
     heartbeat_timeout_ms: i32 = @intCast(constants.default_svc_heartbeat_timeout_ms),
     control_buffer_length: usize = constants.default_control_buffer_length,
@@ -96,6 +98,8 @@ pub const BrzEngine = struct {
             meta.broker_meta,
             meta.node_id,
             meta.service_id,
+            config.storage_path,
+            config.group,
         );
 
         // ── Step 6: Start message consumer thread ─────────────────────
@@ -156,9 +160,10 @@ pub const BrzEngine = struct {
         // 3. Send UnregisterService to the broker.
         control_agent_mod.unregisterFromBroker(self.broker_meta, self.service_id) catch {};
 
-        // 4. Close metadata files.
+        // 4. Close metadata files and cached BuffersProviders.
         self.service_meta.close();
         self.broker_meta.close();
+        BuffersProvider.closeAll(self.allocator);
 
         // 5. Clean up.
         self.service_registry.deinit();
@@ -202,6 +207,7 @@ fn createServiceMetadata(allocator: std.mem.Allocator, config: ServiceConfig) !s
     broker_meta.* = try BrokerMetadataFile.open(
         config.storage_path,
         config.group,
+        config.broker_node_id,
     );
 
     // 2. Atomically allocate a unique service_id.
