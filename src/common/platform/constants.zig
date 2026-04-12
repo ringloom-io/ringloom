@@ -129,16 +129,16 @@ pub const command_drain_limit: u32 = 1;
 pub const control_read_limit: u32 = 10;
 
 /// Max messages read from the send ring buffer per duty cycle.
-pub const send_batch_limit: u32 = 64;
+pub const send_batch_limit: u32 = 256;
 
 /// Heartbeat interval in nanoseconds (derived from ms).
 pub const default_heartbeat_interval_ns: i64 = @as(i64, @intCast(default_heartbeat_interval_ms)) * std.time.ns_per_ms;
 
 /// Per-peer TCP write budget per duty cycle (round-robin fairness).
-pub const write_budget_per_peer: u32 = 16;
+pub const write_budget_per_peer: u32 = 256;
 
 /// Per-peer TCP read budget per duty cycle (round-robin fairness).
-pub const read_budget_per_peer: u32 = 16;
+pub const read_budget_per_peer: u32 = 256;
 
 // ── Default Configuration Values ──────────────────────────────────────
 

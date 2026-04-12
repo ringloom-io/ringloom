@@ -196,6 +196,7 @@ pub const BrokerApplication = struct {
             .admin_cmd_queue = &self.admin_cmd_queue.?,
             .send_ring_buffer = &self.send_ring_buffer.?,
             .peer_node_ids = self.peer_node_ids orelse &.{},
+            .routing_registry = &self.routing_registry.?,
         });
 
         self.sender_loop = try SenderEventLoop.initWithGroup(

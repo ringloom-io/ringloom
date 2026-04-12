@@ -10,6 +10,7 @@
 //!       [--warmup-count N] [--result-file PATH]
 
 const std = @import("std");
+const builtin = @import("builtin");
 const brz_service = @import("brz_service");
 const brz_common = @import("brz_common");
 const brz_testing = @import("brz_testing");
@@ -18,6 +19,7 @@ const BrzEngine = brz_service.BrzEngine;
 const ServiceConfig = brz_service.ServiceConfig;
 const ServiceClient = brz_service.ServiceClient;
 const Clock = brz_common.Clock;
+const platform = brz_common.platform;
 const Histogram = brz_testing.Histogram;
 
 // ── Mutable file-level state ─────────────────────────────────────────
@@ -75,9 +77,14 @@ fn parseOptionalStringArg(args: []const []const u8, flag: []const u8) ?[]const u
 // ── Main ─────────────────────────────────────────────────────────────
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = switch (builtin.mode) {
+        .Debug, .ReleaseSafe => debug_alloc.allocator(),
+        .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
+    };
+    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        _ = debug_alloc.deinit();
+    };
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
@@ -101,16 +108,27 @@ pub fn main() !void {
     const warmup_count = parseIntArg(u64, args, "--warmup-count", 10);
     const result_file = parseOptionalStringArg(args, "--result-file");
     const spin_timeout_ms = parseIntArg(u64, args, "--spin-timeout-ms", 0);
+    const idle_strategy_str = parseStringArg(args, "--idle-strategy", "backoff");
 
     installSignalHandler();
 
     // ── Start engine ─────────────────────────────────────────────────
+
+    const idle_strategy: platform.IdleStrategy = if (std.mem.eql(u8, idle_strategy_str, "busy_spin"))
+        .busy_spin
+    else if (std.mem.eql(u8, idle_strategy_str, "yielding"))
+        .yielding
+    else if (std.mem.eql(u8, idle_strategy_str, "sleeping"))
+        .sleeping
+    else
+        .{ .backoff = .{} };
 
     const config = ServiceConfig{
         .storage_path = storage_path,
         .group = group,
         .service_name = service_name,
         .broker_node_id = broker_node_id,
+        .idle_strategy = idle_strategy,
     };
 
     const engine = BrzEngine.start(allocator, config) catch |err| {

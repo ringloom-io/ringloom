@@ -111,6 +111,39 @@ pub const WriteQueue = struct {
         return @min(@min(self.count, until_wrap), limit);
     }
 
+    /// Fill an iovec array with pointers to contiguous queued frames.
+    /// The first iovec is adjusted by `first_offset` to support partial-write resumption.
+    /// Returns the number of iovecs filled.
+    pub fn fillIovecs(
+        self: *const Self,
+        iovecs: []std.posix.iovec_const,
+        first_offset: usize,
+        limit: u32,
+    ) u32 {
+        const n = self.contiguousCount(@min(limit, @as(u32, @intCast(iovecs.len))));
+        if (n == 0) return 0;
+
+        for (0..n) |i| {
+            const slot_index = (self.head +% @as(u32, @intCast(i))) & self.mask;
+            const len = self.lengths[slot_index];
+            const offset = @as(usize, slot_index) * @as(usize, self.max_frame_size);
+
+            if (i == 0 and first_offset > 0) {
+                iovecs[i] = .{
+                    .base = self.slots[offset + first_offset ..].ptr,
+                    .len = len - first_offset,
+                };
+            } else {
+                iovecs[i] = .{
+                    .base = self.slots[offset..].ptr,
+                    .len = len,
+                };
+            }
+        }
+
+        return n;
+    }
+
     pub fn isEmpty(self: *const Self) bool {
         return self.count == 0;
     }
@@ -209,6 +242,39 @@ test "WriteQueue contiguousCount" {
 
     try testing.expectEqual(@as(u32, 3), q.contiguousCount(16));
     try testing.expectEqual(@as(u32, 2), q.contiguousCount(2));
+}
+
+test "WriteQueue fillIovecs returns correct iov entries" {
+    const allocator = testing.allocator;
+    var q = try WriteQueue.init(4, 64, allocator);
+    defer q.deinit(allocator);
+
+    const frame1 = [_]u8{0xAA} ** 24;
+    const frame2 = [_]u8{0xBB} ** 32;
+    try q.enqueue(&frame1);
+    try q.enqueue(&frame2);
+
+    var iovecs: [4]std.posix.iovec_const = undefined;
+    const n = q.fillIovecs(&iovecs, 0, 4);
+    try testing.expectEqual(@as(u32, 2), n);
+    try testing.expectEqual(@as(usize, 24), iovecs[0].len);
+    try testing.expectEqual(@as(usize, 32), iovecs[1].len);
+    try testing.expectEqual(@as(u8, 0xAA), iovecs[0].base[0]);
+    try testing.expectEqual(@as(u8, 0xBB), iovecs[1].base[0]);
+}
+
+test "WriteQueue fillIovecs respects first_offset" {
+    const allocator = testing.allocator;
+    var q = try WriteQueue.init(4, 64, allocator);
+    defer q.deinit(allocator);
+
+    const frame = [_]u8{0xCC} ** 48;
+    try q.enqueue(&frame);
+
+    var iovecs: [4]std.posix.iovec_const = undefined;
+    const n = q.fillIovecs(&iovecs, 10, 4);
+    try testing.expectEqual(@as(u32, 1), n);
+    try testing.expectEqual(@as(usize, 38), iovecs[0].len);
 }
 
 test "WriteQueue isEmpty and isFull" {

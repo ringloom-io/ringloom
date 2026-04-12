@@ -5,6 +5,7 @@
 //! consumer cannot keep up with the producer rate.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const brz_service = @import("brz_service");
 const brz_common = @import("brz_common");
 
@@ -79,9 +80,14 @@ fn signalHandler(_: c_int) callconv(.c) void {
 // ── Entry point ──────────────────────────────────────────────────────
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = switch (builtin.mode) {
+        .Debug, .ReleaseSafe => debug_alloc.allocator(),
+        .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
+    };
+    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        _ = debug_alloc.deinit();
+    };
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);

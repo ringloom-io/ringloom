@@ -122,9 +122,10 @@ broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
 broker.threading.mode=dedicated
-broker.idle.strategy=backoff
+broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
 broker.receiver.cpu.affinity=3
+broker.io.uring.sqpoll=true
 EOF
 
     "$BIN/brz-broker" --config "$CONFIGS/broker_local.properties" \
@@ -140,6 +141,7 @@ EOF
         --service-name echo \
         --broker-node-id 1 \
         --quiet \
+        --idle-strategy yielding \
         --result-file "$RESULTS_DIR/local-latency-echo-$TAG.json" \
         > "$LOGS/echo_local_$TAG.log" 2>&1 &
     PIDS+=($!)
@@ -156,6 +158,7 @@ EOF
         --message-count "$COUNT" \
         --message-size "$SIZE" \
         --warmup-count "$WARMUP" \
+        --idle-strategy yielding \
         --result-file "$RESULTS_DIR/local-latency-ping-$TAG.json" \
         --spin-timeout-ms 100 \
         > "$LOGS/ping_local_$TAG.log" 2>&1
@@ -183,9 +186,10 @@ broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
 broker.threading.mode=dedicated
-broker.idle.strategy=backoff
+broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
 broker.receiver.cpu.affinity=3
+broker.io.uring.sqpoll=true
 EOF
 
     cat > "$CONFIGS/broker_2.properties" << EOF
@@ -197,9 +201,10 @@ broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
 broker.threading.mode=dedicated
-broker.idle.strategy=backoff
+broker.idle.strategy=yielding
 broker.sender.cpu.affinity=4
 broker.receiver.cpu.affinity=5
+broker.io.uring.sqpoll=true
 EOF
 }
 
@@ -208,6 +213,11 @@ run_remote_bench() {
     local TAG="${SIZE}B"
     local WARMUP=10000
     local COUNT=100000
+
+    if [[ $SIZE -eq 4096 ]]; then
+        WARMUP=5000
+        COUNT=50000
+    fi
 
     echo "  remote-latency-$TAG ..."
 
@@ -234,6 +244,7 @@ run_remote_bench() {
         --service-name echo \
         --broker-node-id 2 \
         --quiet \
+        --idle-strategy yielding \
         --result-file "$RESULTS_DIR/remote-latency-echo-$TAG.json" \
         > "$LOGS/echo_remote_$TAG.log" 2>&1 &
     PIDS+=($!)
@@ -250,6 +261,7 @@ run_remote_bench() {
         --message-count "$COUNT" \
         --message-size "$SIZE" \
         --warmup-count "$WARMUP" \
+        --idle-strategy yielding \
         --result-file "$RESULTS_DIR/remote-latency-ping-$TAG.json" \
         --spin-timeout-ms 100 \
         > "$LOGS/ping_remote_$TAG.log" 2>&1

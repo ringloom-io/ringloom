@@ -34,6 +34,7 @@ pub const ServiceConfig = struct {
     control_buffer_length: usize = constants.default_control_buffer_length,
     messages_buffer_length: usize = constants.default_messages_buffer_length,
     leader_election_enabled: bool = false,
+    idle_strategy: platform.IdleStrategy = .{ .backoff = .{} },
 };
 
 pub const BrzEngine = struct {
@@ -116,7 +117,7 @@ pub const BrzEngine = struct {
                 .doWorkFn = &MessageConsumer.doWorkFn,
                 .onCloseFn = &MessageConsumer.onCloseFn,
             },
-            .{ .backoff = .{} },
+            config.idle_strategy,
         );
         try engine.message_consumer_runner.?.start();
 
@@ -136,7 +137,7 @@ pub const BrzEngine = struct {
                 .doWorkFn = &ControlAgent.doWorkFn,
                 .onCloseFn = &ControlAgent.onCloseFn,
             },
-            .{ .backoff = .{} },
+            config.idle_strategy,
         );
         try engine.control_agent_runner.?.start();
 

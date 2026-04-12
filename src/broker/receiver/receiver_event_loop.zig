@@ -220,6 +220,7 @@ pub const ReceiverEventLoop = struct {
         var iter = self.peers.iterator();
         while (iter.next()) |peer| {
             self.allocator.free(peer.read_state.payload_buf);
+            self.allocator.free(peer.recv_buf);
             peer.close();
             self.allocator.destroy(peer);
         }
@@ -387,11 +388,34 @@ pub const ReceiverEventLoop = struct {
         while (peer_iter.next()) |peer| {
             if (!peer.connected or peer.socket_fd < 0) continue;
 
-            var budget: u32 = constants.read_budget_per_peer;
-            while (budget > 0) : (budget -= 1) {
-                const read_result = self.readOnePeerStep(peer);
-                if (!read_result.progress) break;
-                work_count += read_result.frames_completed;
+            // Fill recv buffer with one big read from the socket.
+            // This amortizes syscall overhead across many frames.
+            var got_new_data = false;
+            if (peer.fillRecvBuffer()) |n| {
+                if (n == 0 and peer.recvBufAvailable() == 0) {
+                    // EOF with no buffered data.
+                    self.disconnectPeer(peer);
+                    continue;
+                }
+                if (n > 0) got_new_data = true;
+            } else |err| {
+                switch (err) {
+                    error.WouldBlock => {},
+                    else => {
+                        self.disconnectPeer(peer);
+                        continue;
+                    },
+                }
+            }
+
+            // Parse frames from the recv buffer (no more syscalls).
+            if (got_new_data or peer.recvBufAvailable() > 0) {
+                var budget: u32 = constants.read_budget_per_peer;
+                while (budget > 0) : (budget -= 1) {
+                    const read_result = self.readOnePeerStep(peer);
+                    if (!read_result.progress) break;
+                    work_count += read_result.frames_completed;
+                }
             }
         }
 
@@ -406,17 +430,8 @@ pub const ReceiverEventLoop = struct {
         switch (rs.phase) {
             .reading_header => {
                 const remaining = rs.header_buf[rs.header_bytes_read..];
-                const n = std.posix.read(peer.socket_fd, remaining) catch |err| {
-                    switch (err) {
-                        error.WouldBlock => return .{ .progress = false, .frames_completed = 0 },
-                        else => {
-                            self.disconnectPeer(peer);
-                            return .{ .progress = false, .frames_completed = 0 };
-                        },
-                    }
-                };
+                const n = peer.readFromBuffer(remaining);
                 if (n == 0) {
-                    self.disconnectPeer(peer);
                     return .{ .progress = false, .frames_completed = 0 };
                 }
 
@@ -450,17 +465,8 @@ pub const ReceiverEventLoop = struct {
             .reading_payload => {
                 const payload_len = rs.payloadLength();
                 const remaining = rs.payload_buf[rs.payload_bytes_read..payload_len];
-                const n = std.posix.read(peer.socket_fd, remaining) catch |err| {
-                    switch (err) {
-                        error.WouldBlock => return .{ .progress = false, .frames_completed = 0 },
-                        else => {
-                            self.disconnectPeer(peer);
-                            return .{ .progress = false, .frames_completed = 0 };
-                        },
-                    }
-                };
+                const n = peer.readFromBuffer(remaining);
                 if (n == 0) {
-                    self.disconnectPeer(peer);
                     return .{ .progress = false, .frames_completed = 0 };
                 }
 
@@ -528,25 +534,12 @@ pub const ReceiverEventLoop = struct {
             return;
         }
 
-        // Route to target service
-        const frame_length = header.frame_length;
-        // Build the complete frame: header + payload
-        var frame_buf: [constants.default_max_frame_length]u8 align(8) = undefined;
-        if (frame_length > constants.default_max_frame_length) {
-            self.counters.increment(self.counter_ids.invalid_frame_drops);
-            return;
-        }
-        const fl: usize = @intCast(frame_length);
-        @memcpy(frame_buf[0..TcpFrameHeader.size], header_buf);
-        if (payload.len > 0) {
-            @memcpy(frame_buf[TcpFrameHeader.size..][0..payload.len], payload);
-        }
-
+        // Route application payload to target service. The TcpFrameHeader is
+        // stripped so the service sees the same payload format as local IPC.
         const result = message_router.routeToService(
             self.service_registry,
             header.target_service_id,
-            frame_buf[0..fl],
-            frame_length,
+            payload,
         );
         switch (result) {
             .success => self.counters.increment(self.counter_ids.frames_routed),
@@ -608,10 +601,13 @@ pub const ReceiverEventLoop = struct {
         const payload_buf = try self.allocator.alloc(u8, constants.default_max_frame_length);
         errdefer self.allocator.free(payload_buf);
 
+        const recv_buf = try self.allocator.alloc(u8, PeerReceiver.recv_buf_size);
+        errdefer self.allocator.free(recv_buf);
+
         const peer = try self.allocator.create(PeerReceiver);
         errdefer self.allocator.destroy(peer);
 
-        peer.* = PeerReceiver.init(node_id, socket_fd, address, session_epoch, payload_buf);
+        peer.* = PeerReceiver.init(node_id, socket_fd, address, session_epoch, payload_buf, recv_buf);
         self.peers.put(node_id, peer);
         self.counters.increment(self.counter_ids.connections_accepted);
 
@@ -625,6 +621,7 @@ pub const ReceiverEventLoop = struct {
         if (self.peers.remove(node_id)) |peer| {
             peer.close();
             self.allocator.free(peer.read_state.payload_buf);
+            self.allocator.free(peer.recv_buf);
             self.allocator.destroy(peer);
         }
     }

@@ -157,6 +157,11 @@ pub const SenderEventLoop = struct {
     /// FNV-1a hash of the cluster group name (for handshake validation).
     group_name_hash: u32,
 
+    /// Pre-allocated iovec array for writev batching.
+    writev_iovecs: [max_writev_batch]std.posix.iovec_const = undefined,
+
+    const max_writev_batch = 64;
+
     const Self = @This();
 
     pub fn init(
@@ -205,27 +210,34 @@ pub const SenderEventLoop = struct {
         const now_ns = Clock.monotonicNanos();
         self.pending_send_count = 0;
 
-        // ── Phase 1: Drain send ring buffer ──────────────────────────
-        tls_self = self;
-        defer {
-            tls_self = null;
-        }
-        work_count += self.send_ring_buffer.read(
-            onOutboundMessageThunk,
-            constants.send_batch_limit,
-        );
+        // ── Phase 1: Flush write queues to TCP first ─────────────────
+        // Flush before draining to keep write queues shallow and reduce
+        // overflow-induced drops under high message rates.
+        work_count += self.flushWriteQueues();
 
-        // ── Phase 2: Send heartbeats ─────────────────────────────────
+        // ── Phase 2: Drain send ring buffer ──────────────────────────
+        // Limit drain to available write queue space to apply backpressure
+        // when TCP can't keep up, preventing write queue overflow.
+        const drain_limit = self.availableWriteQueueSpace();
+        if (drain_limit > 0) {
+            tls_self = self;
+            defer {
+                tls_self = null;
+            }
+            work_count += self.send_ring_buffer.read(
+                onOutboundMessageThunk,
+                @min(constants.send_batch_limit, drain_limit),
+            );
+        }
+
+        // ── Phase 3: Send heartbeats ─────────────────────────────────
         if (now_ns - self.last_heartbeat_ns >= constants.default_heartbeat_interval_ns) {
             self.sendHeartbeats(now_ns);
             self.last_heartbeat_ns = now_ns;
         }
 
-        // ── Phase 3: Process reconnections ───────────────────────────
+        // ── Phase 4: Process reconnections ───────────────────────────
         self.processReconnections(now_ns);
-
-        // ── Phase 4: Flush write queues to TCP ───────────────────────
-        work_count += self.flushWriteQueues();
 
         work_count += self.pending_send_count;
 
@@ -322,6 +334,26 @@ pub const SenderEventLoop = struct {
         }
     }
 
+    // ── Backpressure ────────────────────────────────────────────────
+
+    /// Return the minimum available write queue space across all connected peers.
+    /// This limits ring buffer drain to prevent write queue overflow.
+    fn availableWriteQueueSpace(self: *Self) u32 {
+        var min_space: u32 = constants.send_batch_limit;
+        var has_connected = false;
+
+        var peer_iter = self.peers.iterator();
+        while (peer_iter.next()) |peer| {
+            if (peer.state != .connected) continue;
+            has_connected = true;
+            const space = peer.write_queue.capacity - peer.write_queue.count;
+            min_space = @min(min_space, space);
+        }
+
+        // If no peers are connected, drain freely (messages will be dropped by routing).
+        return if (has_connected) min_space else constants.send_batch_limit;
+    }
+
     // ── TCP Write Queue Flush ────────────────────────────────────────
 
     fn flushWriteQueues(self: *Self) u32 {
@@ -330,13 +362,20 @@ pub const SenderEventLoop = struct {
         var peer_iter = self.peers.iterator();
         while (peer_iter.next()) |peer| {
             if (peer.state != .connected) continue;
+            if (peer.write_queue.isEmpty()) continue;
 
             var budget: u32 = constants.write_budget_per_peer;
-            while (budget > 0) : (budget -= 1) {
-                const frame_data = peer.write_queue.peek() orelse break;
 
-                const to_write = frame_data[peer.partial_write_offset..];
-                const written = std.posix.write(peer.socket_fd, to_write) catch |err| {
+            while (budget > 0) {
+                const batch_limit = @min(budget, max_writev_batch);
+                const n = peer.write_queue.fillIovecs(&self.writev_iovecs, peer.partial_write_offset, batch_limit);
+                if (n == 0) break;
+
+                const iovs = self.writev_iovecs[0..n];
+                var total_bytes: usize = 0;
+                for (iovs) |iov| total_bytes += iov.len;
+
+                const written = std.posix.writev(peer.socket_fd, iovs) catch |err| {
                     switch (err) {
                         error.WouldBlock => {
                             peer.write_blocked = true;
@@ -349,18 +388,41 @@ pub const SenderEventLoop = struct {
                     }
                 };
 
-                peer.partial_write_offset += written;
-                if (peer.partial_write_offset >= frame_data.len) {
-                    // Frame fully written.
+                // Walk iovecs to determine which frames were fully written.
+                var remaining = written;
+                var frames_completed: u32 = 0;
+                for (iovs) |iov| {
+                    if (remaining >= iov.len) {
+                        remaining -= iov.len;
+                        frames_completed += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                // Dequeue fully-written frames.
+                for (0..frames_completed) |_| {
                     peer.write_queue.dequeue();
-                    peer.partial_write_offset = 0;
-                    peer.write_blocked = false;
+                }
+
+                if (frames_completed > 0) {
                     peer.last_send_ns = Clock.monotonicNanos();
-                    work_count += 1;
-                } else {
-                    // Partial write — try again next cycle.
+                    work_count += frames_completed;
+                    budget -|= frames_completed;
+                }
+
+                if (written < total_bytes) {
+                    // Partial write: update offset into the partially-written frame.
+                    if (frames_completed == 0) {
+                        peer.partial_write_offset += remaining;
+                    } else {
+                        peer.partial_write_offset = remaining;
+                    }
                     peer.write_blocked = true;
                     break;
+                } else {
+                    peer.partial_write_offset = 0;
+                    peer.write_blocked = false;
                 }
             }
         }

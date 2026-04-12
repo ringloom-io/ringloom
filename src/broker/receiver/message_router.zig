@@ -1,7 +1,7 @@
 //! Message routing for the BRZ broker TCP receive path.
 //!
-//! Routes complete TCP frames to target service ring buffers. Also provides
-//! the ServiceRegistry for service lookup.
+//! Routes application payloads (TcpFrameHeader stripped) to target service ring
+//! buffers. Also provides the ServiceRegistry for service lookup.
 //!
 //! TCP provides reliable ordered delivery, so there is no receive log buffer,
 //! no consumption position tracking, and no frame consumed marking.
@@ -10,15 +10,10 @@ const std = @import("std");
 const brz_common = @import("brz_common");
 const constants = brz_common.platform.constants;
 const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
-const frame_parser = brz_common.protocol.frame_parser;
-const TcpFrameHeader = frame_parser.TcpFrameHeader;
-
-/// Message type ID for application messages written to service ring buffers.
-pub const msg_type_application: i32 = 1;
 
 /// Result of a route attempt.
 pub const RouteResult = enum {
-    /// Frame successfully written to the service's ring buffer.
+    /// Payload successfully written to the service's ring buffer.
     success,
     /// Target service not found in the registry.
     unknown_service,
@@ -26,28 +21,24 @@ pub const RouteResult = enum {
     service_full,
 };
 
-/// Route a complete TCP frame to the target service's messages ring buffer.
+/// Route an application payload to the target service's messages ring buffer.
 ///
-/// The frame includes the 24-byte TcpFrameHeader. The header is preserved
-/// in the ring buffer write so that the service can read routing fields
-/// (source_node_id, source_service_id, correlation_id, template_id, etc.).
+/// The caller is responsible for stripping the 24-byte TcpFrameHeader before
+/// calling this function — the service receives only the application-layer
+/// payload, identical to the local IPC path (ServiceClient.send).
 ///
-/// If the target service is unknown, the frame is dropped.
-/// If the service's ring buffer is full, the frame is dropped (always-read model).
+/// If the target service is unknown, the payload is dropped.
+/// If the service's ring buffer is full, the payload is dropped (always-read model).
 pub fn routeToService(
     registry: *const ServiceRegistry,
     target_service_id: u16,
-    frame: []const u8,
-    frame_length: u32,
+    payload: []const u8,
 ) RouteResult {
     const service = registry.lookup(target_service_id) orelse {
         return .unknown_service;
     };
 
-    const write_len: usize = @intCast(frame_length);
-    const write_data = frame[0..write_len];
-
-    service.messages_ring_buffer.write(msg_type_application, write_data) catch |err| {
+    service.messages_ring_buffer.write(constants.application_msg_type_id, payload) catch |err| {
         switch (err) {
             error.BufferFull => {
                 return .service_full;
@@ -167,30 +158,37 @@ test "routeToService writes to service ring buffer" {
         .messages_ring_buffer = &rb,
     });
 
-    // Build a TCP frame
-    var frame_buf: [64]u8 align(8) = [_]u8{0} ** 64;
-    const header: *TcpFrameHeader = @ptrCast(@alignCast(&frame_buf));
-    header.* = .{
-        .frame_length = 64,
-        .target_service_id = 5,
-        .source_node_id = 2,
-        .source_service_id = 1,
-    };
-
-    const result = routeToService(&registry, 5, &frame_buf, 64);
+    // Route an application payload (header already stripped by caller).
+    const payload = "hello-world-payload";
+    const result = routeToService(&registry, 5, payload);
     try testing.expect(result == .success);
 
-    // Verify ring buffer received the message
-    var messages_read: u32 = 0;
-    messages_read = rb.read(struct {
-        fn handler(_: i32, _: []const u8) void {}
-    }.handler, 10);
+    // Verify the ring buffer received the correct msg_type_id and exact payload.
+    test_received_msg_type = 0;
+    test_received_payload_len = 0;
+    const messages_read = rb.read(&testCaptureHandler, 10);
     try testing.expectEqual(@as(u32, 1), messages_read);
+    try testing.expectEqual(constants.application_msg_type_id, test_received_msg_type);
+    try testing.expectEqual(payload.len, test_received_payload_len);
+    try testing.expectEqualSlices(u8, payload, test_received_payload_buf[0..test_received_payload_len]);
 }
 
 test "routeToService returns unknown_service for unregistered service" {
     const registry = ServiceRegistry.init();
-    var frame_buf: [64]u8 align(8) = [_]u8{0} ** 64;
-    const result = routeToService(&registry, 99, &frame_buf, 64);
+    const result = routeToService(&registry, 99, "test-payload");
     try testing.expect(result == .unknown_service);
+}
+
+// ── Test helpers ──────────────────────────────────────────────────────
+
+var test_received_msg_type: i32 = 0;
+var test_received_payload_len: usize = 0;
+var test_received_payload_buf: [256]u8 = undefined;
+
+fn testCaptureHandler(msg_type_id: i32, payload: []const u8) void {
+    test_received_msg_type = msg_type_id;
+    test_received_payload_len = payload.len;
+    if (payload.len <= test_received_payload_buf.len) {
+        @memcpy(test_received_payload_buf[0..payload.len], payload);
+    }
 }

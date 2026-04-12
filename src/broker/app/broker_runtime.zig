@@ -175,6 +175,7 @@ pub const BrokerRuntime = struct {
             .storage_path = self.config.storage_path,
             .group = self.config.group_name,
             .allocator = self.allocator,
+            .routing_registry = &self.routing_registry.?,
         });
 
         self.sender_loop = try SenderEventLoop.init(

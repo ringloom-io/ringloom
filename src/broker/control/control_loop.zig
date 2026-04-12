@@ -30,6 +30,7 @@ const admin_dispatch = @import("../cluster/admin_dispatch.zig");
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
 const AdminCommand = admin_dispatch.AdminCommand;
 const TcpFrameHeader = brz_common.protocol.frame_parser.TcpFrameHeader;
+const RoutingRegistry = @import("../receiver/message_router.zig").ServiceRegistry;
 const log = std.log.scoped(.control_loop);
 
 // ── File-level state for RingBuffer callback dispatch ─────────────────
@@ -101,6 +102,19 @@ pub const ControlLoop = struct {
     /// Peer node IDs — used to iterate peers for broadcasting.
     peer_node_ids: []const u8,
 
+    /// Receiver's routing registry — maps service IDs to message ring buffers.
+    /// Updated on service register/deregister so incoming TCP messages can be
+    /// routed to local services. Accessed from the receiver thread (reads) and
+    /// the control thread (writes). The receiver is stopped before the control
+    /// loop during shutdown, so cleanup in onClose is safe.
+    routing_registry: ?*RoutingRegistry,
+
+    /// Tracks heap-allocated RingBuffer instances created for routing registry
+    /// entries. On deregistration the routing entry is nullified but the
+    /// RingBuffer is kept alive (deferred free) to avoid a race with the
+    /// receiver thread. All are freed in onClose after the receiver has stopped.
+    allocated_routing_rbs: std.AutoHashMap(u16, *RingBuffer),
+
     const Self = @This();
 
     // ── Timing constants (imported from platform/constants.zig) ──
@@ -126,6 +140,7 @@ pub const ControlLoop = struct {
         admin_cmd_queue: ?*AdminCommandQueue(64) = null,
         send_ring_buffer: ?*RingBuffer = null,
         peer_node_ids: []const u8 = &.{},
+        routing_registry: ?*RoutingRegistry = null,
     };
 
     pub fn init(opts: InitOptions) Self {
@@ -146,6 +161,8 @@ pub const ControlLoop = struct {
             .admin_cmd_queue = opts.admin_cmd_queue,
             .send_ring_buffer = opts.send_ring_buffer,
             .peer_node_ids = opts.peer_node_ids,
+            .routing_registry = opts.routing_registry,
+            .allocated_routing_rbs = std.AutoHashMap(u16, *RingBuffer).init(opts.allocator),
         };
     }
 
@@ -204,6 +221,16 @@ pub const ControlLoop = struct {
         log.info("control loop shutting down, closing {} local service mappings", .{
             self.service_registry.localServiceCount(),
         });
+
+        // Free heap-allocated RingBuffers used for routing registry entries.
+        // Safe: the receiver thread has already been stopped before the
+        // control loop during shutdown (see broker_threads.zig).
+        var rb_iter = self.allocated_routing_rbs.valueIterator();
+        while (rb_iter.next()) |rb_ptr| {
+            self.allocator.destroy(rb_ptr.*);
+        }
+        self.allocated_routing_rbs.deinit();
+
         self.service_registry.deinit();
     }
 
@@ -317,6 +344,10 @@ pub const ControlLoop = struct {
         // 3. Associate the BuffersProvider with the service in the registry
         self.service_registry.setLocalBuffers(data.service_id, buffers);
 
+        // 3.5. Register in the receiver's routing registry so incoming TCP
+        //      messages for this service can be delivered to its ring buffer.
+        self.registerInRoutingRegistry(data.service_id, service_name, buffers);
+
         // 4. Evaluate service leader (if leader election is enabled for this service)
         var is_leader = false;
         if (data.leader_election_enabled) {
@@ -419,7 +450,14 @@ pub const ControlLoop = struct {
             service_id,
         });
 
-        // 2. Close the BuffersProvider (unmaps the service's metadata file).
+        // 2. Deregister from the receiver's routing registry (prevents new TCP
+        //    lookups). The heap-allocated RingBuffer is NOT freed here — the
+        //    receiver thread may still hold a cached pointer. It will be freed
+        //    on re-registration of the same service ID or during onClose (after
+        //    the receiver thread has stopped).
+        self.deregisterFromRoutingRegistry(service_id);
+
+        // 3. Close the BuffersProvider (unmaps the service's metadata file).
         if (self.service_registry.getLocalBuffers(service_id)) |buffers| {
             buffers.close(self.allocator);
         }
@@ -720,6 +758,96 @@ pub const ControlLoop = struct {
                 });
             };
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Routing Registry Integration
+    // ─────────────────────────────────────────────────────────────
+
+    /// Register a local service in the receiver's routing registry so that
+    /// incoming TCP messages can be delivered to its shared-memory ring buffer.
+    fn registerInRoutingRegistry(
+        self: *Self,
+        service_id: i32,
+        service_name: []const u8,
+        buffers: *BuffersProvider,
+    ) void {
+        const rr = self.routing_registry orelse return;
+
+        // Service IDs must fit in the routing registry's fixed-size table.
+        if (service_id < 0 or service_id >= constants.default_max_services) {
+            log.warn("service id {} out of routing range [0, {}); TCP routing disabled for {s}", .{
+                service_id,
+                constants.default_max_services,
+                service_name,
+            });
+            return;
+        }
+        const sid: u16 = @intCast(service_id);
+
+        // Free any previously allocated RingBuffer for this slot (handles
+        // re-registration of the same service ID after deregistration).
+        if (self.allocated_routing_rbs.get(sid)) |old_rb| {
+            self.allocator.destroy(old_rb);
+            _ = self.allocated_routing_rbs.remove(sid);
+        }
+
+        // Allocate a RingBuffer view over the service's messages shared memory.
+        const rb = self.allocator.create(RingBuffer) catch {
+            log.err("OOM allocating routing RingBuffer for service {s} (id={})", .{
+                service_name,
+                service_id,
+            });
+            return;
+        };
+        rb.* = RingBuffer.init(
+            @alignCast(buffers.getMessagesBuffer()),
+            false,
+            null,
+            null,
+        ) catch |err| {
+            log.err("failed to init routing RingBuffer for service {s} (id={}): {}", .{
+                service_name,
+                service_id,
+                err,
+            });
+            self.allocator.destroy(rb);
+            return;
+        };
+
+        self.allocated_routing_rbs.put(sid, rb) catch {
+            log.err("OOM tracking routing RingBuffer for service {s} (id={})", .{
+                service_name,
+                service_id,
+            });
+            self.allocator.destroy(rb);
+            return;
+        };
+
+        rr.register(.{
+            .service_id = sid,
+            .service_name = service_name,
+            .node_id = self.local_node_id,
+            .messages_ring_buffer = rb,
+        });
+
+        log.info("service {s} (id={}) registered in routing registry", .{
+            service_name,
+            service_id,
+        });
+    }
+
+    /// Deregister a service from the receiver's routing registry.
+    /// The heap-allocated RingBuffer is NOT freed here to avoid a race with
+    /// the receiver thread — it will be freed on re-registration or shutdown.
+    fn deregisterFromRoutingRegistry(self: *Self, service_id: i32) void {
+        const rr = self.routing_registry orelse return;
+
+        if (service_id < 0 or service_id >= constants.default_max_services) return;
+        const sid: u16 = @intCast(service_id);
+
+        rr.deregister(sid);
+        log.info("service id={} deregistered from routing registry", .{service_id});
     }
 
     // ─────────────────────────────────────────────────────────────

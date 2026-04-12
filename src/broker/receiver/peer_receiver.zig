@@ -87,6 +87,15 @@ pub const PeerReceiver = struct {
     /// Whether this peer is actively connected.
     connected: bool,
 
+    /// Read-ahead buffer for batched TCP reads.
+    /// One large read() fills this buffer, then frames are parsed from it
+    /// without additional syscalls, reducing per-frame overhead dramatically.
+    recv_buf: []u8,
+    recv_len: usize,
+    recv_pos: usize,
+
+    pub const recv_buf_size = 128 * 1024;
+
     const Self = @This();
 
     pub fn init(
@@ -95,6 +104,7 @@ pub const PeerReceiver = struct {
         address: std.net.Address,
         session_epoch: u32,
         payload_buf: []u8,
+        recv_buf: []u8,
     ) Self {
         return .{
             .node_id = node_id,
@@ -105,7 +115,54 @@ pub const PeerReceiver = struct {
             .liveness = .alive,
             .address = address,
             .connected = true,
+            .recv_buf = recv_buf,
+            .recv_len = 0,
+            .recv_pos = 0,
         };
+    }
+
+    /// Fill recv buffer from socket. Returns bytes read, or 0 on WouldBlock/error.
+    pub fn fillRecvBuffer(self: *Self) !usize {
+        self.compactRecvBuf();
+        const space = self.recv_buf[self.recv_len..];
+        if (space.len == 0) return 0;
+        const n = std.posix.read(self.socket_fd, space) catch |err| {
+            return err;
+        };
+        self.recv_len += n;
+        return n;
+    }
+
+    /// Read from the recv buffer into dest. Returns bytes copied.
+    pub fn readFromBuffer(self: *Self, dest: []u8) usize {
+        const avail = self.recv_len - self.recv_pos;
+        const n = @min(dest.len, avail);
+        if (n > 0) {
+            @memcpy(dest[0..n], self.recv_buf[self.recv_pos..][0..n]);
+            self.recv_pos += n;
+        }
+        return n;
+    }
+
+    /// Return bytes available in recv buffer.
+    pub fn recvBufAvailable(self: *const Self) usize {
+        return self.recv_len - self.recv_pos;
+    }
+
+    fn compactRecvBuf(self: *Self) void {
+        if (self.recv_pos == 0) return;
+        const remaining = self.recv_len - self.recv_pos;
+        if (remaining > 0) {
+            std.mem.copyForwards(u8, self.recv_buf[0..remaining], self.recv_buf[self.recv_pos..self.recv_len]);
+        }
+        self.recv_len = remaining;
+        self.recv_pos = 0;
+    }
+
+    /// Reset recv buffer state (e.g., on reconnect).
+    pub fn resetRecvBuf(self: *Self) void {
+        self.recv_len = 0;
+        self.recv_pos = 0;
     }
 
     /// Update liveness state based on time since last received frame.
@@ -141,6 +198,7 @@ pub const PeerReceiver = struct {
         self.last_recv_ns = Clock.monotonicNanos();
         self.liveness = .alive;
         self.connected = true;
+        self.resetRecvBuf();
     }
 
     pub fn close(self: *Self) void {
@@ -159,9 +217,10 @@ const testing = std.testing;
 
 test "PeerReceiver init sets correct defaults" {
     var payload_buf: [4096]u8 = undefined;
+    var recv_buf: [PeerReceiver.recv_buf_size]u8 = undefined;
     const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
 
-    const peer = PeerReceiver.init(1, -1, address, 42, &payload_buf);
+    const peer = PeerReceiver.init(1, -1, address, 42, &payload_buf, &recv_buf);
 
     try testing.expectEqual(@as(u8, 1), peer.node_id);
     try testing.expectEqual(@as(std.posix.fd_t, -1), peer.socket_fd);
@@ -169,13 +228,16 @@ test "PeerReceiver init sets correct defaults" {
     try testing.expect(peer.connected);
     try testing.expect(peer.last_recv_ns > 0);
     try testing.expectEqual(LivenessState.alive, peer.liveness);
+    try testing.expectEqual(@as(usize, 0), peer.recv_len);
+    try testing.expectEqual(@as(usize, 0), peer.recv_pos);
 }
 
 test "PeerReceiver updateLiveness transitions correctly" {
     var payload_buf: [4096]u8 = undefined;
+    var recv_buf: [PeerReceiver.recv_buf_size]u8 = undefined;
     const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
 
-    var peer = PeerReceiver.init(1, -1, address, 1, &payload_buf);
+    var peer = PeerReceiver.init(1, -1, address, 1, &payload_buf, &recv_buf);
     const now: i64 = @intCast(std.time.nanoTimestamp());
 
     // Recent data → alive
