@@ -251,6 +251,9 @@ pub const BrokerApplication = struct {
             toIdleStrategy(self.config.idle_strategy_name),
         );
 
+        self.broker_threads.?.sender_runner.cpu_affinity = self.config.sender_cpu_affinity;
+        self.broker_threads.?.receiver_runner.cpu_affinity = self.config.receiver_cpu_affinity;
+
         try self.broker_threads.?.start();
         self.started = true;
     }

@@ -123,6 +123,8 @@ broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
 broker.threading.mode=dedicated
 broker.idle.strategy=backoff
+broker.sender.cpu.affinity=2
+broker.receiver.cpu.affinity=3
 EOF
 
     "$BIN/brz-broker" --config "$CONFIGS/broker_local.properties" \
@@ -182,6 +184,8 @@ broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
 broker.threading.mode=dedicated
 broker.idle.strategy=backoff
+broker.sender.cpu.affinity=2
+broker.receiver.cpu.affinity=3
 EOF
 
     cat > "$CONFIGS/broker_2.properties" << EOF
@@ -194,6 +198,8 @@ broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
 broker.threading.mode=dedicated
 broker.idle.strategy=backoff
+broker.sender.cpu.affinity=4
+broker.receiver.cpu.affinity=5
 EOF
 }
 

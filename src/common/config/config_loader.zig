@@ -134,6 +134,12 @@ pub const ConfigLoader = struct {
         if (props.get("broker.idle.strategy")) |v|
             config.idle_strategy_name = IdleStrategyName.fromString(v) orelse
                 return ConfigError.InvalidValue;
+        if (props.get("broker.sender.cpu.affinity")) |v|
+            config.sender_cpu_affinity = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.receiver.cpu.affinity")) |v|
+            config.receiver_cpu_affinity = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
 
         if (props.get("broker.counter.values.buffer.size")) |v|
             config.counter_values_buffer_size = std.fmt.parseInt(u32, v, 10) catch
@@ -285,6 +291,8 @@ fn applyEnvOverrides(
         "broker.error.log.buffer.size",
         "broker.max.services",
         "broker.max.peers",
+        "broker.sender.cpu.affinity",
+        "broker.receiver.cpu.affinity",
         "broker.io.uring.queue.depth",
         "broker.io.uring.sqpoll",
         "broker.io.uring.registered.buffers",

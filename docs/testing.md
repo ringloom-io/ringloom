@@ -251,7 +251,198 @@ zig build perf
 
 ---
 
-## 5. Comparing Performance Results
+## 5. Low-Latency System Tuning
+
+To get reproducible, low-latency benchmark results the test machine must be
+tuned at three levels: BIOS/firmware, kernel boot parameters, and runtime
+settings.  The runtime layer is automated by `scripts/tune-system.sh`; the
+other two require one-time manual configuration.
+
+**Test machine reference:** GMKTec K8 Plus, 64 GB DDR5, AMD Ryzen 7 8845HS
+(8 physical cores / 16 threads), Omarchy Linux, kernel 6.19, Limine bootloader.
+
+> After all tuning is applied, run `sudo ./scripts/tune-system.sh --verify` to
+> confirm the system state before benchmarking.
+
+---
+
+### 5.1 BIOS / Firmware Configuration
+
+These settings must be changed in the BIOS/UEFI setup (typically press `DEL`
+or `F2` during POST).  Exact menu locations vary by firmware version.
+
+| Setting | Target | Why |
+|---------|--------|-----|
+| **SMT (Simultaneous Multi-Threading)** | **Disabled** | Eliminates logical-core contention.  With SMT off, cores 0–7 map 1:1 to physical cores. The CPU pinning layout below assumes SMT is disabled. |
+| **C-States (C1E, C6, etc.)** | **Disabled** | Prevents the CPU from entering low-power idle states that add wake-up latency (10–100+ µs). |
+| **Power Profile / Platform Power Management** | **Maximum Performance** | Locks all cores at maximum frequency. |
+| **NUMA Interleaving** | **Enabled** (multi-socket only) | Not applicable to the single-socket 8845HS, but enable on multi-socket test machines to distribute memory accesses evenly. |
+
+> **Note on P-States / CPPC:** Keep AMD CPPC **enabled** in BIOS.  The Linux
+> `amd-pstate` driver requires CPPC to function.  Frequency is controlled at
+> the OS level via the `performance` governor instead (applied by the tuning
+> script).  Do **not** disable CPPC — that removes the kernel's ability to
+> lock the frequency.
+
+---
+
+### 5.2 Kernel Boot Parameters (Limine)
+
+These parameters are set once in the Limine bootloader configuration and take
+effect on every boot.
+
+Edit `/boot/limine/limine.conf` and append these to the `cmdline:` of your
+Linux entry:
+
+```
+isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 processor.max_cstate=0
+```
+
+**Example Limine entry:**
+
+```
+:Omarchy Linux
+    protocol: linux
+    kernel_path: boot():/vmlinuz-linux
+    kernel_cmdline: root=<your-root> rw isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 processor.max_cstate=0
+    module_path: boot():/initramfs-linux.img
+```
+
+| Parameter | Effect |
+|-----------|--------|
+| `isolcpus=2-5` | Removes cores 2–5 from the general scheduler. Only explicitly pinned tasks run on them. Covers both local (2 cores) and remote (4 cores) benchmarks. |
+| `nohz_full=2-5` | Disables the periodic timer tick on isolated cores (adaptive-tick mode), reducing jitter. |
+| `rcu_nocbs=2-5` | Offloads RCU callback processing from isolated cores to housekeeping cores 0–1. |
+| `processor.max_cstate=0` | Kernel-level C-state disable (belt-and-suspenders with BIOS setting). |
+
+After editing, reboot and verify:
+
+```bash
+# Should show "2-5":
+cat /sys/devices/system/cpu/isolated
+
+# Should show "0":
+cat /sys/devices/system/cpu/smt/active
+```
+
+> **Optional — extreme mode:** Adding `idle=poll` prevents the CPU from ever
+> entering idle states, giving the absolute lowest wake-up latency.  However
+> this causes very high power consumption and thermals on the mobile 8845HS,
+> which can trigger thermal throttling under sustained load.  Only use if you
+> measure an improvement for your specific workload.
+
+---
+
+### 5.3 Runtime Tuning Script
+
+The `scripts/tune-system.sh` script applies all OS-level runtime settings that
+do not require a reboot.
+
+```bash
+# Apply all runtime tuning (requires root):
+sudo ./scripts/tune-system.sh
+
+# Verify current settings (no root needed):
+./scripts/tune-system.sh --verify
+
+# Revert to original settings:
+sudo ./scripts/tune-system.sh --revert
+```
+
+**What the script does:**
+
+| Step | Detail |
+|------|--------|
+| Stop `irqbalance` | Prevents the irqbalance daemon from redistributing IRQs onto isolated cores. |
+| CPU governor → `performance` | Locks all cores at maximum frequency (requires `amd-pstate` or `acpi-cpufreq`). |
+| Disable turbo boost | Writes `0` to `/sys/devices/system/cpu/cpufreq/boost` for deterministic clock speeds. |
+| Disable THP | Sets transparent huge pages to `never` — THP compaction causes unpredictable latency spikes. |
+| `vm.swappiness=0` | Strongly discourages swapping, keeping shared-memory buffers resident. |
+| `kernel.timer_migration=0` | Prevents timer callbacks from migrating to isolated cores. |
+| Migrate IRQs | Moves IRQ affinity to housekeeping cores 0–1 (best-effort; some IRQs are non-writable). |
+
+The script saves original settings to `/tmp/brz-tune-state.env` so that
+`--revert` restores the exact prior state rather than guessing defaults.
+
+---
+
+### 5.4 CPU Core Assignment
+
+With SMT disabled and `isolcpus=2-5`, the benchmark-critical cores are
+partitioned.  Only the sender and receiver event loops are pinned — they
+are the hot-path threads where cache locality and isolation matter most.
+The control loop, test services (ping/echo), and the OS share the remaining
+cores.
+
+```
+Core 0  ─── OS / interrupts / kernel work (housekeeping)
+Core 1  ─── OS / interrupts / kernel work (housekeeping)
+Core 2  ─── Broker: sender event loop   (pinned)
+Core 3  ─── Broker: receiver event loop (pinned)
+Core 4–7 ── Control loop, ping, echo, spare (unpinned)
+```
+
+> **Prerequisite:** This layout assumes SMT is disabled in BIOS.  With SMT
+> enabled, cores 0–7 are logical cores sharing physical resources with siblings
+> 8–15.  Pinning to logical cores on the same physical core defeats the purpose
+> of isolation.
+
+**Broker configuration** — set CPU affinity in `broker.properties`:
+
+```properties
+broker.sender.cpu.affinity=2
+broker.receiver.cpu.affinity=3
+```
+
+The `run-benchmarks.sh` script already includes these settings in the generated
+broker config files.  The control loop and test services are left unpinned.
+
+**Two-broker layout** (cross-broker benchmarks, 4 pinned cores):
+
+```
+Core 0–1 ── OS / housekeeping
+Core 2   ── Broker A: sender    (pinned)
+Core 3   ── Broker A: receiver  (pinned)
+Core 4   ── Broker B: sender    (pinned)
+Core 5   ── Broker B: receiver  (pinned)
+Core 6–7 ── Control loops, ping, echo (unpinned)
+```
+
+Broker A config:
+```properties
+broker.sender.cpu.affinity=2
+broker.receiver.cpu.affinity=3
+```
+
+Broker B config:
+```properties
+broker.sender.cpu.affinity=4
+broker.receiver.cpu.affinity=5
+```
+
+For the remote layout, update `isolcpus` accordingly:
+
+```
+isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 processor.max_cstate=0
+```
+
+---
+
+### 5.5 Future Improvements
+
+- **`mlock` / `mlockall`** — Pre-fault and lock shared-memory mapped regions
+  to prevent page faults on the hot path.  The broker currently uses plain
+  `mmap` without pre-touching; adding `mlockall(MCL_CURRENT | MCL_FUTURE)` at
+  startup and raising the `memlock` ulimit would eliminate minor faults.
+- **SCHED_FIFO** — Run broker threads under real-time scheduling for
+  guaranteed preemption of other tasks.  Requires `kernel.sched_rt_runtime_us`
+  tuning and careful priority assignment.
+- **IRQ affinity at boot** — Use `irqaffinity=0-1` kernel parameter or a
+  systemd unit to set IRQ affinity before any benchmark runs.
+
+---
+
+## 6. Comparing Performance Results
 
 ### Workflow for performance comparison
 
@@ -269,6 +460,7 @@ zig build perf
 
 ### Tips for reliable comparisons
 
+- Apply the full low-latency tuning stack (§5) before benchmarking.
 - Always use the same machine and OS for before/after measurements.
 - Close other CPU-intensive processes during benchmark runs.
 - Run benchmarks multiple times and look for consistency.
@@ -277,7 +469,7 @@ zig build perf
 
 ---
 
-## 6. CI Integration
+## 7. CI Integration
 
 ### Recommended tiers
 
@@ -297,7 +489,7 @@ On failure, upload:
 
 ---
 
-## 7. Architecture Reference
+## 8. Architecture Reference
 
 ### Source layout
 
@@ -360,7 +552,7 @@ src/
 
 ---
 
-## 8. Current Status
+## 9. Current Status
 
 - **Unit tests:** All **482 tests pass** ✅
 - **E2E tests:** All pass ✅

@@ -68,6 +68,8 @@ pub const BrokerSpec = struct {
     idle_strategy: []const u8 = "backoff",
     control_buffer_size: u32 = 65_536,
     messages_buffer_size: u32 = 1_048_576,
+    sender_cpu_affinity: ?u32 = null,
+    receiver_cpu_affinity: ?u32 = null,
 };
 
 /// Describes the configuration for a service process to be started by

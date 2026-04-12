@@ -132,6 +132,13 @@ pub const ConfigGen = struct {
         try writer.print("broker.threading.mode={s}\n", .{spec.threading_mode});
         try writer.print("broker.idle.strategy={s}\n", .{spec.idle_strategy});
 
+        if (spec.sender_cpu_affinity) |core| {
+            try writer.print("broker.sender.cpu.affinity={d}\n", .{core});
+        }
+        if (spec.receiver_cpu_affinity) |core| {
+            try writer.print("broker.receiver.cpu.affinity={d}\n", .{core});
+        }
+
         return self.allocator.dupe(u8, buf.items);
     }
 

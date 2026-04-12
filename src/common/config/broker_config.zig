@@ -75,6 +75,8 @@ pub const BrokerConfig = struct {
     // ── Threading ───────────────────────────────────────────────
     threading_mode: ThreadingMode = .dedicated,
     idle_strategy_name: IdleStrategyName = .backoff,
+    sender_cpu_affinity: ?u32 = null,
+    receiver_cpu_affinity: ?u32 = null,
 
     // ── Monitoring ──────────────────────────────────────────────
     counter_values_buffer_size: u32 = 65_536,
