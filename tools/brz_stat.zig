@@ -35,30 +35,30 @@ const BrokerMetadataHeader = extern struct {
     error_log_buffer_size: i32,
 };
 
-const FdWriter = std.io.GenericWriter(std.posix.fd_t, std.posix.WriteError, std.posix.write);
-
-fn fdWriter(fd: std.posix.fd_t) FdWriter {
-    return .{ .context = fd };
-}
-
-pub fn main() !void {
-    const allocator = std.heap.page_allocator;
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const path = if (args.len > 1) args[1] else "/dev/shm/brz/services/broker_0.dat";
 
-    const stdout = fdWriter(std.posix.STDOUT_FILENO);
-    const stderr = fdWriter(std.posix.STDERR_FILENO);
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
+    const stdout = &stdout_w.interface;
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_w = std.Io.File.stderr().writer(io, &stderr_buf);
+    const stderr = &stderr_w.interface;
 
     // Open and mmap the file read-only.
-    const file = std.fs.cwd().openFile(path, .{ .mode = .read_only }) catch |err| {
+    const file = (if (std.fs.path.isAbsolute(path))
+        std.Io.Dir.openFileAbsolute(io, path, .{ .mode = .read_only })
+    else
+        std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only })) catch |err| {
         try stderr.print("error: cannot open '{s}': {s}\n", .{ path, @errorName(err) });
         std.process.exit(1);
     };
-    defer file.close();
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     if (stat.size < metadata_header_length) {
         try stderr.print("error: file too small ({d} bytes) — not a valid broker metadata file\n", .{stat.size});
         std.process.exit(1);
@@ -67,7 +67,7 @@ pub fn main() !void {
     const mapped = try std.posix.mmap(
         null,
         stat.size,
-        std.posix.PROT.READ,
+        .{ .READ = true },
         .{ .TYPE = .SHARED },
         file.handle,
         0,

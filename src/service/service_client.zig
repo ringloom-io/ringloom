@@ -19,6 +19,7 @@ const PeerSendCountersRegion = memory.PeerSendCountersRegion;
 const fc_config_mod = @import("flow_control_config.zig");
 const FlowControlConfig = fc_config_mod.FlowControlConfig;
 const BackpressureStrategy = fc_config_mod.BackpressureStrategy;
+const Clock = brz_common.platform.Clock;
 
 const frame_parser = brz_common.protocol.frame_parser;
 const TcpFrameHeader = frame_parser.TcpFrameHeader;
@@ -319,15 +320,15 @@ pub const ServiceClient = struct {
     fn spinUntilCapacity(self: *Self, initial_remaining: usize, required: usize) SendError!void {
         _ = initial_remaining;
         const timeout_ns: u64 = @as(u64, self.fc_config.spin_timeout_ms) * 1_000_000;
-        const start = std.time.Instant.now() catch return error.BackPressureTimeout;
-        const deadline_ns = timeout_ns;
+        const start = Clock.monotonicNanos();
+        const deadline_ns: i64 = @intCast(timeout_ns);
 
         while (true) {
             // Re-read remaining capacity (may have changed).
             const send_remaining = self.sendBufferRemaining();
             if (send_remaining >= required) return;
 
-            const elapsed = (std.time.Instant.now() catch return error.BackPressureTimeout).since(start);
+            const elapsed = Clock.monotonicNanos() - start;
             if (elapsed >= deadline_ns) {
                 return error.BackPressureTimeout;
             }

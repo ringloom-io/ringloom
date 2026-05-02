@@ -122,7 +122,7 @@ pub const ServiceMetadataFile = struct {
         try ensureDirectoryExists(path);
 
         const fd = try platform.createFile(path);
-        errdefer std.posix.close(fd);
+        errdefer platform.closeFd(fd);
         try platform.ftruncate(fd, total_size);
 
         const mapped = try platform.mmap(fd, total_size);
@@ -183,7 +183,7 @@ pub const ServiceMetadataFile = struct {
         );
 
         const fd = try platform.openFile(path);
-        errdefer std.posix.close(fd);
+        errdefer platform.closeFd(fd);
 
         const file_size = try platform.fileSize(fd);
         const mapped = try platform.mmap(fd, file_size);
@@ -270,7 +270,7 @@ pub const ServiceMetadataFile = struct {
 
     pub fn close(self: *ServiceMetadataFile) void {
         platform.munmap(self.mapped_bytes);
-        std.posix.close(self.fd);
+        platform.closeFd(self.fd);
         self.* = undefined;
     }
 
@@ -298,11 +298,11 @@ pub const ServiceMetadataFile = struct {
 
     fn ensureDirectoryExists(file_path: []const u8) !void {
         const dir_path = std.fs.path.dirname(file_path) orelse return error.InvalidPath;
-        // Use makePath to create all intermediate directories.
-        var root_dir = std.fs.openDirAbsolute("/", .{}) catch return error.FileNotFound;
-        defer root_dir.close();
+        const io = std.Io.Threaded.global_single_threaded.io();
+        var root_dir = std.Io.Dir.openDirAbsolute(io, "/", .{}) catch return error.FileNotFound;
+        defer root_dir.close(io);
         const relative = if (dir_path.len > 0 and dir_path[0] == '/') dir_path[1..] else dir_path;
-        root_dir.makePath(relative) catch return error.FileNotFound;
+        root_dir.createDirPath(io, relative) catch return error.FileNotFound;
     }
 };
 
@@ -321,9 +321,9 @@ test "BlockingTrailer has correct size" {
 test "create service metadata file without blocking — verify offsets" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     var file = try ServiceMetadataFile.create(.{
         .storage_path = storage_path,
@@ -357,9 +357,9 @@ test "create service metadata file without blocking — verify offsets" {
 test "create service metadata file with blocking — verify offsets include trailer" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     var file = try ServiceMetadataFile.create(.{
         .storage_path = storage_path,
@@ -394,9 +394,9 @@ test "create service metadata file with blocking — verify offsets include trai
 test "heartbeat read and write are consistent" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     var file = try ServiceMetadataFile.create(.{
         .storage_path = storage_path,

@@ -95,7 +95,7 @@ test "BrokerThreads start and shutdown" {
     // When
     try threads.start();
     try testing.expect(threads.isRunning());
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    platform.sleepNanos(5 * std.time.ns_per_ms);
 
     threads.shutdown();
 

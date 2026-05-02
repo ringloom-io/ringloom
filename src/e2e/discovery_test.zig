@@ -31,7 +31,7 @@ test "service discovery updates are delivered" {
     try harness.waitForServiceReady(echo, 5000);
 
     // Allow time for discovery propagation and message exchange
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, .fromNanoseconds(2 * std.time.ns_per_s), .awake) catch unreachable;
 
     // Then — ping should eventually complete after discovering echo
     const exit_code = try ping.waitForExit(15000);
@@ -79,7 +79,7 @@ test "late service registration triggers discovery notification" {
     try harness.waitForServiceReady(echo, 5000);
 
     // Allow time for discovery propagation
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, .fromNanoseconds(2 * std.time.ns_per_s), .awake) catch unreachable;
 
     // Then — both pings complete successfully
     const exit_a = try ping_a.waitForExit(15000);
@@ -117,7 +117,7 @@ test "service removal triggers discovery removal notification" {
     try harness.waitForServiceReady(forwarder, 5000);
 
     // Allow discovery to fully propagate
-    std.Thread.sleep(1 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, .fromNanoseconds(1 * std.time.ns_per_s), .awake) catch unreachable;
 
     // When — stop echo gracefully
     try harness.stopProcess(echo);

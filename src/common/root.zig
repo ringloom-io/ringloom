@@ -91,6 +91,7 @@ comptime {
     _ = @import("message/message_fragmenting_producer.zig");
     _ = @import("message/message_assembler.zig");
     _ = @import("message/flow_control_messages.zig");
+    _ = @import("message/latency_trace.zig");
 
     // Monitoring
     _ = @import("monitoring/system_counter.zig");

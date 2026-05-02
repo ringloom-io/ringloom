@@ -20,6 +20,7 @@ const ServiceConfig = brz_service.ServiceConfig;
 const ServiceClient = brz_service.ServiceClient;
 const Clock = brz_common.Clock;
 const platform = brz_common.platform;
+const latency_trace = brz_common.message.latency_trace;
 const Histogram = brz_testing.Histogram;
 
 // ── Mutable file-level state ─────────────────────────────────────────
@@ -38,13 +39,13 @@ fn installSignalHandler() void {
     std.posix.sigaction(std.posix.SIG.INT, &handler, null);
 }
 
-fn signalHandler(_: c_int) callconv(.c) void {
+fn signalHandler(_: std.posix.SIG) callconv(.c) void {
     shutdown_flag.store(true, .release);
 }
 
 // ── Arg Parsing Helpers ──────────────────────────────────────────────
 
-fn parseStringArg(args: []const []const u8, flag: []const u8, default: []const u8) []const u8 {
+fn parseStringArg(args: []const [:0]const u8, flag: []const u8, default: []const u8) []const u8 {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {
@@ -54,7 +55,7 @@ fn parseStringArg(args: []const []const u8, flag: []const u8, default: []const u
     return default;
 }
 
-fn parseIntArg(comptime T: type, args: []const []const u8, flag: []const u8, default: T) T {
+fn parseIntArg(comptime T: type, args: []const [:0]const u8, flag: []const u8, default: T) T {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {
@@ -64,7 +65,7 @@ fn parseIntArg(comptime T: type, args: []const []const u8, flag: []const u8, def
     return default;
 }
 
-fn parseOptionalStringArg(args: []const []const u8, flag: []const u8) ?[]const u8 {
+fn parseOptionalStringArg(args: []const [:0]const u8, flag: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {
@@ -76,7 +77,8 @@ fn parseOptionalStringArg(args: []const []const u8, flag: []const u8) ?[]const u
 
 // ── Main ─────────────────────────────────────────────────────────────
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
     const allocator = switch (builtin.mode) {
         .Debug, .ReleaseSafe => debug_alloc.allocator(),
@@ -87,16 +89,15 @@ pub fn main() !void {
     };
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_w.interface;
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    var stderr_w = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_w.interface;
 
     // ── Parse CLI args ───────────────────────────────────────────────
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const storage_path = parseStringArg(args, "--storage-path", "/dev/shm");
     const group = parseStringArg(args, "--group", "default");
@@ -108,6 +109,7 @@ pub fn main() !void {
     const warmup_count = parseIntArg(u64, args, "--warmup-count", 10);
     const result_file = parseOptionalStringArg(args, "--result-file");
     const spin_timeout_ms = parseIntArg(u64, args, "--spin-timeout-ms", 0);
+    const send_interval_ns = parseIntArg(u64, args, "--send-interval-ns", 0);
     const idle_strategy_str = parseStringArg(args, "--idle-strategy", "backoff");
 
     installSignalHandler();
@@ -151,7 +153,7 @@ pub fn main() !void {
 
     // ── Wait for service discovery to propagate ──────────────────────
 
-    std.Thread.sleep(500 * std.time.ns_per_ms);
+    platform.sleepNanos(500 * std.time.ns_per_ms);
 
     // ── Prepare payload ──────────────────────────────────────────────
 
@@ -163,13 +165,11 @@ pub fn main() !void {
 
     var warmup_sent: u64 = 0;
     var warmup_failed: u64 = 0;
+    var next_send_deadline_ns: u64 = 0;
 
     for (0..warmup_count) |_| {
-        // Embed monotonic timestamp + warmup phase flag.
-        if (payload.len >= 9) {
-            std.mem.writeInt(u64, payload[0..8], @intCast(Clock.monotonicNanos()), .little);
-            payload[8] = 0; // warmup phase
-        }
+        paceNextSend(&next_send_deadline_ns, send_interval_ns);
+        latency_trace.embedSend(payload, latency_trace.warmup_phase, @intCast(Clock.monotonicNanosStable()));
         client.send(payload) catch {
             warmup_failed += 1;
             continue;
@@ -184,8 +184,9 @@ pub fn main() !void {
 
     // Small pause between warmup and measurement.
     if (warmup_count > 0) {
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        platform.sleepNanos(50 * std.time.ns_per_ms);
     }
+    next_send_deadline_ns = 0;
 
     // ── Measurement phase ────────────────────────────────────────────
 
@@ -199,37 +200,29 @@ pub fn main() !void {
     defer histogram.deinit();
 
     const start_time_ms = Clock.epochMillis();
-    const start_mono = std.time.nanoTimestamp();
+    const start_mono = Clock.monotonicNanos();
 
     for (0..message_count) |_| {
-        // Embed monotonic timestamp + measured phase flag.
-        if (payload.len >= 9) {
-            std.mem.writeInt(u64, payload[0..8], @intCast(Clock.monotonicNanos()), .little);
-            payload[8] = 1; // measured phase
-        }
+        paceNextSend(&next_send_deadline_ns, send_interval_ns);
+        latency_trace.embedSend(payload, latency_trace.measured_phase, @intCast(Clock.monotonicNanosStable()));
 
-        const send_start = std.time.nanoTimestamp();
+        const send_start = Clock.monotonicNanos();
         var succeeded = false;
 
         client.send(payload) catch {
             // Spinning backpressure: retry for up to spin_timeout_ms.
             if (spin_timeout_ms > 0) {
                 const deadline_ns: u64 = spin_timeout_ms * std.time.ns_per_ms;
-                const spin_start = std.time.Instant.now() catch {
-                    failed += 1;
-                    continue;
-                };
+                const spin_start = Clock.monotonicNanos();
 
                 while (true) {
                     // Re-embed timestamp before each retry so echo measures
                     // pipeline latency, not including spin wait.
-                    if (payload.len >= 9) {
-                        std.mem.writeInt(u64, payload[0..8], @intCast(Clock.monotonicNanos()), .little);
-                    }
+                    latency_trace.embedSend(payload, latency_trace.measured_phase, @intCast(Clock.monotonicNanosStable()));
 
                     client.send(payload) catch {
-                        const elapsed = (std.time.Instant.now() catch break).since(spin_start);
-                        if (elapsed >= deadline_ns) break;
+                        const elapsed = Clock.monotonicNanos() - spin_start;
+                        if (elapsed >= @as(i64, @intCast(deadline_ns))) break;
                         std.atomic.spinLoopHint();
                         continue;
                     };
@@ -244,7 +237,7 @@ pub fn main() !void {
             }
 
             // Fall through: retry succeeded.
-            const send_end = std.time.nanoTimestamp();
+            const send_end = Clock.monotonicNanos();
             const delta: u64 = @intCast(send_end - send_start);
             histogram.record(delta) catch {};
             sent += 1;
@@ -252,13 +245,13 @@ pub fn main() !void {
         };
 
         // First attempt succeeded.
-        const send_end = std.time.nanoTimestamp();
+        const send_end = Clock.monotonicNanos();
         const delta: u64 = @intCast(send_end - send_start);
         histogram.record(delta) catch {};
         sent += 1;
     }
 
-    const end_mono = std.time.nanoTimestamp();
+    const end_mono = Clock.monotonicNanos();
     const end_time_ms = Clock.epochMillis();
 
     const elapsed_ns: u64 = @intCast(end_mono - start_mono);
@@ -286,13 +279,14 @@ pub fn main() !void {
     try stdout.print("ping: sent={d}, failed={d}, elapsed_ms={d}\n", .{ sent, failed, elapsed_ms });
     try stdout.print("ping: throughput={d} msgs/s, {d} bytes/s\n", .{ throughput_msgs_per_sec, throughput_bytes_per_sec });
     try stdout.print("ping: send_latency p50={d}ns p95={d}ns p99={d}ns p99.9={d}ns max={d}ns\n", .{ latency.p50, latency.p95, latency.p99, latency.p99_9, latency.max_val });
-    try stdout.print("ping: message_size={d}, target={s}\n", .{ message_size, target_service });
+    try stdout.print("ping: message_size={d}, target={s}, send_interval_ns={d}\n", .{ message_size, target_service, send_interval_ns });
     try stdout.flush();
 
     // ── Write JSON results file (optional) ───────────────────────────
 
     if (result_file) |path| {
         writeResultsJson(
+            io,
             path,
             sent,
             failed,
@@ -302,6 +296,7 @@ pub fn main() !void {
             throughput_msgs_per_sec,
             throughput_bytes_per_sec,
             warmup_count,
+            send_interval_ns,
             start_time_ms,
             end_time_ms,
             service_name,
@@ -322,6 +317,7 @@ pub fn main() !void {
 }
 
 fn writeResultsJson(
+    io: std.Io,
     path: []const u8,
     sent: u64,
     failed: u64,
@@ -331,6 +327,7 @@ fn writeResultsJson(
     throughput_msgs_per_sec: u64,
     throughput_bytes_per_sec: u64,
     warmup_count: u64,
+    send_interval_ns: u64,
     start_time_ms: i64,
     end_time_ms: i64,
     service_name: []const u8,
@@ -341,11 +338,14 @@ fn writeResultsJson(
     latency_p99_9_ns: u64,
     latency_max_ns: u64,
 ) !void {
-    const file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
+    const file = if (std.fs.path.isAbsolute(path))
+        try std.Io.Dir.createFileAbsolute(io, path, .{})
+    else
+        try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
 
     var write_buf: [4096]u8 = undefined;
-    var file_w = file.writer(&write_buf);
+    var file_w = file.writer(io, &write_buf);
     const writer = &file_w.interface;
     try writer.print(
         \\{{
@@ -357,6 +357,7 @@ fn writeResultsJson(
         \\  "elapsed_us": {d},
         \\  "message_size": {d},
         \\  "warmup_count": {d},
+        \\  "send_interval_ns": {d},
         \\  "throughput_msgs_per_sec": {d},
         \\  "throughput_bytes_per_sec": {d},
         \\  "start_time_ms": {d},
@@ -377,6 +378,7 @@ fn writeResultsJson(
         elapsed_us,
         message_size,
         warmup_count,
+        send_interval_ns,
         throughput_msgs_per_sec,
         throughput_bytes_per_sec,
         start_time_ms,
@@ -388,4 +390,32 @@ fn writeResultsJson(
         latency_max_ns,
     });
     try writer.flush();
+}
+
+fn paceNextSend(next_send_deadline_ns: *u64, interval_ns: u64) void {
+    if (interval_ns == 0) return;
+
+    const now_ns: u64 = @intCast(Clock.monotonicNanos());
+    if (next_send_deadline_ns.* == 0 or next_send_deadline_ns.* < now_ns) {
+        next_send_deadline_ns.* = now_ns;
+    }
+
+    waitUntil(next_send_deadline_ns.*);
+    next_send_deadline_ns.* += interval_ns;
+}
+
+fn waitUntil(target_ns: u64) void {
+    while (true) {
+        const now_ns: u64 = @intCast(Clock.monotonicNanos());
+        if (now_ns >= target_ns) return;
+
+        const remaining_ns = target_ns - now_ns;
+        if (remaining_ns > 10_000) {
+            platform.sleepNanos(remaining_ns - 5_000);
+        } else if (remaining_ns > 1_000) {
+            std.Thread.yield() catch {};
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
 }

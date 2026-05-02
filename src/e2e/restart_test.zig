@@ -74,7 +74,7 @@ test "service restart without prior cleanup still succeeds" {
     harness.killProcess(crashy);
 
     // Brief pause to ensure the OS has reaped the process
-    std.Thread.sleep(500 * std.time.ns_per_ms);
+    std.Io.sleep(std.testing.io, .fromNanoseconds(500 * std.time.ns_per_ms), .awake) catch unreachable;
 
     const replacement = try harness.startService(.{
         .executable_name = "brz-test-echo-service",

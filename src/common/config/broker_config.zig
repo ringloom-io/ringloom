@@ -102,6 +102,7 @@ pub const BrokerConfig = struct {
     io_uring_queue_depth: u32 = 256,
     io_uring_sqpoll: bool = false,
     io_uring_registered_buffers: u32 = 64,
+    benchmark_latency_tracing_enabled: bool = false,
 
     // ── Computed (set during validation, not from file) ─────────
     max_counter_id: u32 = 0,
@@ -117,6 +118,4 @@ pub const BrokerConfig = struct {
     pub fn maxActivePeers(self: *const BrokerConfig) u8 {
         return self.max_peers;
     }
-
-
 };

@@ -8,6 +8,7 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 const io_engine = @import("io_engine.zig");
+const net = @import("net_compat.zig");
 const socket_config_mod = @import("socket_config.zig");
 
 const ConnectionHandle = io_engine.ConnectionHandle;
@@ -38,9 +39,9 @@ pub const IoUringEngine = struct {
         _ = self.ring.accept(user_data, listen_handle.toFd(), null, null, 0) catch return;
     }
 
-    pub fn submit_connect(self: *IoUringEngine, handle: ConnectionHandle, addr: std.net.Address) void {
+    pub fn submit_connect(self: *IoUringEngine, handle: ConnectionHandle, addr: net.Address) void {
         const user_data = encodeUserData(handle, .connect);
-        _ = self.ring.connect(user_data, handle.toFd(), addr, @sizeOf(@TypeOf(addr))) catch return;
+        _ = self.ring.connect(user_data, handle.toFd(), addr, addr.getOsSockLen()) catch return;
     }
 
     pub fn submit_recv(self: *IoUringEngine, handle: ConnectionHandle, buf: []u8) void {

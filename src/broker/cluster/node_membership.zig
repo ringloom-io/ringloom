@@ -9,6 +9,7 @@
 //! eliminating the need for a separate PeerConnection tracking structure.
 
 const std = @import("std");
+const net = @import("../net_compat.zig");
 
 pub const ConnectionState = enum(u8) {
     /// No connection attempt in progress.
@@ -24,7 +25,7 @@ pub const Node = struct {
     /// "host:port" string, null-padded to 22 bytes.
     host_and_port: [22]u8,
     /// Resolved address for this peer. Null for the local node.
-    address: ?std.net.Address = null,
+    address: ?net.Address = null,
     /// True if this is the local broker.
     is_local: bool,
     /// True if this node is the current cluster leader.
@@ -92,7 +93,7 @@ pub const NodeMembership = struct {
         return self;
     }
 
-    pub fn addNode(self: *NodeMembership, node_id: u8, host_and_port: [22]u8, address: ?std.net.Address) void {
+    pub fn addNode(self: *NodeMembership, node_id: u8, host_and_port: [22]u8, address: ?net.Address) void {
         if (self.nodes[node_id] != null) return; // already known
         self.nodes[node_id] = .{
             .id = node_id,

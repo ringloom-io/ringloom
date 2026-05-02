@@ -11,6 +11,7 @@
 //!    messaging resumes end-to-end.
 
 const std = @import("std");
+const platform = @import("brz_common").platform;
 const testing_mod = @import("brz_testing");
 const TestHarness = testing_mod.TestHarness;
 const BrokerSpec = testing_mod.BrokerSpec;
@@ -43,11 +44,11 @@ test "service recovery time after crash" {
     // When — the crashy service terminates on its own.
     _ = try crashy.waitForExit(5000);
 
-    const crash_detected_ns = std.time.nanoTimestamp();
+    const crash_detected_ns = platform.monotonicNanos();
 
     // Allow the broker's heartbeat checker to notice the dead service.
     // Default heartbeat timeout is 10 s; we wait a bit longer to be safe.
-    std.Thread.sleep(12 * std.time.ns_per_s);
+    platform.sleepNanos(12 * std.time.ns_per_s);
 
     // Start a replacement service under the same logical name.
     const replacement = try harness.startService(.{
@@ -57,7 +58,7 @@ test "service recovery time after crash" {
     });
     try harness.waitForServiceReady(replacement, 5000);
 
-    const recovery_ns = std.time.nanoTimestamp() - crash_detected_ns;
+    const recovery_ns = platform.monotonicNanos() - crash_detected_ns;
 
     // Then — recovery completes within a reasonable bound.
     const recovery_ms: u64 = @intCast(@divFloor(recovery_ns, std.time.ns_per_ms));
@@ -109,10 +110,10 @@ test "service recovery time after kill" {
     // When — we forcefully kill the service.
     harness.killProcess(echo);
 
-    const kill_ns = std.time.nanoTimestamp();
+    const kill_ns = platform.monotonicNanos();
 
     // Wait for the broker to notice via heartbeat timeout.
-    std.Thread.sleep(12 * std.time.ns_per_s);
+    platform.sleepNanos(12 * std.time.ns_per_s);
 
     // Start a replacement.
     const replacement = try harness.startService(.{
@@ -122,7 +123,7 @@ test "service recovery time after kill" {
     });
     try harness.waitForServiceReady(replacement, 5000);
 
-    const recovery_ns = std.time.nanoTimestamp() - kill_ns;
+    const recovery_ns = platform.monotonicNanos() - kill_ns;
 
     // Then — record the recovery time.
     const recovery_ms: u64 = @intCast(@divFloor(recovery_ns, std.time.ns_per_ms));
@@ -179,7 +180,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     try harness.waitForBrokerReady(broker_b, 5000);
 
     // Let cluster form.
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    platform.sleepNanos(2 * std.time.ns_per_s);
 
     const echo = try harness.startService(.{
         .executable_name = "brz-test-echo-service",
@@ -218,9 +219,9 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     try harness.stopProcess(echo);
     try harness.stopProcess(broker_b);
 
-    const stop_ns = std.time.nanoTimestamp();
+    const stop_ns = platform.monotonicNanos();
 
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    platform.sleepNanos(2 * std.time.ns_per_s);
 
     broker_b = try harness.startBroker(.{
         .node_id = 2,
@@ -230,7 +231,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     try harness.waitForBrokerReady(broker_b, 5000);
 
     // Let the cluster re-form.
-    std.Thread.sleep(3 * std.time.ns_per_s);
+    platform.sleepNanos(3 * std.time.ns_per_s);
 
     // Re-register echo on the restarted broker.
     const echo2 = try harness.startService(.{
@@ -241,7 +242,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     });
     try harness.waitForServiceReady(echo2, 5000);
 
-    const recovery_ns = std.time.nanoTimestamp() - stop_ns;
+    const recovery_ns = platform.monotonicNanos() - stop_ns;
 
     // Then — cross-broker messaging works again.
     const recovered_result_path = try std.fmt.allocPrint(
@@ -318,7 +319,7 @@ test "broker recovery - local services survive remote broker restart" {
     });
     try harness.waitForBrokerReady(broker_b, 5000);
 
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    platform.sleepNanos(2 * std.time.ns_per_s);
 
     const echo = try harness.startService(.{
         .executable_name = "brz-test-echo-service",
@@ -330,7 +331,7 @@ test "broker recovery - local services survive remote broker restart" {
 
     // When — kill broker B (the remote peer).
     harness.killProcess(broker_b);
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    platform.sleepNanos(2 * std.time.ns_per_s);
 
     // Then — local messaging on broker A still works.
     const result_path = try std.fmt.allocPrint(
@@ -366,7 +367,7 @@ test "broker recovery - local services survive remote broker restart" {
         .peers = &.{.{ .node_id = 1, .host = "127.0.0.1", .port = 19001 }},
     });
     try harness.waitForBrokerReady(broker_b, 5000);
-    std.Thread.sleep(3 * std.time.ns_per_s);
+    platform.sleepNanos(3 * std.time.ns_per_s);
 
     // Cleanup
     try harness.stopProcess(echo);
@@ -399,10 +400,10 @@ test "rapid service restart recovery" {
 
         harness.killProcess(svc);
 
-        const iter_start = std.time.nanoTimestamp();
+        const iter_start = platform.monotonicNanos();
 
         // Heartbeat timeout before re-registration.
-        std.Thread.sleep(12 * std.time.ns_per_s);
+        platform.sleepNanos(12 * std.time.ns_per_s);
 
         const replacement = try harness.startService(.{
             .executable_name = "brz-test-echo-service",
@@ -411,7 +412,7 @@ test "rapid service restart recovery" {
     });
         try harness.waitForServiceReady(replacement, 5000);
 
-        const iter_recovery_ns = std.time.nanoTimestamp() - iter_start;
+        const iter_recovery_ns = platform.monotonicNanos() - iter_start;
         total_recovery_ns += iter_recovery_ns;
 
         const iter_ms: u64 = @intCast(@divFloor(iter_recovery_ns, std.time.ns_per_ms));

@@ -10,9 +10,11 @@
 
 const std = @import("std");
 const brz_common = @import("brz_common");
+const net = @import("../net_compat.zig");
 const constants = brz_common.platform.constants;
 const Clock = brz_common.platform.clock.Clock;
 const AtomicBool = brz_common.platform.atomic.AtomicBool;
+const platform = brz_common.platform;
 
 const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 const CountersManager = brz_common.concurrent.counters.CountersManager;
@@ -29,6 +31,7 @@ const LivenessState = @import("peer_receiver.zig").LivenessState;
 const ReadState = @import("peer_receiver.zig").ReadState;
 const message_router = @import("message_router.zig");
 const ServiceRegistry = message_router.ServiceRegistry;
+const latency_trace = brz_common.message.latency_trace;
 
 const admin_dispatch = @import("../cluster/admin_dispatch.zig");
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
@@ -162,12 +165,15 @@ pub const ReceiverEventLoop = struct {
     /// Admin command queue — forward admin messages to control loop.
     admin_cmd_queue: ?*AdminCommandQueue(64),
 
+    /// Enable benchmark-only payload timestamp tracing. Disabled in production.
+    benchmark_latency_tracing_enabled: bool,
+
     const Self = @This();
     const max_pending = 16;
 
     const PendingConnection = struct {
         fd: std.posix.fd_t,
-        address: std.net.Address,
+        address: net.Address,
         handshake_buf: [HandshakeFrame.size]u8,
         bytes_read: u8,
     };
@@ -178,7 +184,7 @@ pub const ReceiverEventLoop = struct {
         local_node_id: u8,
         allocator: std.mem.Allocator,
     ) Self {
-        return Self.initWithGroup(service_registry, counters, local_node_id, allocator, "brz", null);
+        return Self.initWithGroup(service_registry, counters, local_node_id, allocator, "brz", null, false);
     }
 
     pub fn initWithGroup(
@@ -188,6 +194,7 @@ pub const ReceiverEventLoop = struct {
         allocator: std.mem.Allocator,
         group_name: []const u8,
         admin_queue: ?*AdminCommandQueue(64),
+        benchmark_latency_tracing_enabled: bool,
     ) Self {
         return .{
             .peers = PeerMap.init(),
@@ -202,18 +209,19 @@ pub const ReceiverEventLoop = struct {
             .pending_connections = undefined,
             .pending_count = 0,
             .admin_cmd_queue = admin_queue,
+            .benchmark_latency_tracing_enabled = benchmark_latency_tracing_enabled,
         };
     }
 
     pub fn deinit(self: *Self) void {
         // Close listener.
         if (self.listener_fd >= 0) {
-            std.posix.close(self.listener_fd);
+            platform.closeFd(self.listener_fd);
             self.listener_fd = -1;
         }
         // Close pending connections.
         for (self.pending_connections[0..self.pending_count]) |*pc| {
-            if (pc.fd >= 0) std.posix.close(pc.fd);
+            if (pc.fd >= 0) platform.closeFd(pc.fd);
         }
         self.pending_count = 0;
         // Close and free peers.
@@ -229,19 +237,19 @@ pub const ReceiverEventLoop = struct {
     // ── Listener Setup ───────────────────────────────────────────────
 
     pub fn initListener(self: *Self, host: []const u8, port: u16) !void {
-        const addr = try std.net.Address.parseIp4(host, port);
-        const fd = try std.posix.socket(
+        const addr = try net.Address.parseIp4(host, port);
+        const fd = try net.socket(
             addr.any.family,
             std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
             0,
         );
-        errdefer std.posix.close(fd);
+        errdefer platform.closeFd(fd);
 
         const cfg = SocketConfig{ .reuse_addr = true, .tcp_nodelay = false, .keepalive = false };
         try cfg.apply(fd);
 
-        try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
-        try std.posix.listen(fd, 128);
+        try net.bind(fd, &addr.any, addr.getOsSockLen());
+        try net.listen(fd, 128);
 
         self.listener_fd = fd;
     }
@@ -279,9 +287,9 @@ pub const ReceiverEventLoop = struct {
         var accepted: u32 = 0;
 
         while (self.pending_count < max_pending) {
-            var addr: std.net.Address = undefined;
+            var addr: net.Address = undefined;
             var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-            const fd = std.posix.accept(
+            const fd = net.accept(
                 self.listener_fd,
                 &addr.any,
                 &addr_len,
@@ -295,7 +303,7 @@ pub const ReceiverEventLoop = struct {
 
             const sock_cfg = SocketConfig{};
             sock_cfg.apply(fd) catch {
-                std.posix.close(fd);
+                platform.closeFd(fd);
                 continue;
             };
 
@@ -328,7 +336,7 @@ pub const ReceiverEventLoop = struct {
                         continue;
                     },
                     else => {
-                        std.posix.close(pc.fd);
+                        platform.closeFd(pc.fd);
                         self.removePendingAt(i);
                         self.counters.increment(self.counter_ids.handshake_failures);
                         continue;
@@ -338,7 +346,7 @@ pub const ReceiverEventLoop = struct {
 
             if (n == 0) {
                 // EOF before handshake complete.
-                std.posix.close(pc.fd);
+                platform.closeFd(pc.fd);
                 self.removePendingAt(i);
                 self.counters.increment(self.counter_ids.handshake_failures);
                 continue;
@@ -350,7 +358,7 @@ pub const ReceiverEventLoop = struct {
                 // Handshake complete — validate.
                 const frame = HandshakeFrame.fromBytes(&pc.handshake_buf).*;
                 HandshakeFrame.validate(frame, self.local_node_id, self.group_name_hash) catch {
-                    std.posix.close(pc.fd);
+                    platform.closeFd(pc.fd);
                     self.removePendingAt(i);
                     self.counters.increment(self.counter_ids.handshake_failures);
                     continue;
@@ -359,7 +367,7 @@ pub const ReceiverEventLoop = struct {
                 // Valid — add as peer.
                 const epoch: u32 = @truncate(frame.session_epoch);
                 self.addPeer(frame.source_node_id, pc.fd, pc.address, epoch) catch {
-                    std.posix.close(pc.fd);
+                    platform.closeFd(pc.fd);
                     self.removePendingAt(i);
                     self.counters.increment(self.counter_ids.connection_errors);
                     continue;
@@ -538,6 +546,10 @@ pub const ReceiverEventLoop = struct {
             return;
         }
 
+        if (self.benchmark_latency_tracing_enabled) {
+            latency_trace.stampReceiverIngress(@constCast(payload), @intCast(Clock.monotonicNanosStable()));
+        }
+
         // Route application payload to target service. The TcpFrameHeader is
         // stripped so the service sees the same payload format as local IPC.
         const result = message_router.routeToService(
@@ -592,7 +604,7 @@ pub const ReceiverEventLoop = struct {
         self: *Self,
         node_id: u8,
         socket_fd: std.posix.fd_t,
-        address: std.net.Address,
+        address: net.Address,
         session_epoch: u32,
     ) !void {
         // Handle reconnection — replace existing peer
@@ -675,7 +687,7 @@ test "addPeer and removePeer" {
     var recv_loop = ReceiverEventLoop.init(&registry, &counters, 1, allocator);
     defer recv_loop.deinit();
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
     try recv_loop.addPeer(2, -1, addr, 1);
 
     try testing.expectEqual(@as(u32, 1), recv_loop.peers.count);
@@ -721,7 +733,7 @@ test "processCompleteFrame handles heartbeat" {
     var recv_loop = ReceiverEventLoop.init(&registry, &counters, 1, allocator);
     defer recv_loop.deinit();
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
     try recv_loop.addPeer(2, -1, addr, 1);
 
     var header_buf: [TcpFrameHeader.size]u8 align(@alignOf(TcpFrameHeader)) = [_]u8{0} ** TcpFrameHeader.size;
@@ -761,7 +773,7 @@ test "processCompleteFrame routes data to service" {
     var recv_loop = ReceiverEventLoop.init(&registry, &counters, 1, allocator);
     defer recv_loop.deinit();
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
     try recv_loop.addPeer(2, -1, addr, 1);
 
     var header_buf: [TcpFrameHeader.size]u8 align(@alignOf(TcpFrameHeader)) = [_]u8{0} ** TcpFrameHeader.size;

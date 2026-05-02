@@ -20,6 +20,7 @@ const ServiceConfig = brz_service.ServiceConfig;
 const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 const Clock = brz_common.Clock;
 const platform = brz_common.platform;
+const latency_trace = brz_common.message.latency_trace;
 const Histogram = brz_testing.Histogram;
 
 // ── Mutable file-level state (fine for a single-threaded test binary) ─
@@ -33,13 +34,17 @@ var quiet_mode: bool = false;
 
 // Latency measurement state (set from main before handler registration).
 var latency_histogram: ?*Histogram = null;
+var broker_a_queue_histogram: ?*Histogram = null;
+var transport_histogram: ?*Histogram = null;
+var broker_b_delivery_histogram: ?*Histogram = null;
+var stage_breakdown_measured: u64 = 0;
 
 fn messageHandler(_: i32, payload: []const u8) void {
     received_count += 1;
 
     if (!quiet_mode) {
         var buf: [512]u8 = undefined;
-        var stdout_w = std.fs.File.stdout().writer(&buf);
+        var stdout_w = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &buf);
         const stdout = &stdout_w.interface;
         stdout.print("echo: received msg {d}, len={d}\n", .{ received_count, payload.len }) catch {};
         stdout.flush() catch {};
@@ -47,18 +52,34 @@ fn messageHandler(_: i32, payload: []const u8) void {
 
     // One-way latency measurement: extract timestamp and phase flag.
     if (latency_histogram) |hist| {
-        if (payload.len >= 9 and payload[8] == 1) {
-            const send_ts = std.mem.readInt(u64, payload[0..8], .little);
-            const recv_ts: u64 = @intCast(Clock.monotonicNanos());
-            if (recv_ts > send_ts) {
-                hist.record(recv_ts - send_ts) catch {};
-                measured_count += 1;
+        if (latency_trace.isMeasured(payload)) {
+            if (latency_trace.readSendTimestamp(payload)) |send_ts| {
+                const recv_ts: u64 = @intCast(Clock.monotonicNanosStable());
+                if (recv_ts > send_ts) {
+                    hist.record(recv_ts - send_ts) catch {};
+                    measured_count += 1;
+                }
+
+                if (latency_trace.readStageTrace(payload)) |trace| {
+                    if (broker_a_queue_histogram) |sender_hist| {
+                        sender_hist.record(trace.sender_dequeue_ns - trace.send_ts_ns) catch {};
+                    }
+                    if (transport_histogram) |network_hist| {
+                        network_hist.record(trace.receiver_ingress_ns - trace.sender_dequeue_ns) catch {};
+                    }
+                    if (broker_b_delivery_histogram) |delivery_hist| {
+                        if (recv_ts > trace.receiver_ingress_ns) {
+                            delivery_hist.record(recv_ts - trace.receiver_ingress_ns) catch {};
+                            stage_breakdown_measured += 1;
+                        }
+                    }
+                }
             }
         }
     }
 
     if (reply_delay_ms > 0) {
-        std.Thread.sleep(reply_delay_ms * std.time.ns_per_ms);
+        platform.sleepNanos(reply_delay_ms * std.time.ns_per_ms);
     }
 
     if (max_messages > 0 and received_count >= max_messages) {
@@ -66,7 +87,8 @@ fn messageHandler(_: i32, payload: []const u8) void {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
     const allocator = switch (builtin.mode) {
         .Debug, .ReleaseSafe => debug_alloc.allocator(),
@@ -76,8 +98,7 @@ pub fn main() !void {
         _ = debug_alloc.deinit();
     };
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const storage_path = parseStringArg(args, "--storage-path", "/dev/shm");
     const group = parseStringArg(args, "--group", "default");
@@ -90,10 +111,10 @@ pub fn main() !void {
     const idle_strategy_str = parseStringArg(args, "--idle-strategy", "backoff");
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_w.interface;
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    var stderr_w = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_w.interface;
 
     try stderr.print("echo: starting with storage_path={s}, group={s}, name={s}\n", .{
@@ -110,6 +131,36 @@ pub fn main() !void {
 
     if (result_file != null) {
         latency_histogram = &histogram;
+    }
+    defer latency_histogram = null;
+
+    var broker_a_queue: Histogram = if (result_file != null) blk: {
+        const capacity: usize = if (max_messages > 0) max_messages else 200_000;
+        break :blk Histogram.initCapacity(allocator, capacity) catch Histogram.init(allocator);
+    } else Histogram.init(allocator);
+    defer broker_a_queue.deinit();
+
+    var transport_latency: Histogram = if (result_file != null) blk: {
+        const capacity: usize = if (max_messages > 0) max_messages else 200_000;
+        break :blk Histogram.initCapacity(allocator, capacity) catch Histogram.init(allocator);
+    } else Histogram.init(allocator);
+    defer transport_latency.deinit();
+
+    var broker_b_delivery: Histogram = if (result_file != null) blk: {
+        const capacity: usize = if (max_messages > 0) max_messages else 200_000;
+        break :blk Histogram.initCapacity(allocator, capacity) catch Histogram.init(allocator);
+    } else Histogram.init(allocator);
+    defer broker_b_delivery.deinit();
+
+    if (result_file != null) {
+        broker_a_queue_histogram = &broker_a_queue;
+        transport_histogram = &transport_latency;
+        broker_b_delivery_histogram = &broker_b_delivery;
+    }
+    defer {
+        broker_a_queue_histogram = null;
+        transport_histogram = null;
+        broker_b_delivery_histogram = null;
     }
 
     const idle_strategy: platform.IdleStrategy = if (std.mem.eql(u8, idle_strategy_str, "busy_spin"))
@@ -143,19 +194,34 @@ pub fn main() !void {
 
     // Main loop: sleep 100ms, check shutdown flag.
     while (!shutdown_flag.load(.acquire)) {
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        platform.sleepNanos(100 * std.time.ns_per_ms);
     }
 
     // Stop engine first to ensure consumer thread is done before reading histogram.
     engine.stop();
     latency_histogram = null;
 
-    try stdout.print("echo: total_received={d}, measured={d}\n", .{ received_count, measured_count });
+    try stdout.print("echo: total_received={d}, measured={d}, stage_breakdown={d}\n", .{
+        received_count,
+        measured_count,
+        stage_breakdown_measured,
+    });
     try stdout.flush();
 
     // Write latency results if requested.
     if (result_file) |path| {
-        writeLatencyResults(path, &histogram, received_count, measured_count, service_name) catch |err| {
+        writeLatencyResults(
+            io,
+            path,
+            &histogram,
+            &broker_a_queue,
+            &transport_latency,
+            &broker_b_delivery,
+            received_count,
+            measured_count,
+            stage_breakdown_measured,
+            service_name,
+        ) catch |err| {
             try stderr.print("echo: failed to write result file '{s}': {}\n", .{ path, err });
             try stderr.flush();
         };
@@ -166,41 +232,84 @@ pub fn main() !void {
 }
 
 fn writeLatencyResults(
+    io: std.Io,
     path: []const u8,
     histogram: *Histogram,
+    broker_a_queue: *Histogram,
+    transport_latency: *Histogram,
+    broker_b_delivery: *Histogram,
     total_received: u64,
     total_measured: u64,
+    traced_measured: u64,
     service_name: []const u8,
 ) !void {
     const latency = histogram.summaryPercentiles();
+    const broker_a_queue_summary = broker_a_queue.summaryPercentiles();
+    const transport_summary = transport_latency.summaryPercentiles();
+    const broker_b_delivery_summary = broker_b_delivery.summaryPercentiles();
 
-    const file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
+    const file = if (std.fs.path.isAbsolute(path))
+        try std.Io.Dir.createFileAbsolute(io, path, .{})
+    else
+        try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
 
-    var write_buf: [4096]u8 = undefined;
-    var file_w = file.writer(&write_buf);
+    var write_buf: [8192]u8 = undefined;
+    var file_w = file.writer(io, &write_buf);
     const writer = &file_w.interface;
     try writer.print(
         \\{{
         \\  "service_name": "{s}",
         \\  "total_received": {d},
         \\  "total_measured": {d},
+        \\  "stage_breakdown_measured": {d},
         \\  "latency_p50_ns": {d},
         \\  "latency_p95_ns": {d},
         \\  "latency_p99_ns": {d},
         \\  "latency_p99_9_ns": {d},
-        \\  "latency_max_ns": {d}
+        \\  "latency_max_ns": {d},
+        \\  "broker_a_queue_p50_ns": {d},
+        \\  "broker_a_queue_p95_ns": {d},
+        \\  "broker_a_queue_p99_ns": {d},
+        \\  "broker_a_queue_p99_9_ns": {d},
+        \\  "broker_a_queue_max_ns": {d},
+        \\  "transport_p50_ns": {d},
+        \\  "transport_p95_ns": {d},
+        \\  "transport_p99_ns": {d},
+        \\  "transport_p99_9_ns": {d},
+        \\  "transport_max_ns": {d},
+        \\  "broker_b_delivery_p50_ns": {d},
+        \\  "broker_b_delivery_p95_ns": {d},
+        \\  "broker_b_delivery_p99_ns": {d},
+        \\  "broker_b_delivery_p99_9_ns": {d},
+        \\  "broker_b_delivery_max_ns": {d}
         \\}}
         \\
     , .{
         service_name,
         total_received,
         total_measured,
+        traced_measured,
         latency.p50,
         latency.p95,
         latency.p99,
         latency.p99_9,
         latency.max_val,
+        broker_a_queue_summary.p50,
+        broker_a_queue_summary.p95,
+        broker_a_queue_summary.p99,
+        broker_a_queue_summary.p99_9,
+        broker_a_queue_summary.max_val,
+        transport_summary.p50,
+        transport_summary.p95,
+        transport_summary.p99,
+        transport_summary.p99_9,
+        transport_summary.max_val,
+        broker_b_delivery_summary.p50,
+        broker_b_delivery_summary.p95,
+        broker_b_delivery_summary.p99,
+        broker_b_delivery_summary.p99_9,
+        broker_b_delivery_summary.max_val,
     });
     try writer.flush();
 }
@@ -217,13 +326,13 @@ fn installSignalHandler() void {
     std.posix.sigaction(std.posix.SIG.INT, &handler, null);
 }
 
-fn signalHandler(_: c_int) callconv(.c) void {
+fn signalHandler(_: std.posix.SIG) callconv(.c) void {
     shutdown_flag.store(true, .release);
 }
 
 // ── Argument parsing helpers ──────────────────────────────────────────
 
-fn parseStringArg(args: []const []const u8, flag: []const u8, default: []const u8) []const u8 {
+fn parseStringArg(args: []const [:0]const u8, flag: []const u8, default: []const u8) []const u8 {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {
@@ -233,7 +342,7 @@ fn parseStringArg(args: []const []const u8, flag: []const u8, default: []const u
     return default;
 }
 
-fn parseU64Arg(args: []const []const u8, flag: []const u8, default: u64) u64 {
+fn parseU64Arg(args: []const [:0]const u8, flag: []const u8, default: u64) u64 {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {
@@ -243,14 +352,14 @@ fn parseU64Arg(args: []const []const u8, flag: []const u8, default: u64) u64 {
     return default;
 }
 
-fn parseBoolArg(args: []const []const u8, flag: []const u8) bool {
+fn parseBoolArg(args: []const [:0]const u8, flag: []const u8) bool {
     for (args) |arg| {
         if (std.mem.eql(u8, arg, flag)) return true;
     }
     return false;
 }
 
-fn parseOptionalStringArg(args: []const []const u8, flag: []const u8) ?[]const u8 {
+fn parseOptionalStringArg(args: []const [:0]const u8, flag: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {

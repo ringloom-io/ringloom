@@ -24,14 +24,14 @@ fn messageHandler(_: i32, payload: []const u8) void {
     received_count += 1;
 
     var buf: [512]u8 = undefined;
-    var stdout_w = std.fs.File.stdout().writer(&buf);
+    var stdout_w = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &buf);
     const stdout = &stdout_w.interface;
     stdout.print("slow-consumer: received msg {d}, len={d}\n", .{ received_count, payload.len }) catch {};
     stdout.flush() catch {};
 
     // Artificial delay — the whole point of this service.
     if (delay_per_message_ms > 0) {
-        std.Thread.sleep(delay_per_message_ms * std.time.ns_per_ms);
+        brz_common.platform.sleepNanos(delay_per_message_ms * std.time.ns_per_ms);
     }
 
     if (max_messages > 0 and received_count >= max_messages) {
@@ -41,7 +41,7 @@ fn messageHandler(_: i32, payload: []const u8) void {
 
 // ── Argument parsing helpers ─────────────────────────────────────────
 
-fn parseStringArg(args: []const []const u8, flag: []const u8, default: []const u8) []const u8 {
+fn parseStringArg(args: []const [:0]const u8, flag: []const u8, default: []const u8) []const u8 {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {
@@ -51,7 +51,7 @@ fn parseStringArg(args: []const []const u8, flag: []const u8, default: []const u
     return default;
 }
 
-fn parseU64Arg(args: []const []const u8, flag: []const u8, default: u64) u64 {
+fn parseU64Arg(args: []const [:0]const u8, flag: []const u8, default: u64) u64 {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {
@@ -73,13 +73,14 @@ fn installSignalHandler() void {
     std.posix.sigaction(std.posix.SIG.INT, &handler, null);
 }
 
-fn signalHandler(_: c_int) callconv(.c) void {
+fn signalHandler(_: std.posix.SIG) callconv(.c) void {
     shutdown_requested.store(true, .release);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
     const allocator = switch (builtin.mode) {
         .Debug, .ReleaseSafe => debug_alloc.allocator(),
@@ -89,8 +90,7 @@ pub fn main() !void {
         _ = debug_alloc.deinit();
     };
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const storage_path = parseStringArg(args, "--storage-path", "/dev/shm");
     const group = parseStringArg(args, "--group", "default");
@@ -100,10 +100,10 @@ pub fn main() !void {
     max_messages = parseU64Arg(args, "--max-messages", 0);
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_w.interface;
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    var stderr_w = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_w.interface;
 
     try stdout.print("slow-consumer: starting with delay_per_message_ms={d}, max_messages={d}\n", .{
@@ -140,7 +140,7 @@ pub fn main() !void {
     // ── Main loop — sleep and check for shutdown ─────────────────────
 
     while (!shutdown_requested.load(.acquire)) {
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        brz_common.platform.sleepNanos(100 * std.time.ns_per_ms);
     }
 
     // ── Shutdown ─────────────────────────────────────────────────────

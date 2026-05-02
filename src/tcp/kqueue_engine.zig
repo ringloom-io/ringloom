@@ -6,6 +6,7 @@
 const std = @import("std");
 const posix = std.posix;
 const io_engine = @import("io_engine.zig");
+const net = @import("net_compat.zig");
 const socket_config_mod = @import("socket_config.zig");
 
 const ConnectionHandle = io_engine.ConnectionHandle;
@@ -63,7 +64,7 @@ pub const KqueueEngine = struct {
         _ = posix.kevent(self.kq_fd, &changelist, &.{}, null) catch {};
     }
 
-    pub fn submit_connect(self: *KqueueEngine, handle: ConnectionHandle, _: std.net.Address) void {
+    pub fn submit_connect(self: *KqueueEngine, handle: ConnectionHandle, _: net.Address) void {
         const idx = handle.toIndex();
         if (idx >= self.pending_ops.len) return;
         self.pending_ops[idx].connect_pending = true;

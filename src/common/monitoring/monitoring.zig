@@ -86,7 +86,7 @@ pub const MonitoringSnapshot = struct {
     }
 
     /// Format the snapshot as human-readable text to a writer.
-    pub fn dump(self: *const MonitoringSnapshot, writer: anytype) !void {
+    pub fn dump(self: *const MonitoringSnapshot, writer: *std.Io.Writer) !void {
         try writer.print("=== BRZ Broker Node {d} — Monitoring Snapshot ===\n", .{self.node_id});
         try writer.print("Timestamp: {d} ms\n\n", .{self.timestamp_ms});
 
@@ -185,11 +185,11 @@ test "snapshot dump produces non-empty output" {
 
     // When
     var output_buf: [8192]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&output_buf);
-    try snapshot.dump(fbs.writer());
+    var writer: std.Io.Writer = .fixed(&output_buf);
+    try snapshot.dump(&writer);
 
     // Then
-    const output = fbs.getWritten();
+    const output = writer.buffered();
     try std.testing.expect(output.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, output, "bytes-sent") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Node 1") != null);

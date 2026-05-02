@@ -30,11 +30,11 @@
 //! ```
 
 const std = @import("std");
-const fs = std.fs;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 
 const harness = @import("harness.zig");
+const io_compat = @import("io_compat.zig");
 const BrokerSpec = harness.BrokerSpec;
 const ServiceSpec = harness.ServiceSpec;
 const PeerSpec = harness.PeerSpec;
@@ -67,9 +67,7 @@ pub const ConfigGen = struct {
         const content = try self.formatBrokerProperties(spec, storage_path);
         defer self.allocator.free(content);
 
-        const file = try fs.cwd().createFile(file_name, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(content);
+        try io_compat.writeFile(file_name, content);
 
         return file_name;
     }
@@ -93,9 +91,7 @@ pub const ConfigGen = struct {
         const content = try self.formatServiceProperties(spec, storage_path);
         defer self.allocator.free(content);
 
-        const file = try fs.cwd().createFile(file_name, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(content);
+        try io_compat.writeFile(file_name, content);
 
         return file_name;
     }
@@ -114,32 +110,35 @@ pub const ConfigGen = struct {
         // Start with the required properties.
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
+        var writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &buf);
+        defer buf = writer.toArrayList();
 
-        const writer = buf.writer(self.allocator);
-
-        try writer.print("# Auto-generated broker config for node {d}\n", .{spec.node_id});
-        try writer.print("broker.node.id={d}\n", .{spec.node_id});
-        try writer.print("broker.local.host.port={s}:{d}\n", .{ spec.host, spec.port });
+        try writer.writer.print("# Auto-generated broker config for node {d}\n", .{spec.node_id});
+        try writer.writer.print("broker.node.id={d}\n", .{spec.node_id});
+        try writer.writer.print("broker.local.host.port={s}:{d}\n", .{ spec.host, spec.port });
 
         if (peers_str.len > 0) {
-            try writer.print("broker.member.host.ports={s}\n", .{peers_str});
+            try writer.writer.print("broker.member.host.ports={s}\n", .{peers_str});
         }
 
-        try writer.print("broker.group.name={s}\n", .{spec.group_name});
-        try writer.print("broker.storage.path={s}\n", .{storage_path});
-        try writer.print("broker.control.buffer.size={d}\n", .{spec.control_buffer_size});
-        try writer.print("broker.messages.buffer.size={d}\n", .{spec.messages_buffer_size});
-        try writer.print("broker.threading.mode={s}\n", .{spec.threading_mode});
-        try writer.print("broker.idle.strategy={s}\n", .{spec.idle_strategy});
+        try writer.writer.print("broker.group.name={s}\n", .{spec.group_name});
+        try writer.writer.print("broker.storage.path={s}\n", .{storage_path});
+        try writer.writer.print("broker.control.buffer.size={d}\n", .{spec.control_buffer_size});
+        try writer.writer.print("broker.messages.buffer.size={d}\n", .{spec.messages_buffer_size});
+        try writer.writer.print("broker.threading.mode={s}\n", .{spec.threading_mode});
+        try writer.writer.print("broker.idle.strategy={s}\n", .{spec.idle_strategy});
 
         if (spec.sender_cpu_affinity) |core| {
-            try writer.print("broker.sender.cpu.affinity={d}\n", .{core});
+            try writer.writer.print("broker.sender.cpu.affinity={d}\n", .{core});
         }
         if (spec.receiver_cpu_affinity) |core| {
-            try writer.print("broker.receiver.cpu.affinity={d}\n", .{core});
+            try writer.writer.print("broker.receiver.cpu.affinity={d}\n", .{core});
+        }
+        if (spec.benchmark_latency_tracing_enabled) {
+            try writer.writer.writeAll("broker.benchmark.latency.tracing.enabled=true\n");
         }
 
-        return self.allocator.dupe(u8, buf.items);
+        return self.allocator.dupe(u8, writer.written());
     }
 
     fn formatServiceProperties(
@@ -149,19 +148,19 @@ pub const ConfigGen = struct {
     ) ![]const u8 {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
+        var writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &buf);
+        defer buf = writer.toArrayList();
 
-        const writer = buf.writer(self.allocator);
-
-        try writer.print("# Auto-generated service config for {s}\n", .{spec.service_name});
-        try writer.print("brz.service.name={s}\n", .{spec.service_name});
-        try writer.print("brz.group.name={s}\n", .{spec.group_name});
-        try writer.print("brz.storage.path={s}\n", .{storage_path});
-        try writer.print("brz.broker.node.id={d}\n", .{spec.broker_node_id});
+        try writer.writer.print("# Auto-generated service config for {s}\n", .{spec.service_name});
+        try writer.writer.print("brz.service.name={s}\n", .{spec.service_name});
+        try writer.writer.print("brz.group.name={s}\n", .{spec.group_name});
+        try writer.writer.print("brz.storage.path={s}\n", .{storage_path});
+        try writer.writer.print("brz.broker.node.id={d}\n", .{spec.broker_node_id});
 
         const le_str = if (spec.leader_election_enabled) "true" else "false";
-        try writer.print("brz.service.leader_election.enabled={s}\n", .{le_str});
+        try writer.writer.print("brz.service.leader_election.enabled={s}\n", .{le_str});
 
-        return self.allocator.dupe(u8, buf.items);
+        return self.allocator.dupe(u8, writer.written());
     }
 
     fn formatPeerEndpoints(self: *const ConfigGen, peers: []const PeerSpec) ![]const u8 {
@@ -171,26 +170,24 @@ pub const ConfigGen = struct {
 
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
-
-        const writer = buf.writer(self.allocator);
+        var writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &buf);
+        defer buf = writer.toArrayList();
 
         for (peers, 0..) |peer, i| {
             if (i > 0) {
-                try writer.writeByte(',');
+                try writer.writer.writeByte(',');
             }
-            try writer.print("{d}@{s}:{d}", .{ peer.node_id, peer.host, peer.port });
+            try writer.writer.print("{d}@{s}:{d}", .{ peer.node_id, peer.host, peer.port });
         }
 
-        return self.allocator.dupe(u8, buf.items);
+        return self.allocator.dupe(u8, writer.written());
     }
 };
 
 // ── Test helpers ─────────────────────────────────────────────────────
 
 fn readFileContent(allocator: Allocator, path: []const u8) ![]const u8 {
-    const file = try fs.cwd().openFile(path, .{});
-    defer file.close();
-    return file.readToEndAlloc(allocator, 1024 * 1024);
+    return io_compat.readFileAlloc(allocator, path, 1024 * 1024);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -200,8 +197,8 @@ test "writeBrokerConfig generates valid properties file" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-broker";
-    try fs.cwd().makePath(tmp_dir);
-    defer fs.cwd().deleteTree(tmp_dir) catch {};
+    try io_compat.createDirPath(tmp_dir);
+    defer io_compat.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = BrokerSpec{};
@@ -229,8 +226,8 @@ test "writeBrokerConfig file is named broker_<node_id>.properties" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-name";
-    try fs.cwd().makePath(tmp_dir);
-    defer fs.cwd().deleteTree(tmp_dir) catch {};
+    try io_compat.createDirPath(tmp_dir);
+    defer io_compat.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = BrokerSpec{ .node_id = 7 };
@@ -248,8 +245,8 @@ test "writeBrokerConfig includes peer endpoints" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-peers";
-    try fs.cwd().makePath(tmp_dir);
-    defer fs.cwd().deleteTree(tmp_dir) catch {};
+    try io_compat.createDirPath(tmp_dir);
+    defer io_compat.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const peers = [_]PeerSpec{
@@ -277,8 +274,8 @@ test "writeBrokerConfig omits peer line when no peers" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-nopeers";
-    try fs.cwd().makePath(tmp_dir);
-    defer fs.cwd().deleteTree(tmp_dir) catch {};
+    try io_compat.createDirPath(tmp_dir);
+    defer io_compat.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = BrokerSpec{ .peers = &.{} };
@@ -299,8 +296,8 @@ test "writeBrokerConfig respects custom spec values" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-custom";
-    try fs.cwd().makePath(tmp_dir);
-    defer fs.cwd().deleteTree(tmp_dir) catch {};
+    try io_compat.createDirPath(tmp_dir);
+    defer io_compat.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = BrokerSpec{
@@ -337,8 +334,8 @@ test "writeServiceConfig generates valid properties file" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-svc";
-    try fs.cwd().makePath(tmp_dir);
-    defer fs.cwd().deleteTree(tmp_dir) catch {};
+    try io_compat.createDirPath(tmp_dir);
+    defer io_compat.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = ServiceSpec{
@@ -366,8 +363,8 @@ test "writeServiceConfig file is named service_<name>.properties" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-svcname";
-    try fs.cwd().makePath(tmp_dir);
-    defer fs.cwd().deleteTree(tmp_dir) catch {};
+    try io_compat.createDirPath(tmp_dir);
+    defer io_compat.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = ServiceSpec{
@@ -388,8 +385,8 @@ test "writeServiceConfig with leader election enabled" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-svcle";
-    try fs.cwd().makePath(tmp_dir);
-    defer fs.cwd().deleteTree(tmp_dir) catch {};
+    try io_compat.createDirPath(tmp_dir);
+    defer io_compat.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = ServiceSpec{
@@ -414,8 +411,8 @@ test "writeServiceConfig with custom broker node and group" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-svccustom";
-    try fs.cwd().makePath(tmp_dir);
-    defer fs.cwd().deleteTree(tmp_dir) catch {};
+    try io_compat.createDirPath(tmp_dir);
+    defer io_compat.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = ServiceSpec{

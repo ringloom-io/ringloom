@@ -20,7 +20,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const fs = std.fs;
+const io_compat = @import("io_compat.zig");
 
 /// Returns the current process ID portably.
 fn getCurrentPid() i64 {
@@ -80,17 +80,15 @@ pub const TempEnv = struct {
 
         // Create the full directory tree.  `makePath` creates intermediate
         // directories, so we can jump straight to the deepest leaves.
-        const cwd = fs.cwd();
-
         // Create the default group services directory under storage.
         const default_services = try std.fmt.allocPrint(allocator, "{s}/brz-test/services", .{storage_path});
         defer allocator.free(default_services);
 
-        try cwd.makePath(default_services);
-        try cwd.makePath(logs_path);
-        try cwd.makePath(config_path);
-        try cwd.makePath(results_path);
-        try cwd.makePath(artifacts_path);
+        try io_compat.createDirPath(default_services);
+        try io_compat.createDirPath(logs_path);
+        try io_compat.createDirPath(config_path);
+        try io_compat.createDirPath(results_path);
+        try io_compat.createDirPath(artifacts_path);
 
         return TempEnv{
             .allocator = allocator,
@@ -110,7 +108,7 @@ pub const TempEnv = struct {
     /// (useful when a test fails and the operator wants to inspect logs).
     pub fn deinit(self: *TempEnv) void {
         if (!self.preserved) {
-            fs.cwd().deleteTree(self.base_path) catch |err| {
+            io_compat.deleteTree(self.base_path) catch |err| {
                 std.log.warn("TempEnv: failed to delete {s}: {}", .{ self.base_path, err });
             };
         }
@@ -139,7 +137,7 @@ pub const TempEnv = struct {
         const services_path = try std.fmt.allocPrint(self.allocator, "{s}/services", .{group_path});
         defer self.allocator.free(services_path);
 
-        try fs.cwd().makePath(services_path);
+        try io_compat.createDirPath(services_path);
 
         return group_path;
     }
@@ -168,26 +166,25 @@ test "init creates expected directory structure" {
     defer env.deinit();
 
     // Then — every subdirectory must exist.
-    const cwd = fs.cwd();
-    var storage_dir = try cwd.openDir(env.storage_path, .{});
-    storage_dir.close();
+    var storage_dir = try io_compat.openDir(env.storage_path, .{});
+    storage_dir.close(io_compat.io());
 
-    var logs_dir = try cwd.openDir(env.logs_path, .{});
-    logs_dir.close();
+    var logs_dir = try io_compat.openDir(env.logs_path, .{});
+    logs_dir.close(io_compat.io());
 
-    var config_dir = try cwd.openDir(env.config_path, .{});
-    config_dir.close();
+    var config_dir = try io_compat.openDir(env.config_path, .{});
+    config_dir.close(io_compat.io());
 
-    var results_dir = try cwd.openDir(env.results_path, .{});
-    results_dir.close();
+    var results_dir = try io_compat.openDir(env.results_path, .{});
+    results_dir.close(io_compat.io());
 
-    var artifacts_dir = try cwd.openDir(env.artifacts_path, .{});
-    artifacts_dir.close();
+    var artifacts_dir = try io_compat.openDir(env.artifacts_path, .{});
+    artifacts_dir.close(io_compat.io());
 
     // The default group services directory must also exist.
     const services = try std.fmt.allocPrint(allocator, "{s}/brz-test/services", .{env.storage_path});
-    var services_dir = try cwd.openDir(services, .{});
-    services_dir.close();
+    var services_dir = try io_compat.openDir(services, .{});
+    services_dir.close(io_compat.io());
 }
 
 test "preserve prevents deletion on deinit" {
@@ -204,12 +201,11 @@ test "preserve prevents deletion on deinit" {
     env.deinit();
 
     // Then — directory should still exist on disk.
-    const cwd = fs.cwd();
-    var dir = try cwd.openDir(base_copy, .{});
-    dir.close();
+    var dir = try io_compat.openDir(base_copy, .{});
+    dir.close(io_compat.io());
 
     // Cleanup: remove the preserved directory manually.
-    try cwd.deleteTree(base_copy);
+    try io_compat.deleteTree(base_copy);
 }
 
 test "groupStoragePath creates group directory on demand" {
@@ -226,8 +222,8 @@ test "groupStoragePath creates group directory on demand" {
 
     // Then
     const services_path = try std.fmt.allocPrint(allocator, "{s}/services", .{path});
-    var dir = try fs.cwd().openDir(services_path, .{});
-    dir.close();
+    var dir = try io_compat.openDir(services_path, .{});
+    dir.close(io_compat.io());
 }
 
 test "deinit removes directory tree" {
@@ -243,7 +239,7 @@ test "deinit removes directory tree" {
     env.deinit();
 
     // Then — the base directory should no longer exist.
-    const result = fs.cwd().openDir(base_copy, .{});
+    const result = io_compat.openDir(base_copy, .{});
     try std.testing.expectError(error.FileNotFound, result);
 }
 

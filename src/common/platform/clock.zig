@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const thread = @import("thread.zig");
 
 /// True when we can use RDTSC: x86_64, Linux, non-Debug build.
 const use_rdtsc = builtin.cpu.arch == .x86_64 and
@@ -33,6 +34,22 @@ pub const Clock = struct {
         }
     }
 
+    /// Returns a cross-thread stable monotonic timestamp in nanoseconds.
+    ///
+    /// Unlike `monotonicNanos()`, this always uses the OS monotonic clock on
+    /// Linux instead of the RDTSC fast path. It is intended for benchmark
+    /// timestamps that are compared across different threads/cores, where TSC
+    /// skew or migration noise can distort very small deltas.
+    ///
+    /// Performance: ~25 ns on Linux via vDSO-backed `clock_gettime`.
+    pub fn monotonicNanosStable() i64 {
+        if (comptime builtin.os.tag == .linux) {
+            return monotonicNanosLinux();
+        } else {
+            return monotonicNanosStd();
+        }
+    }
+
     // ── RDTSC fast path (x86_64 Linux release only) ──────────────────
 
     /// One-time calibration state, shared across threads via atomics.
@@ -48,8 +65,7 @@ pub const Clock = struct {
             \\orq %%rdx, %%rax
             : [ret] "={rax}" (-> u64),
             :
-            : .{ .rdx = true }
-        );
+            : .{ .rdx = true });
     }
 
     /// Convert a TSC reading to nanoseconds since boot.
@@ -117,7 +133,8 @@ pub const Clock = struct {
 
     /// Portable fallback using std.time.
     fn monotonicNanosStd() i64 {
-        return @intCast(std.time.nanoTimestamp());
+        const io = std.Io.Threaded.global_single_threaded.io();
+        return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
     }
 
     /// Returns the current wall-clock time as milliseconds since the Unix epoch.
@@ -151,7 +168,8 @@ pub const Clock = struct {
 
     /// Portable fallback using std.time.
     fn epochMillisStd() i64 {
-        return @intCast(@divTrunc(std.time.milliTimestamp(), 1));
+        const io = std.Io.Threaded.global_single_threaded.io();
+        return @intCast(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
     }
 };
 
@@ -173,6 +191,23 @@ test "monotonicNanos returns positive values" {
     try std.testing.expect(t > 0);
 }
 
+test "monotonicNanosStable is monotonically increasing" {
+    const t1 = Clock.monotonicNanosStable();
+    var i: u32 = 0;
+    while (i < 1000) : (i += 1) {
+        std.atomic.spinLoopHint();
+    }
+    const t2 = Clock.monotonicNanosStable();
+    try std.testing.expect(t2 > t1);
+}
+
+test "monotonicNanosStable agrees with monotonicNanos within 5ms" {
+    const stable = Clock.monotonicNanosStable();
+    const fast = Clock.monotonicNanos();
+    const diff = @abs(stable - fast);
+    try std.testing.expect(diff < 5_000_000);
+}
+
 test "epochMillis returns reasonable value" {
     const ms = Clock.epochMillis();
     // Should be after 2024-01-01T00:00:00Z (1704067200000 ms since epoch).
@@ -183,7 +218,7 @@ test "epochMillis returns reasonable value" {
 
 test "epochMillis advances over time" {
     const t1 = Clock.epochMillis();
-    std.Thread.sleep(2 * std.time.ns_per_ms);
+    thread.sleepNanos(2 * std.time.ns_per_ms);
     const t2 = Clock.epochMillis();
     try std.testing.expect(t2 >= t1);
 }

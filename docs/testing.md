@@ -172,15 +172,20 @@ and keeps the best result. This is the recommended approach for getting clean
 numbers, since you can close CPU-intensive applications (IDEs, agents, browsers)
 and run each size in isolation.
 
+By default, the single-size script now measures **transit latency**: the ping
+service paces sends (`--send-interval-ns`, default 10,000 ns) to avoid building
+an artificial steady-state queue. Use `--latency-mode saturated` to reproduce
+the older **queueing latency** behavior where the sender runs flat out.
+
 ```bash
 # Build ReleaseFast binaries first
 zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=ReleaseFast
 
-# Best-of-10 for 128 B cross-broker
+# Best-of-10 for 128 B unloaded cross-broker latency
 ./scripts/bench-single-size.sh 128 10
 
-# Best-of-5 for 512 B cross-broker
-./scripts/bench-single-size.sh 512 5
+# Best-of-5 for 512 B saturated queueing latency
+./scripts/bench-single-size.sh 512 5 --latency-mode saturated
 
 # Best-of-5 for 32 B local IPC
 ./scripts/bench-single-size.sh 32 5 --local
@@ -190,7 +195,9 @@ zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=Relea
 ```
 
 Best results are saved to `/tmp/brz-bench-best/` by default. The script prints
-a summary with throughput and latency percentiles after all runs complete.
+a summary with throughput, end-to-end latency percentiles, and—when the payload
+is large enough for tracing (32 B+)—a stage breakdown for broker A queueing,
+transport, and broker B local delivery.
 
 **Tip:** For the most reliable results, run each size independently with all
 other CPU-intensive processes stopped. Benchmark variance on a busy system can
@@ -203,11 +210,20 @@ The script tests message sizes: 32, 128, 512, 1024, and 4096 bytes.
 - **End-to-end latency** (echo JSON): One-way latency from ping to echo,
   measured using monotonic timestamps embedded in the message payload.
   This is the primary latency metric.
+- **Transit latency**: The paced single-size benchmark mode. This is the best
+  approximation of unloaded broker-to-broker transit time.
+- **Queueing latency**: The saturated benchmark mode. The sender intentionally
+  outruns the end-to-end path, so the measured value includes backlog depth
+  through broker A, TCP, broker B, and broker B → service handoff.
 - **Send latency** (ping JSON): Time to write a message into the local
   broker's ring buffer. Lower bound on end-to-end latency.
 - **Spinning backpressure**: With `--spin-timeout-ms`, the sender retries
   on `BufferFull` instead of counting a failure. The timestamp is
   re-embedded on each retry so latency excludes spin-wait time.
+- **Stage breakdown** (echo JSON, 32 B+ payloads): Additional p50/p95/p99
+  counters for broker A queueing, transport, and broker B delivery. Use these
+  to tell whether a latency spike came from queue buildup before TCP, the
+  cross-broker hop itself, or delivery after ingress.
 
 ### Benchmark categories (30 tests in 6 files)
 

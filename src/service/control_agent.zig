@@ -235,7 +235,7 @@ pub fn waitForRegistrationResponse(
             return error.RegistrationTimeout;
         }
 
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        platform.sleepNanos(1 * std.time.ns_per_ms);
     }
 
     const resp = response.?;

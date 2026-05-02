@@ -1,4 +1,5 @@
 const std = @import("std");
+const net = @import("../net_compat.zig");
 
 /// Commands sent from the control loop to the sender event loop via the command queue.
 pub const SenderCommand = union(enum) {
@@ -6,7 +7,7 @@ pub const SenderCommand = union(enum) {
     /// and sends a SETUP frame.
     add_peer: struct {
         node_id: u8,
-        address: std.net.Address,
+        address: net.Address,
     },
 
     /// Remove a peer. The sender closes the socket, drains the write queue,
@@ -25,7 +26,7 @@ pub const SenderCommand = union(enum) {
 // ── Tests ─────────────────────────────────────────────────────────────
 
 test "SenderCommand can represent add_peer" {
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 8080);
+    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 8080);
 
     const cmd = SenderCommand{ .add_peer = .{
         .node_id = 42,

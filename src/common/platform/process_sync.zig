@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const thread = @import("thread.zig");
 
 pub const WaitResult = enum {
     /// Woken by a wake() call.
@@ -244,9 +245,9 @@ test "ProcessSynchronizer wait times out" {
 
     var word: i32 = 1;
     // Wait with expected=1 — value matches, so it will sleep until timeout.
-    const start = std.time.milliTimestamp();
+    const start = @divTrunc(std.Io.Clock.real.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds, std.time.ns_per_ms);
     const result = sync.wait(&word, 1, 10_000_000); // 10ms timeout
-    const elapsed = std.time.milliTimestamp() - start;
+    const elapsed = @divTrunc(std.Io.Clock.real.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds, std.time.ns_per_ms) - start;
 
     try std.testing.expect(result == .timed_out);
     try std.testing.expect(elapsed >= 5); // Allow some slack.
@@ -267,7 +268,7 @@ test "ProcessSynchronizer wake unblocks wait" {
     }.run, .{ sync, &word, &was_woken });
 
     // Give the waiter time to enter the wait.
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    thread.sleepNanos(5 * std.time.ns_per_ms);
 
     // Change the value and wake.
     @atomicStore(i32, &word, 0, .release);

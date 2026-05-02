@@ -94,6 +94,7 @@ pub fn TcpTransportImpl(comptime Engine: type) type {
 // ── Tests ─────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+const net = @import("net_compat.zig");
 
 /// A minimal mock I/O engine for unit tests.
 const MockEngine = struct {
@@ -109,7 +110,7 @@ const MockEngine = struct {
     }
 
     pub fn submit_accept(_: *MockEngine, _: ConnectionHandle) void {}
-    pub fn submit_connect(_: *MockEngine, _: ConnectionHandle, _: std.net.Address) void {}
+    pub fn submit_connect(_: *MockEngine, _: ConnectionHandle, _: net.Address) void {}
     pub fn submit_recv(_: *MockEngine, _: ConnectionHandle, _: []u8) void {}
     pub fn submit_send(_: *MockEngine, _: ConnectionHandle, _: []const u8) void {}
     pub fn submit_close(_: *MockEngine, _: ConnectionHandle) void {}

@@ -1,4 +1,5 @@
 const std = @import("std");
+const net = @import("../net_compat.zig");
 
 const brz_common = @import("brz_common");
 const config_mod = @import("brz_common").config.broker_config;
@@ -171,7 +172,7 @@ pub const BrokerApplication = struct {
         while (!self.shutdown_requested.load(.acquire) and
             !g_shutdown_signal.load(.acquire))
         {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(50), .awake) catch unreachable;
         }
 
         return @intFromEnum(ExitCode.success);
@@ -205,6 +206,7 @@ pub const BrokerApplication = struct {
             self.config.node_id,
             self.allocator,
             self.config.group_name,
+            self.config.benchmark_latency_tracing_enabled,
         );
         errdefer {
             self.sender_loop.?.deinit();
@@ -218,11 +220,12 @@ pub const BrokerApplication = struct {
             self.allocator,
             self.config.group_name,
             &self.admin_cmd_queue.?,
+            self.config.benchmark_latency_tracing_enabled,
         );
 
         // Wire up TCP: add peer endpoints to the sender, init listener on receiver.
         for (self.config.peer_endpoints) |ep| {
-            const addr = std.net.Address.parseIp4(ep.host, ep.port) catch continue;
+            const addr = net.Address.parseIp4(ep.host, ep.port) catch continue;
             self.sender_loop.?.addPeer(ep.node_id, addr) catch continue;
         }
         if (self.config.peer_endpoints.len > 0) {
@@ -353,7 +356,7 @@ pub const BrokerApplication = struct {
     fn logStartup(self: *const Self) void {
         // stdout marker — the e2e test harness polls stdout for "broker started".
         var buf: [4096]u8 = undefined;
-        var stdout_w = std.fs.File.stdout().writer(&buf);
+        var stdout_w = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &buf);
         const stdout = &stdout_w.interface;
         stdout.print("broker started: node_id={}, bind={s}:{}, group={s}\n", .{
             self.config.node_id,
@@ -400,7 +403,7 @@ pub const BrokerApplication = struct {
     }
 };
 
-fn sigterm_handler(_: c_int) callconv(.c) void {
+fn sigterm_handler(_: std.posix.SIG) callconv(.c) void {
     g_shutdown_signal.store(true, .release);
 }
 

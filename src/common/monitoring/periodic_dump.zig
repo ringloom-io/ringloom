@@ -21,7 +21,7 @@ pub const PeriodicMonitoringDump = struct {
         counters: *const SystemCounters,
         error_log: *const ErrorLog,
     ) PeriodicMonitoringDump {
-        const enabled = std.posix.getenv("BRZ_MONITORING_DUMP") != null;
+        const enabled = std.c.getenv("BRZ_MONITORING_DUMP") != null;
         return .{
             .enabled = enabled,
             .interval_ns = default_interval_ns,
@@ -43,7 +43,8 @@ pub const PeriodicMonitoringDump = struct {
 
         const snapshot = MonitoringSnapshot.take(self.node_id, self.counters, self.error_log);
         var dump_buf: [4096]u8 = undefined;
-        var stderr_w = std.fs.File.stderr().writer(&dump_buf);
+        const io = std.Io.Threaded.global_single_threaded.io();
+        var stderr_w = std.Io.File.stderr().writer(io, &dump_buf);
         snapshot.dump(&stderr_w.interface) catch {};
         stderr_w.interface.flush() catch {};
 

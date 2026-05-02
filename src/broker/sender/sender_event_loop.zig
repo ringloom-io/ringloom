@@ -12,15 +12,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const brz_common = @import("brz_common");
+const net = @import("../net_compat.zig");
 const constants = brz_common.platform.constants;
 const Clock = brz_common.platform.clock.Clock;
 const AtomicBool = brz_common.platform.atomic.AtomicBool;
+const platform = brz_common.platform;
 
 const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 const CountersManager = brz_common.concurrent.counters.CountersManager;
 
 const frame_parser = brz_common.protocol.frame_parser;
 const TcpFrameHeader = frame_parser.TcpFrameHeader;
+const latency_trace = brz_common.message.latency_trace;
 
 const tcp = @import("brz_tcp");
 const HandshakeFrame = tcp.HandshakeFrame;
@@ -162,6 +165,9 @@ pub const SenderEventLoop = struct {
     /// FNV-1a hash of the cluster group name (for handshake validation).
     group_name_hash: u32,
 
+    /// Enable benchmark-only payload timestamp tracing. Disabled in production.
+    benchmark_latency_tracing_enabled: bool,
+
     /// Pre-allocated iovec array for writev batching (sync fallback path).
     writev_iovecs: [max_writev_batch]posix.iovec_const = undefined,
 
@@ -182,7 +188,7 @@ pub const SenderEventLoop = struct {
         local_node_id: u8,
         allocator: std.mem.Allocator,
     ) !Self {
-        return Self.initWithGroup(send_ring_buffer, counters, local_node_id, allocator, "brz");
+        return Self.initWithGroup(send_ring_buffer, counters, local_node_id, allocator, "brz", false);
     }
 
     pub fn initWithGroup(
@@ -191,6 +197,7 @@ pub const SenderEventLoop = struct {
         local_node_id: u8,
         allocator: std.mem.Allocator,
         group_name: []const u8,
+        benchmark_latency_tracing_enabled: bool,
     ) !Self {
         // io_uring sender is available for multi-peer scenarios where
         // batching many writevs into one io_uring_enter() reduces syscalls.
@@ -209,6 +216,7 @@ pub const SenderEventLoop = struct {
             .allocator = allocator,
             .pending_send_count = 0,
             .group_name_hash = HandshakeFrame.hashGroupName(group_name),
+            .benchmark_latency_tracing_enabled = benchmark_latency_tracing_enabled,
             .io_ring = io_ring,
         };
     }
@@ -329,6 +337,13 @@ pub const SenderEventLoop = struct {
             return;
         }
 
+        if (self.benchmark_latency_tracing_enabled) {
+            latency_trace.stampSenderDequeue(
+                @constCast(payload[constants.tcp_header_length..]),
+                @intCast(Clock.monotonicNanosStable()),
+            );
+        }
+
         // Enqueue into peer's write queue (drop-oldest on overflow)
         peer.write_queue.enqueue(payload) catch {
             _ = peer.write_queue.dropOldest();
@@ -376,7 +391,7 @@ pub const SenderEventLoop = struct {
             } else {
                 // Sync path: direct write.
                 const heartbeat_bytes = std.mem.asBytes(&heartbeat);
-                const written = posix.write(peer.socket_fd, heartbeat_bytes) catch |err| {
+                const written = net.write(peer.socket_fd, heartbeat_bytes) catch |err| {
                     switch (err) {
                         error.WouldBlock => continue,
                         else => {
@@ -571,7 +586,7 @@ pub const SenderEventLoop = struct {
                 var total_bytes: usize = 0;
                 for (iovs) |iov| total_bytes += iov.len;
 
-                const written = posix.writev(peer.socket_fd, iovs) catch |err| {
+                const written = net.writev(peer.socket_fd, iovs) catch |err| {
                     switch (err) {
                         error.WouldBlock => {
                             peer.write_blocked = true;
@@ -647,7 +662,7 @@ pub const SenderEventLoop = struct {
     fn initiateConnect(self: *Self, peer: *PeerSender, now_ns: i64) void {
         self.counters.increment(self.counter_ids.reconnect_attempts);
 
-        const fd = std.posix.socket(
+        const fd = net.socket(
             peer.address.any.family,
             std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
             0,
@@ -659,13 +674,13 @@ pub const SenderEventLoop = struct {
         // Apply socket tuning (TCP_NODELAY, buffer sizes, etc.)
         const sock_cfg = SocketConfig{};
         sock_cfg.apply(fd) catch {
-            std.posix.close(fd);
+            platform.closeFd(fd);
             peer.advanceBackoff(now_ns);
             return;
         };
 
         // Non-blocking connect — expect EINPROGRESS.
-        std.posix.connect(fd, &peer.address.any, peer.address.getOsSockLen()) catch |err| {
+        net.connect(fd, &peer.address.any, peer.address.getOsSockLen()) catch |err| {
             switch (err) {
                 error.WouldBlock => {
                     // EINPROGRESS — connect in progress, will complete async.
@@ -674,7 +689,7 @@ pub const SenderEventLoop = struct {
                     return;
                 },
                 else => {
-                    std.posix.close(fd);
+                    platform.closeFd(fd);
                     peer.advanceBackoff(now_ns);
                     return;
                 },
@@ -688,18 +703,11 @@ pub const SenderEventLoop = struct {
 
     fn checkConnectCompletion(self: *Self, peer: *PeerSender) void {
         // Poll for connect completion using SO_ERROR.
-        var err_val: [4]u8 = undefined;
-        std.posix.getsockopt(
-            peer.socket_fd,
-            std.posix.SOL.SOCKET,
-            std.posix.SO.ERROR,
-            &err_val,
-        ) catch {
+        const so_error = net.getSocketError(peer.socket_fd) catch {
             self.disconnectPeer(peer);
             return;
         };
-        const so_error = std.mem.bytesAsValue(c_int, &err_val);
-        if (so_error.* != 0) {
+        if (so_error != 0) {
             // Connect failed.
             self.disconnectPeer(peer);
             return;
@@ -719,7 +727,7 @@ pub const SenderEventLoop = struct {
             .group_name_hash = self.group_name_hash,
         };
         const handshake_bytes = handshake.toBytes();
-        _ = std.posix.write(peer.socket_fd, handshake_bytes) catch {
+        _ = net.write(peer.socket_fd, handshake_bytes) catch {
             self.disconnectPeer(peer);
             return;
         };
@@ -736,7 +744,7 @@ pub const SenderEventLoop = struct {
 
     fn disconnectPeer(self: *Self, peer: *PeerSender) void {
         if (peer.socket_fd >= 0) {
-            std.posix.close(peer.socket_fd);
+            platform.closeFd(peer.socket_fd);
             peer.socket_fd = -1;
         }
         peer.state = .disconnected;
@@ -753,7 +761,7 @@ pub const SenderEventLoop = struct {
 
     // ── Peer Lifecycle Management ─────────────────────────────────────
 
-    pub fn addPeer(self: *Self, node_id: u8, address: std.net.Address) !void {
+    pub fn addPeer(self: *Self, node_id: u8, address: net.Address) !void {
         if (self.peers.contains(node_id)) return;
 
         const peer = try self.allocator.create(PeerSender);
@@ -855,8 +863,8 @@ test "addPeer and removePeer" {
     var sender = try SenderEventLoop.init(&rb, &counters, 0, allocator);
     defer sender.deinit();
 
-    const addr1 = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
-    const addr2 = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9002);
+    const addr1 = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const addr2 = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9002);
 
     try sender.addPeer(1, addr1);
     try sender.addPeer(2, addr2);
@@ -946,7 +954,7 @@ test "onOutboundMessage drops message to disconnected peer" {
     var sender = try SenderEventLoop.init(&rb, &counters, 0, allocator);
     defer sender.deinit();
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
     try sender.addPeer(1, addr);
     // peer.state defaults to .disconnected
 
@@ -980,7 +988,7 @@ test "onOutboundMessage enqueues frame to connected peer" {
     var sender = try SenderEventLoop.init(&rb, &counters, 0, allocator);
     defer sender.deinit();
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
     try sender.addPeer(1, addr);
     const peer = sender.peers.get(1).?;
     peer.state = .connected;
@@ -1021,7 +1029,7 @@ test "dispatchCommand handles add_peer" {
     var sender = try SenderEventLoop.init(&rb, &counters, 0, allocator);
     defer sender.deinit();
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
     sender.dispatchCommand(.{ .add_peer = .{ .node_id = 3, .address = addr } });
 
     try testing.expectEqual(@as(u32, 1), sender.peers.count);

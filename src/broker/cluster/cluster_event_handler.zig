@@ -120,20 +120,20 @@ pub const ClusterEventHandler = struct {
                     e.host_and_port,
                     e.received_ns,
                 ),
-                .cluster_state_snapshot => |_| {
+                .cluster_state_snapshot => {
                     // Snapshot handling will be integrated with service registry
                     // when the full control plane integration is complete.
                 },
-                .service_added => |_| {
+                .service_added => {
                     // ServiceAdded handling will be integrated with service registry.
                 },
-                .service_removed => |_| {
+                .service_removed => {
                     // ServiceRemoved handling will be integrated with service registry.
                 },
-                .service_leader_designated => |_| {
+                .service_leader_designated => {
                     // ServiceLeaderDesignated handling will be integrated.
                 },
-                .peer_connected => |_| {
+                .peer_connected => {
                     // Handled by the control loop, not the event handler.
                 },
             }

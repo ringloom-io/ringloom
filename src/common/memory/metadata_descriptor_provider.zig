@@ -113,9 +113,9 @@ test "MetadataDescriptorProvider singleton lifecycle" {
 
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     try MetadataDescriptorProvider.init(.{
         .allocator = testing.allocator,

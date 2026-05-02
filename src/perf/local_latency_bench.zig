@@ -12,6 +12,7 @@
 //! records the one-way latency in a histogram.
 
 const std = @import("std");
+const platform = @import("brz_common").platform;
 const testing_mod = @import("brz_testing");
 const TestHarness = testing_mod.TestHarness;
 const result_writer = testing_mod.result_writer;
@@ -89,7 +90,7 @@ fn runLocalLatencyBench(
     try std.testing.expectEqual(@as(u32, 0), exit_code);
 
     // Allow in-flight messages to drain before stopping echo.
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    platform.sleepNanos(2 * std.time.ns_per_s);
 
     // Cleanup — stop services then broker (reverse start order).
     try harness.stopProcess(echo);

@@ -126,6 +126,7 @@ broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
 broker.receiver.cpu.affinity=3
 broker.io.uring.sqpoll=true
+broker.benchmark.latency.tracing.enabled=true
 EOF
 
     "$BIN/brz-broker" --config "$CONFIGS/broker_local.properties" \
@@ -190,6 +191,7 @@ broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
 broker.receiver.cpu.affinity=3
 broker.io.uring.sqpoll=true
+broker.benchmark.latency.tracing.enabled=true
 EOF
 
     cat > "$CONFIGS/broker_2.properties" << EOF
@@ -205,6 +207,7 @@ broker.idle.strategy=yielding
 broker.sender.cpu.affinity=4
 broker.receiver.cpu.affinity=5
 broker.io.uring.sqpoll=true
+broker.benchmark.latency.tracing.enabled=true
 EOF
 }
 

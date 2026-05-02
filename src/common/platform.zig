@@ -39,11 +39,19 @@ pub fn monotonicNanos() i64 {
     return Clock.monotonicNanos();
 }
 
+pub fn sleepNanos(duration_ns: u64) void {
+    return thread.sleepNanos(duration_ns);
+}
+
 // Platform helpers that wrap OS-specific calls used by the memory subsystem.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
+
+fn defaultIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
 
 /// Get the current process ID.
 pub fn getPid() i64 {
@@ -61,30 +69,43 @@ pub fn getPid() i64 {
 
 /// Create a new file, truncating if it exists. Returns the raw fd.
 pub fn createFile(path: []const u8) !posix.fd_t {
-    const file = try std.fs.createFileAbsolute(path, .{
+    const file = try std.Io.Dir.createFileAbsolute(defaultIo(), path, .{
         .read = true,
         .truncate = true,
-        .mode = 0o666,
     });
     return file.handle;
 }
 
 /// Open an existing file for read-write access. Returns the raw fd.
 pub fn openFile(path: []const u8) !posix.fd_t {
-    const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch
+    const file = std.Io.Dir.openFileAbsolute(defaultIo(), path, .{ .mode = .read_write }) catch
         return error.FileNotFound;
     return file.handle;
 }
 
+pub fn closeFd(fd: posix.fd_t) void {
+    switch (posix.errno(posix.system.close(fd))) {
+        .SUCCESS, .INTR => {},
+        else => {},
+    }
+}
+
 /// Set file size via ftruncate.
 pub fn ftruncate(fd: posix.fd_t, size: usize) !void {
-    try posix.ftruncate(fd, @intCast(size));
+    const file: std.Io.File = .{
+        .handle = fd,
+        .flags = .{ .nonblocking = false },
+    };
+    try file.setLength(defaultIo(), @intCast(size));
 }
 
 /// Get file size via fstat.
 pub fn fileSize(fd: posix.fd_t) !usize {
-    const stat = try posix.fstat(fd);
-    return @intCast(stat.size);
+    const file: std.Io.File = .{
+        .handle = fd,
+        .flags = .{ .nonblocking = false },
+    };
+    return @intCast(try file.length(defaultIo()));
 }
 
 /// Memory-map a file descriptor as shared read-write.
@@ -92,7 +113,7 @@ pub fn mmap(fd: posix.fd_t, size: usize) ![]align(constants.page_size) u8 {
     const mapped = try posix.mmap(
         null,
         size,
-        posix.PROT.READ | posix.PROT.WRITE,
+        .{ .READ = true, .WRITE = true },
         .{ .TYPE = .SHARED },
         fd,
         0,
@@ -105,7 +126,7 @@ pub fn mmapAnonymous(size: usize) ![]align(constants.page_size) u8 {
     const mapped = try posix.mmap(
         null,
         size,
-        posix.PROT.READ | posix.PROT.WRITE,
+        .{ .READ = true, .WRITE = true },
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         @as(posix.fd_t, -1),
         0,

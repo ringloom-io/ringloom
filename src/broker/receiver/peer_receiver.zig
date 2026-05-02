@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const brz_common = @import("brz_common");
+const net = @import("../net_compat.zig");
 const constants = brz_common.platform.constants;
 const Clock = brz_common.platform.clock.Clock;
 const frame_parser = brz_common.protocol.frame_parser;
@@ -82,7 +83,7 @@ pub const PeerReceiver = struct {
     liveness: LivenessState,
 
     /// IP address and port of the peer broker (from accepted connection).
-    address: std.net.Address,
+    address: net.Address,
 
     /// Whether this peer is actively connected.
     connected: bool,
@@ -101,7 +102,7 @@ pub const PeerReceiver = struct {
     pub fn init(
         node_id: u8,
         socket_fd: std.posix.fd_t,
-        address: std.net.Address,
+        address: net.Address,
         session_epoch: u32,
         payload_buf: []u8,
         recv_buf: []u8,
@@ -185,11 +186,11 @@ pub const PeerReceiver = struct {
     pub fn resetForReconnect(
         self: *Self,
         socket_fd: std.posix.fd_t,
-        address: std.net.Address,
+        address: net.Address,
         session_epoch: u32,
     ) void {
         if (self.socket_fd >= 0) {
-            std.posix.close(self.socket_fd);
+            brz_common.platform.closeFd(self.socket_fd);
         }
         self.socket_fd = socket_fd;
         self.address = address;
@@ -203,7 +204,7 @@ pub const PeerReceiver = struct {
 
     pub fn close(self: *Self) void {
         if (self.socket_fd >= 0) {
-            std.posix.close(self.socket_fd);
+            brz_common.platform.closeFd(self.socket_fd);
             self.socket_fd = -1;
         }
         self.connected = false;
@@ -218,7 +219,7 @@ const testing = std.testing;
 test "PeerReceiver init sets correct defaults" {
     var payload_buf: [4096]u8 = undefined;
     var recv_buf: [PeerReceiver.recv_buf_size]u8 = undefined;
-    const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
 
     const peer = PeerReceiver.init(1, -1, address, 42, &payload_buf, &recv_buf);
 
@@ -235,10 +236,10 @@ test "PeerReceiver init sets correct defaults" {
 test "PeerReceiver updateLiveness transitions correctly" {
     var payload_buf: [4096]u8 = undefined;
     var recv_buf: [PeerReceiver.recv_buf_size]u8 = undefined;
-    const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
 
     var peer = PeerReceiver.init(1, -1, address, 1, &payload_buf, &recv_buf);
-    const now: i64 = @intCast(std.time.nanoTimestamp());
+    const now = Clock.monotonicNanos();
 
     // Recent data → alive
     peer.last_recv_ns = now - 100 * std.time.ns_per_ms;

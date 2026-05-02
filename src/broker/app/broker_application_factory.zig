@@ -122,13 +122,13 @@ test "factory loads config from explicit path" {
         \\broker.storage.path=/tmp/brz-test
     ;
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(testing.io, .{
         .sub_path = "broker.properties",
         .data = config_text,
     });
 
     // Get absolute path to the temp directory so loadFromFile can find the file.
-    const tmp_abs = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const tmp_abs = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(tmp_abs);
 
     var factory = BrokerApplicationFactory.init(testing.allocator);

@@ -55,7 +55,7 @@ pub const FlowControlEntry = extern struct {
 
     pub fn loadState(self: *const volatile FlowControlEntry) SlotState {
         const raw = @atomicLoad(u8, &self.state, .acquire);
-        return std.meta.intToEnum(SlotState, raw) catch .free;
+        return std.enums.fromInt(SlotState, raw) orelse .free;
     }
 
     pub fn storeState(self: *volatile FlowControlEntry, s: SlotState) void {
@@ -64,7 +64,7 @@ pub const FlowControlEntry = extern struct {
 
     pub fn loadPressureState(self: *const volatile FlowControlEntry) PressureState {
         const raw = @atomicLoad(u8, &self.pressure_state, .acquire);
-        return std.meta.intToEnum(PressureState, raw) catch .unknown;
+        return std.enums.fromInt(PressureState, raw) orelse .unknown;
     }
 
     pub fn storePressureState(self: *volatile FlowControlEntry, ps: PressureState) void {

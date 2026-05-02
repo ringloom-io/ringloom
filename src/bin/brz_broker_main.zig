@@ -11,7 +11,8 @@ const ExitCode = enum(u8) {
     runtime_error = 4,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
     const allocator = switch (builtin.mode) {
         .Debug, .ReleaseSafe => debug_alloc.allocator(),
@@ -21,21 +22,20 @@ pub fn main() !void {
         _ = debug_alloc.deinit();
     };
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
-        try printHelp();
+        try printHelp(io);
         return;
     }
 
     if (hasFlag(args, "--version") or hasFlag(args, "-v")) {
-        try printVersion();
+        try printVersion(io);
         return;
     }
 
     const config_path = parseConfigPath(args) catch {
-        try printHelp();
+        try printHelp(io);
         std.process.exit(@intFromEnum(ExitCode.usage_error));
     };
 
@@ -60,7 +60,7 @@ pub fn main() !void {
     std.process.exit(exit_code);
 }
 
-fn hasFlag(args: []const []const u8, flag: []const u8) bool {
+fn hasFlag(args: []const [:0]const u8, flag: []const u8) bool {
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, flag)) {
             return true;
@@ -69,7 +69,7 @@ fn hasFlag(args: []const []const u8, flag: []const u8) bool {
     return false;
 }
 
-fn parseConfigPath(args: []const []const u8) !?[]const u8 {
+fn parseConfigPath(args: []const [:0]const u8) !?[]const u8 {
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--config")) {
@@ -82,9 +82,9 @@ fn parseConfigPath(args: []const []const u8) !?[]const u8 {
     return null;
 }
 
-fn printHelp() !void {
+fn printHelp(io: std.Io) !void {
     var buf: [4096]u8 = undefined;
-    var stdout_w = std.fs.File.stdout().writer(&buf);
+    var stdout_w = std.Io.File.stdout().writer(io, &buf);
     const stdout = &stdout_w.interface;
     try stdout.writeAll(
         \\BRZ Broker — high-performance IPC framework
@@ -101,9 +101,9 @@ fn printHelp() !void {
     try stdout.flush();
 }
 
-fn printVersion() !void {
+fn printVersion(io: std.Io) !void {
     var buf: [4096]u8 = undefined;
-    var stdout_w = std.fs.File.stdout().writer(&buf);
+    var stdout_w = std.Io.File.stdout().writer(io, &buf);
     const stdout = &stdout_w.interface;
     try stdout.writeAll("BRZ Broker v0.0.0\n");
     try stdout.flush();

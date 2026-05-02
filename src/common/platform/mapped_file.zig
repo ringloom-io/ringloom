@@ -8,6 +8,17 @@ const std = @import("std");
 const posix = std.posix;
 const constants = @import("constants.zig");
 
+fn defaultIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn closeFd(fd: posix.fd_t) void {
+    switch (posix.errno(posix.system.close(fd))) {
+        .SUCCESS, .INTR => {},
+        else => {},
+    }
+}
+
 pub const MappedFile = struct {
     /// Pointer to the mapped memory region, page-aligned.
     data: [*]align(constants.page_size) u8,
@@ -34,13 +45,13 @@ pub const MappedFile = struct {
         DirectoryCreateFailed,
         InvalidSize,
         PathTooLong,
-    } || posix.MMapError || posix.OpenError || std.fs.File.OpenError || std.mem.Allocator.Error;
+    } || posix.MMapError || posix.OpenError || std.Io.File.OpenError || std.mem.Allocator.Error;
 
     pub const OpenError = error{
         FileNotFound,
         MappingFailed,
         InvalidFileSize,
-    } || posix.MMapError || posix.OpenError || std.fs.File.OpenError || std.mem.Allocator.Error;
+    } || posix.MMapError || posix.OpenError || std.Io.File.OpenError || std.mem.Allocator.Error;
 
     /// Create a new metadata file at the given path with the given size.
     ///
@@ -67,26 +78,26 @@ pub const MappedFile = struct {
         errdefer allocator.free(full_path);
 
         // Create parent directories recursively.
-        std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
+        std.Io.Dir.cwd().createDirPath(defaultIo(), dir_path) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return error.DirectoryCreateFailed,
         };
 
         // Check if file exists and handle PID check.
         const file_exists = blk: {
-            std.fs.accessAbsolute(full_path, .{}) catch break :blk false;
+            std.Io.Dir.accessAbsolute(defaultIo(), full_path, .{}) catch break :blk false;
             break :blk true;
         };
 
         if (file_exists) {
             check_pid: {
                 // Temporarily open read-only to check the PID.
-                const check_file = std.fs.openFileAbsolute(full_path, .{ .mode = .read_only }) catch break :check_pid;
-                defer check_file.close();
+                const check_file = std.Io.Dir.openFileAbsolute(defaultIo(), full_path, .{ .mode = .read_only }) catch break :check_pid;
+                defer check_file.close(defaultIo());
 
                 // Read the PID at the fixed metadata header offset.
                 var pid_buf: [8]u8 = undefined;
-                const bytes_read = check_file.pread(&pid_buf, pid_field_offset) catch break :check_pid;
+                const bytes_read = check_file.readPositionalAll(defaultIo(), &pid_buf, pid_field_offset) catch break :check_pid;
                 if (bytes_read == 8) {
                     const pid = std.mem.readInt(i64, &pid_buf, .little);
                     if (pid > 0 and isProcessAlive(pid)) {
@@ -97,22 +108,25 @@ pub const MappedFile = struct {
         }
 
         // Open/create the file with read-write permissions, truncating.
-        const file = std.fs.createFileAbsolute(full_path, .{
+        const file = std.Io.Dir.createFileAbsolute(defaultIo(), full_path, .{
             .read = true,
             .truncate = true,
-            .mode = 0o666,
         }) catch return error.FileCreateFailed;
         const fd = file.handle;
-        errdefer posix.close(fd);
+        errdefer closeFd(fd);
 
         // Set file size.
-        posix.ftruncate(fd, @intCast(aligned_size)) catch return error.TruncateFailed;
+        const trunc_file: std.Io.File = .{
+            .handle = fd,
+            .flags = .{ .nonblocking = false },
+        };
+        trunc_file.setLength(defaultIo(), @intCast(aligned_size)) catch return error.TruncateFailed;
 
         // Memory-map the file.
         const mapped = posix.mmap(
             null,
             aligned_size,
-            posix.PROT.READ | posix.PROT.WRITE,
+            .{ .READ = true, .WRITE = true },
             .{ .TYPE = .SHARED },
             fd,
             0,
@@ -137,10 +151,10 @@ pub const MappedFile = struct {
         const path_copy = try allocator.dupe(u8, path);
         errdefer allocator.free(path_copy);
 
-        const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch
+        const file = std.Io.Dir.openFileAbsolute(defaultIo(), path, .{ .mode = .read_write }) catch
             return error.FileNotFound;
         const fd = file.handle;
-        errdefer posix.close(fd);
+        errdefer closeFd(fd);
 
         // Get file size via fstat.
         const stat = posix.fstat(fd);
@@ -150,7 +164,7 @@ pub const MappedFile = struct {
         const mapped = posix.mmap(
             null,
             file_size,
-            posix.PROT.READ | posix.PROT.WRITE,
+            .{ .READ = true, .WRITE = true },
             .{ .TYPE = .SHARED },
             fd,
             0,
@@ -181,7 +195,7 @@ pub const MappedFile = struct {
         posix.munmap(@alignCast(self.data[0..self.len]));
 
         // Step 2: Close file descriptor.
-        posix.close(self.fd);
+        closeFd(self.fd);
 
         // Step 3: Free the path string.
         self.allocator.free(self.path);
@@ -218,7 +232,7 @@ pub fn isProcessAlive(pid: i64) bool {
 
     const pid_int: std.posix.pid_t = @intCast(pid);
 
-    const result = std.posix.kill(pid_int, 0) catch |err| {
+    const result = std.posix.kill(pid_int, @enumFromInt(0)) catch |err| {
         return switch (err) {
             error.PermissionDenied => true, // process exists but we can't signal it
             error.ProcessNotFound => false,
@@ -274,7 +288,7 @@ pub fn ensureServicesDirectory(
     const dir_path = try servicesDirectoryPath(allocator, storage_path, group);
     defer allocator.free(dir_path);
 
-    std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
+    std.Io.Dir.cwd().createDirPath(defaultIo(), dir_path) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -288,8 +302,8 @@ test "MappedFile create and close on tmpfs" {
     const dir = "/tmp/brz-test-mapped-file";
 
     // Cleanup from previous runs.
-    std.fs.deleteTreeAbsolute(dir) catch {};
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
 
     var mf = try MappedFile.create(allocator, dir, "test_1.dat", 4096);
     defer mf.close();
@@ -308,8 +322,8 @@ test "MappedFile create with sub-page size rounds up" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const dir = "/tmp/brz-test-mapped-file-roundup";
-    std.fs.deleteTreeAbsolute(dir) catch {};
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
 
     var mf = try MappedFile.create(allocator, dir, "small.dat", 100);
     defer mf.close();
@@ -321,8 +335,8 @@ test "MappedFile ptrAt" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const dir = "/tmp/brz-test-mapped-file-ptrat";
-    std.fs.deleteTreeAbsolute(dir) catch {};
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
 
     var mf = try MappedFile.create(allocator, dir, "ptrat.dat", 4096);
     defer mf.close();
@@ -352,8 +366,8 @@ test "MappedFile rejects live PID" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const dir = "/tmp/brz-test-mapped-file-pid";
-    std.fs.deleteTreeAbsolute(dir) catch {};
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
 
     // Create a file and write our own PID at offset 16.
     var mf = try MappedFile.create(allocator, dir, "live.dat", 4096);
@@ -370,8 +384,8 @@ test "MappedFile allows reuse of dead PID" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const dir = "/tmp/brz-test-mapped-file-dead";
-    std.fs.deleteTreeAbsolute(dir) catch {};
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
 
     // Create a file and write a very high PID that doesn't exist.
     var mf = try MappedFile.create(allocator, dir, "dead.dat", 4096);

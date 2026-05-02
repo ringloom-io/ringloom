@@ -6,8 +6,10 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const net = @import("../net_compat.zig");
 const WriteQueue = @import("write_queue.zig").WriteQueue;
 const constants = @import("brz_common").platform.constants;
+const platform = @import("brz_common").platform;
 
 pub const ConnectionState = enum {
     /// Not yet connected. Waiting for reconnect timer.
@@ -27,7 +29,7 @@ pub const PeerSender = struct {
     socket_fd: std.posix.fd_t,
 
     /// IP address and port of the peer broker.
-    address: std.net.Address,
+    address: net.Address,
 
     /// Current connection state.
     state: ConnectionState,
@@ -75,7 +77,7 @@ pub const PeerSender = struct {
 
     pub fn init(
         node_id: u8,
-        address: std.net.Address,
+        address: net.Address,
         allocator: std.mem.Allocator,
     ) !Self {
         return .{
@@ -104,7 +106,7 @@ pub const PeerSender = struct {
     /// Reset connection state for a new connection attempt.
     pub fn resetForReconnect(self: *Self) void {
         if (self.socket_fd >= 0) {
-            std.posix.close(self.socket_fd);
+            platform.closeFd(self.socket_fd);
             self.socket_fd = -1;
         }
         self.state = .disconnected;
@@ -133,7 +135,7 @@ pub const PeerSender = struct {
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        if (self.socket_fd >= 0) std.posix.close(self.socket_fd);
+        if (self.socket_fd >= 0) platform.closeFd(self.socket_fd);
         self.write_queue.deinit(allocator);
     }
 
@@ -166,7 +168,7 @@ pub const PeerSender = struct {
 
 test "PeerSender init sets correct defaults" {
     const allocator = std.testing.allocator;
-    const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
 
     var peer = try PeerSender.init(1, address, allocator);
     defer peer.deinit(allocator);
@@ -181,7 +183,7 @@ test "PeerSender init sets correct defaults" {
 
 test "PeerSender resetForReconnect clears state" {
     const allocator = std.testing.allocator;
-    const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
 
     var peer = try PeerSender.init(1, address, allocator);
     defer peer.deinit(allocator);
@@ -203,7 +205,7 @@ test "PeerSender resetForReconnect clears state" {
 
 test "PeerSender advanceBackoff doubles delay with cap" {
     const allocator = std.testing.allocator;
-    const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
 
     var peer = try PeerSender.init(1, address, allocator);
     defer peer.deinit(allocator);
@@ -224,7 +226,7 @@ test "PeerSender advanceBackoff doubles delay with cap" {
 
 test "PeerSender resetBackoff restores initial delay" {
     const allocator = std.testing.allocator;
-    const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
 
     var peer = try PeerSender.init(1, address, allocator);
     defer peer.deinit(allocator);

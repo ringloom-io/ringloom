@@ -1,12 +1,13 @@
-//! Cross-Broker Round-Trip Latency Benchmark
+//! Cross-Broker Single Direction Latency Benchmark
 //!
-//! Measures round-trip latency for messages routed between two brokers
-//! connected via loopback UDP. Topology: broker A (node 1) ↔ broker B (node 2),
+//! Measures single direction trip latency for messages routed between two brokers
+//! connected via loopback TCP. Topology: broker A (node 1) ↔ broker B (node 2),
 //! ping service on broker A, echo service on broker B.
 //!
 //! Message sizes tested: 32, 128, 512, 1024, 4096 bytes.
 
 const std = @import("std");
+const platform = @import("brz_common").platform;
 const testing_mod = @import("brz_testing");
 const TestHarness = testing_mod.TestHarness;
 const BrokerSpec = testing_mod.BrokerSpec;
@@ -36,6 +37,7 @@ fn brokerASpec() BrokerSpec {
         .node_id = broker_a_node_id,
         .port = broker_a_port,
         .peers = &.{.{ .node_id = broker_b_node_id, .host = "127.0.0.1", .port = broker_b_port }},
+        .benchmark_latency_tracing_enabled = true,
     };
 }
 
@@ -44,6 +46,7 @@ fn brokerBSpec() BrokerSpec {
         .node_id = broker_b_node_id,
         .port = broker_b_port,
         .peers = &.{.{ .node_id = broker_a_node_id, .host = "127.0.0.1", .port = broker_a_port }},
+        .benchmark_latency_tracing_enabled = true,
     };
 }
 
@@ -64,7 +67,7 @@ fn runRemoteLatencyBench(
     try harness.waitForBrokerReady(broker_b, broker_ready_timeout_ms);
 
     // Allow the cluster to discover peers and stabilise.
-    std.Thread.sleep(cluster_settle_ns);
+    platform.sleepNanos(cluster_settle_ns);
 
     const echo_result_path = try std.fmt.allocPrint(
         allocator,
@@ -96,12 +99,12 @@ fn runRemoteLatencyBench(
         .service_name = "ping",
         .broker_node_id = broker_a_node_id,
         .extra_args = &.{
-            "--target-service",   "echo",
-            "--message-count",    message_count,
-            "--message-size",     size_str,
-            "--warmup-count",     warmup_count,
-            "--result-file",      result_path,
-            "--spin-timeout-ms",  "100",
+            "--target-service",  "echo",
+            "--message-count",   message_count,
+            "--message-size",    size_str,
+            "--warmup-count",    warmup_count,
+            "--result-file",     result_path,
+            "--spin-timeout-ms", "100",
         },
     });
     try harness.waitForServiceReady(ping, service_ready_timeout_ms);
@@ -111,7 +114,7 @@ fn runRemoteLatencyBench(
     try std.testing.expectEqual(@as(u32, 0), exit_code);
 
     // Allow in-flight messages to drain through the TCP pipeline.
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    platform.sleepNanos(2 * std.time.ns_per_s);
 
     // Cleanup — stop services first, then brokers in reverse order.
     try harness.stopProcess(echo);

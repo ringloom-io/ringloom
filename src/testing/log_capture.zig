@@ -10,13 +10,12 @@
 //! managed process and a listing of the storage directory.
 
 const std = @import("std");
-const fs = std.fs;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 
+const io_compat = @import("io_compat.zig");
 const process_runner = @import("process_runner.zig");
 const ProcessHandle = process_runner.ProcessHandle;
-const ProcessState = process_runner.ProcessState;
 const temp_env = @import("temp_env.zig");
 const TempEnv = temp_env.TempEnv;
 
@@ -119,9 +118,7 @@ pub const LogCapture = struct {
     /// Writes the accumulated output to a file at `path`, creating or
     /// truncating the file as necessary.
     pub fn writeToFile(self: *const LogCapture, path: []const u8) !void {
-        const file = try fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(self.accumulated.items);
+        try io_compat.writeFile(path, self.accumulated.items);
     }
 
     /// Clears all accumulated data, keeping allocated memory for reuse.
@@ -144,8 +141,9 @@ pub fn dumpFailureDiagnostics(
     processes: []const *ProcessHandle,
     env: *const TempEnv,
 ) void {
+    const io = io_compat.io();
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    var stderr_w = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_w.interface;
 
     stderr.print(
@@ -204,14 +202,12 @@ fn dumpTailOfFile(
     max_lines: usize,
     label: []const u8,
 ) void {
-    const file = fs.cwd().openFile(path, .{}) catch {
-        writer.print("   ({s} file not found)\n", .{label}) catch return;
-        return;
-    };
-    defer file.close();
-
-    const content = file.readToEndAlloc(allocator, 4 * 1024 * 1024) catch {
-        writer.print("   ({s} file too large or unreadable)\n", .{label}) catch return;
+    const content = io_compat.readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |err| {
+        if (err == error.FileNotFound) {
+            writer.print("   ({s} file not found)\n", .{label}) catch return;
+        } else {
+            writer.print("   ({s} file too large or unreadable)\n", .{label}) catch return;
+        }
         return;
     };
     defer allocator.free(content);
@@ -245,11 +241,11 @@ fn dumpTailOfFile(
 }
 
 fn listDirectoryRecursive(writer: anytype, path: []const u8, depth: usize) !void {
-    var dir = try fs.cwd().openDir(path, .{ .iterate = true });
-    defer dir.close();
+    var dir = try io_compat.openDir(path, .{ .iterate = true });
+    defer dir.close(io_compat.io());
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io_compat.io())) |entry| {
         // Indent by depth.
         var i: usize = 0;
         while (i < depth) : (i += 1) {
@@ -413,13 +409,11 @@ test "writeToFile persists accumulated data" {
     try lc.writeToFile(tmp_path);
 
     // Then
-    const file = try fs.cwd().openFile(tmp_path, .{});
-    defer file.close();
-    defer fs.cwd().deleteFile(tmp_path) catch {};
+    defer io_compat.deleteFile(tmp_path) catch {};
 
-    var buf: [256]u8 = undefined;
-    const n = try file.readAll(&buf);
-    try std.testing.expectEqualStrings("persisted content\n", buf[0..n]);
+    const content = try io_compat.readFileAlloc(std.testing.allocator, tmp_path, 256);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("persisted content\n", content);
 }
 
 test "reset clears accumulated data" {

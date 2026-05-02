@@ -24,7 +24,7 @@ test "cross-broker routing works" {
     try harness.waitForBrokerReady(broker_b, 5000);
 
     // Wait for cluster convergence between the two brokers
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, .fromNanoseconds(2 * std.time.ns_per_s), .awake) catch unreachable;
 
     // When — echo on broker B, ping on broker A (forces cross-broker routing)
     const echo = try harness.startService(.{
@@ -83,7 +83,7 @@ test "cross-broker routing with late broker join" {
     try harness.waitForBrokerReady(broker_b, 5000);
 
     // Wait for cluster convergence and service discovery propagation
-    std.Thread.sleep(3 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, .fromNanoseconds(3 * std.time.ns_per_s), .awake) catch unreachable;
 
     // Ping on broker B should discover echo on broker A
     const ping = try harness.startService(.{
@@ -142,7 +142,7 @@ test "cross-broker routing with three brokers" {
     try harness.waitForBrokerReady(broker_c, 5000);
 
     // Wait for full cluster convergence
-    std.Thread.sleep(3 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, .fromNanoseconds(3 * std.time.ns_per_s), .awake) catch unreachable;
 
     // When — echo on broker C, ping on broker A (two hops possible)
     const echo = try harness.startService(.{

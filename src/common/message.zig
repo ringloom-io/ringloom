@@ -16,6 +16,7 @@ pub const message_assembler = @import("message/message_assembler.zig");
 pub const MessageAssembler = message_assembler.MessageAssembler;
 
 pub const flow_control_messages = @import("message/flow_control_messages.zig");
+pub const latency_trace = @import("message/latency_trace.zig");
 
 // Ensure all message module tests are discovered by `zig build test`.
 comptime {
@@ -24,4 +25,5 @@ comptime {
     _ = @import("message/message_fragmenting_producer.zig");
     _ = @import("message/message_assembler.zig");
     _ = @import("message/flow_control_messages.zig");
+    _ = @import("message/latency_trace.zig");
 }

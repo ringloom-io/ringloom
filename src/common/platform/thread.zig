@@ -61,7 +61,7 @@ pub const IdleStrategy = union(enum) {
         switch (self.*) {
             .busy_spin => std.atomic.spinLoopHint(),
             .yielding => std.Thread.yield() catch {},
-            .sleeping => std.Thread.sleep(1_000), // 1µs
+            .sleeping => sleepNanos(1_000), // 1µs
             .backoff => |*state| state.step(),
             .blocking => |wake_fn| wake_fn(),
         }
@@ -83,7 +83,7 @@ pub const BackoffState = struct {
             self.yields += 1;
             std.Thread.yield() catch {};
         } else {
-            std.Thread.sleep(1_000); // 1µs
+            sleepNanos(1_000); // 1µs
         }
     }
 
@@ -92,6 +92,11 @@ pub const BackoffState = struct {
         self.yields = 0;
     }
 };
+
+pub fn sleepNanos(duration_ns: u64) void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    std.Io.sleep(io, .fromNanoseconds(@intCast(duration_ns)), .awake) catch unreachable;
+}
 
 pub const ThreadRunner = struct {
     /// Name shown in `ps`, `top`, `htop` (max 15 chars on Linux).
@@ -264,7 +269,7 @@ test "ThreadRunner start and stop" {
 
     try runner.start();
     // Let it run briefly.
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    sleepNanos(5 * std.time.ns_per_ms);
     runner.stopAndJoin();
 
     // It should have run at least once.

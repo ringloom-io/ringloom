@@ -21,11 +21,11 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const fs = std.fs;
 const mem = std.mem;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
+const io_compat = @import("io_compat.zig");
 const log_capture = @import("log_capture.zig");
 const LogCapture = log_capture.LogCapture;
 
@@ -59,9 +59,9 @@ pub const ProcessHandle = struct {
     stdout_capture: LogCapture,
 
     /// File handle used to persist stdout content alongside the pipe.
-    stdout_file: ?fs.File,
+    stdout_file: ?std.Io.File,
     /// File handle for stderr persistence.
-    stderr_file: ?fs.File,
+    stderr_file: ?std.Io.File,
 
     // ── Construction / spawning ──────────────────────────────────
 
@@ -90,11 +90,11 @@ pub const ProcessHandle = struct {
         errdefer allocator.free(stderr_path);
 
         // Open log files for mirroring pipe output.
-        const stdout_file = try fs.cwd().createFile(stdout_path, .{ .truncate = true });
-        errdefer stdout_file.close();
+        const stdout_file = try io_compat.createFile(stdout_path, .{ .truncate = true });
+        errdefer stdout_file.close(io_compat.io());
 
-        const stderr_file = try fs.cwd().createFile(stderr_path, .{ .truncate = true });
-        errdefer stderr_file.close();
+        const stderr_file = try io_compat.createFile(stderr_path, .{ .truncate = true });
+        errdefer stderr_file.close(io_compat.io());
 
         // Build the argv array: [exe_path] ++ args.
         var argv: std.ArrayList([]const u8) = .empty;
@@ -104,11 +104,11 @@ pub const ProcessHandle = struct {
             try argv.append(allocator, arg);
         }
 
-        var child = std.process.Child.init(argv.items, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        try child.spawn();
+        const child = try std.process.spawn(io_compat.io(), .{
+            .argv = argv.items,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
 
         // Set stdout pipe to non-blocking so readAvailableOutput never hangs.
         if (child.stdout) |stdout| {
@@ -162,7 +162,7 @@ pub const ProcessHandle = struct {
         const stdout = child.stdout orelse return 0;
 
         var buf: [8192]u8 = undefined;
-        const n = stdout.read(&buf) catch |err| switch (err) {
+        const n = posix.read(stdout.handle, buf[0..]) catch |err| switch (err) {
             error.WouldBlock => return 0,
             else => return err,
         };
@@ -174,7 +174,7 @@ pub const ProcessHandle = struct {
 
         // Mirror to the log file.
         if (self.stdout_file) |f| {
-            f.writeAll(data) catch {};
+            f.writeStreamingAll(io_compat.io(), data) catch {};
         }
 
         return n;
@@ -190,7 +190,7 @@ pub const ProcessHandle = struct {
         const stderr = child.stderr orelse return 0;
 
         var buf: [8192]u8 = undefined;
-        const n = stderr.read(&buf) catch |err| switch (err) {
+        const n = posix.read(stderr.handle, buf[0..]) catch |err| switch (err) {
             error.WouldBlock => return 0,
             else => return err,
         };
@@ -205,7 +205,7 @@ pub const ProcessHandle = struct {
 
         // Mirror to the stderr log file.
         if (self.stderr_file) |f| {
-            f.writeAll(data) catch {};
+            f.writeStreamingAll(io_compat.io(), data) catch {};
         }
 
         return n;
@@ -233,7 +233,10 @@ pub const ProcessHandle = struct {
         if (self.state == .exited or self.state == .created) return;
 
         if (self.child) |child| {
-            const pid = child.id;
+            const pid = child.id orelse {
+                self.state = .exited;
+                return;
+            };
             // Send SIGTERM.
             posix.kill(pid, std.posix.SIG.TERM) catch |err| switch (err) {
                 error.ProcessNotFound => {
@@ -253,7 +256,10 @@ pub const ProcessHandle = struct {
         if (self.state == .exited or self.state == .created) return;
 
         if (self.child) |child| {
-            const pid = child.id;
+            const pid = child.id orelse {
+                self.state = .exited;
+                return;
+            };
             posix.kill(pid, std.posix.SIG.KILL) catch {};
             self.state = .exited;
         }
@@ -265,9 +271,9 @@ pub const ProcessHandle = struct {
     /// Returns the exit code on success.  Returns `error.Timeout` if
     /// the child did not exit within the specified duration.
     pub fn waitForExit(self: *ProcessHandle, timeout_ms: u64) !u32 {
-        const deadline_ns: i128 = std.time.nanoTimestamp() + @as(i128, timeout_ms) * std.time.ns_per_ms;
+        const deadline_ns: i128 = io_compat.monotonicNanos() + @as(i128, timeout_ms) * std.time.ns_per_ms;
 
-        while (std.time.nanoTimestamp() < deadline_ns) {
+        while (io_compat.monotonicNanos() < deadline_ns) {
             // Drain any pending stdout so logs are up-to-date.
             _ = self.drainAvailableOutput() catch {};
 
@@ -275,7 +281,7 @@ pub const ProcessHandle = struct {
                 return self.collectExitCode();
             }
 
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            io_compat.sleepMs(50);
         }
 
         return error.Timeout;
@@ -305,15 +311,14 @@ pub const ProcessHandle = struct {
     pub fn deinit(self: *ProcessHandle) void {
         // Ensure the child is not left behind.
         if (self.state != .exited and self.state != .created) {
-            self.kill();
-            // Best-effort wait so the OS can reclaim the PID.
-            if (self.child) |child| {
-                _ = posix.waitpid(child.id, 0);
+            if (self.child) |*child| {
+                child.kill(io_compat.io());
+                self.state = .exited;
             }
         }
 
-        if (self.stdout_file) |f| f.close();
-        if (self.stderr_file) |f| f.close();
+        if (self.stdout_file) |f| f.close(io_compat.io());
+        if (self.stderr_file) |f| f.close(io_compat.io());
 
         self.stdout_capture.deinit();
 
@@ -335,28 +340,27 @@ pub const ProcessHandle = struct {
         if (self.exit_code != null) return false;
 
         const child = self.child orelse return false;
-        const pid = child.id;
+        const pid = child.id orelse return false;
+        var status: if (builtin.link_libc) std.c.c_int else u32 = undefined;
 
-        // WNOHANG: return immediately if the child has not exited.
-        const result = posix.waitpid(pid, std.os.linux.W.NOHANG);
-
-        if (result.pid != 0) {
-            // Child has exited (or been signalled / stopped).
-            const status: u32 = @bitCast(result.status);
-            const code: u32 = if (std.os.linux.W.IFEXITED(status))
-                @as(u32, std.os.linux.W.EXITSTATUS(status))
-            else if (std.os.linux.W.IFSIGNALED(status))
-                128 + std.os.linux.W.TERMSIG(status)
-            else
-                255;
-
-            self.exit_code = code;
-            self.state = .exited;
-            return false;
+        while (true) {
+            const result = posix.system.waitpid(pid, &status, std.os.linux.W.NOHANG);
+            switch (posix.errno(result)) {
+                .SUCCESS => {
+                    if (result == 0) return true;
+                    self.exit_code = statusToExitCode(@bitCast(status));
+                    self.state = .exited;
+                    if (self.child) |*owned_child| owned_child.id = null;
+                    return false;
+                },
+                .INTR => continue,
+                .CHILD => {
+                    self.state = .exited;
+                    return false;
+                },
+                else => return true,
+            }
         }
-
-        // pid == 0 means the child is still running.
-        return true;
     }
 
     /// Returns the exit code, collecting it via a blocking `waitpid` if
@@ -366,45 +370,55 @@ pub const ProcessHandle = struct {
         if (self.exit_code) |code| return code;
 
         const child = self.child orelse return error.ProcessNotFound;
-        const pid = child.id;
+        const pid = child.id orelse return error.ProcessNotFound;
+        var status: if (builtin.link_libc) std.c.c_int else u32 = undefined;
 
-        // Blocking wait — the child should already be exited.
-        const result = posix.waitpid(pid, 0);
-        const status: u32 = @bitCast(result.status);
-        const code: u32 = if (std.os.linux.W.IFEXITED(status))
-            @as(u32, std.os.linux.W.EXITSTATUS(status))
-        else if (std.os.linux.W.IFSIGNALED(status))
-            128 + std.os.linux.W.TERMSIG(status)
-        else
-            255;
+        while (true) {
+            const result = posix.system.waitpid(pid, &status, 0);
+            switch (posix.errno(result)) {
+                .SUCCESS => break,
+                .INTR => continue,
+                else => return error.ProcessNotFound,
+            }
+        }
 
+        const code = statusToExitCode(@bitCast(status));
         self.exit_code = code;
         self.state = .exited;
+        if (self.child) |*owned_child| owned_child.id = null;
         return code;
     }
 };
+
+fn statusToExitCode(status: u32) u32 {
+    return if (posix.W.IFEXITED(status))
+        @as(u32, posix.W.EXITSTATUS(status))
+    else if (posix.W.IFSIGNALED(status))
+        128 + @intFromEnum(posix.W.TERMSIG(status))
+    else
+        255;
+}
 
 // ── Utility ──────────────────────────────────────────────────────────
 
 /// Sets the `O_NONBLOCK` flag on a file descriptor.
 fn setNonBlocking(fd: posix.fd_t) !void {
-    var fl_flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| switch (err) {
-        error.FileBusy => unreachable,
-        error.Locked => unreachable,
-        error.PermissionDenied => unreachable,
-        error.DeadLock => unreachable,
-        error.LockedRegionLimitExceeded => unreachable,
-        else => |e| return e,
+    var fl_flags: usize = while (true) {
+        const rc = posix.system.fcntl(fd, posix.F.GETFL, @as(usize, 0));
+        switch (posix.errno(rc)) {
+            .SUCCESS => break @intCast(rc),
+            .INTR => continue,
+            else => |err| return posix.unexpectedErrno(err),
+        }
     };
-    fl_flags |= 1 << @bitOffsetOf(posix.O, "NONBLOCK");
-    _ = posix.fcntl(fd, posix.F.SETFL, fl_flags) catch |err| switch (err) {
-        error.FileBusy => unreachable,
-        error.Locked => unreachable,
-        error.PermissionDenied => unreachable,
-        error.DeadLock => unreachable,
-        error.LockedRegionLimitExceeded => unreachable,
-        else => |e| return e,
-    };
+    fl_flags |= @as(usize, 1 << @bitOffsetOf(posix.O, "NONBLOCK"));
+    while (true) {
+        switch (posix.errno(posix.system.fcntl(fd, posix.F.SETFL, fl_flags))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -424,8 +438,8 @@ test "spawn and wait for a trivial child process" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner";
-    try fs.cwd().makePath(logs_dir);
-    defer fs.cwd().deleteTree(logs_dir) catch {};
+    try io_compat.createDirPath(logs_dir);
+    defer io_compat.deleteTree(logs_dir) catch {};
 
     // When — spawn `echo hello` which exits immediately.
     var handle = try ProcessHandle.spawn(
@@ -448,8 +462,8 @@ test "stdout capture accumulates output from child" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-capture";
-    try fs.cwd().makePath(logs_dir);
-    defer fs.cwd().deleteTree(logs_dir) catch {};
+    try io_compat.createDirPath(logs_dir);
+    defer io_compat.deleteTree(logs_dir) catch {};
 
     // When — spawn a child that writes a known string to stdout.
     var handle = try ProcessHandle.spawn(
@@ -475,8 +489,8 @@ test "kill terminates a long-running child" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-kill";
-    try fs.cwd().makePath(logs_dir);
-    defer fs.cwd().deleteTree(logs_dir) catch {};
+    try io_compat.createDirPath(logs_dir);
+    defer io_compat.deleteTree(logs_dir) catch {};
 
     // Spawn `sleep 300` — will run for 5 minutes unless killed.
     var handle = try ProcessHandle.spawn(
@@ -494,7 +508,7 @@ test "kill terminates a long-running child" {
     handle.kill();
 
     // Then — after kill + short wait the process must be gone.
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    io_compat.sleepMs(100);
     try std.testing.expect(!handle.isAlive());
 }
 
@@ -503,8 +517,8 @@ test "stop sends SIGTERM to a running child" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-stop";
-    try fs.cwd().makePath(logs_dir);
-    defer fs.cwd().deleteTree(logs_dir) catch {};
+    try io_compat.createDirPath(logs_dir);
+    defer io_compat.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -535,8 +549,8 @@ test "markReady transitions state from spawned to ready" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-ready";
-    try fs.cwd().makePath(logs_dir);
-    defer fs.cwd().deleteTree(logs_dir) catch {};
+    try io_compat.createDirPath(logs_dir);
+    defer io_compat.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -561,8 +575,8 @@ test "setConfigPath stores and replaces config path" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-cfg";
-    try fs.cwd().makePath(logs_dir);
-    defer fs.cwd().deleteTree(logs_dir) catch {};
+    try io_compat.createDirPath(logs_dir);
+    defer io_compat.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -591,8 +605,8 @@ test "waitForExit returns Timeout when child does not exit" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-timeout";
-    try fs.cwd().makePath(logs_dir);
-    defer fs.cwd().deleteTree(logs_dir) catch {};
+    try io_compat.createDirPath(logs_dir);
+    defer io_compat.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -615,8 +629,8 @@ test "stdout log file is written alongside pipe capture" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-logfile";
-    try fs.cwd().makePath(logs_dir);
-    defer fs.cwd().deleteTree(logs_dir) catch {};
+    try io_compat.createDirPath(logs_dir);
+    defer io_compat.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -632,15 +646,12 @@ test "stdout log file is written alongside pipe capture" {
 
     // Flush and close the stdout log file so we can read it.
     if (handle.stdout_file) |f| {
-        f.close();
+        f.close(io_compat.io());
         handle.stdout_file = null;
     }
 
     // Then — the log file should contain the echoed text.
-    const file = try fs.cwd().openFile(handle.stdout_path, .{});
-    defer file.close();
-
-    var buf: [256]u8 = undefined;
-    const n = try file.readAll(&buf);
-    try std.testing.expect(mem.indexOf(u8, buf[0..n], "log-output-check") != null);
+    const content = try io_compat.readFileAlloc(allocator, handle.stdout_path, 256);
+    defer allocator.free(content);
+    try std.testing.expect(mem.indexOf(u8, content, "log-output-check") != null);
 }

@@ -12,6 +12,7 @@
 //! Message sizes tested: 32, 256, 1024, 4096, 16384 bytes.
 
 const std = @import("std");
+const platform = @import("brz_common").platform;
 const testing_mod = @import("brz_testing");
 const TestHarness = testing_mod.TestHarness;
 
@@ -43,7 +44,7 @@ fn setupTwoBrokerTopology(harness: *TestHarness) !TwoBrokerTopology {
     try harness.waitForBrokerReady(broker_b, 5000);
 
     // Allow cluster link to stabilise.
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    platform.sleepNanos(2 * std.time.ns_per_s);
 
     // Echo service on broker B.
     const echo = try harness.startService(.{

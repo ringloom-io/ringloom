@@ -6,7 +6,6 @@ const PeerEndpoint = @import("broker_config.zig").PeerEndpoint;
 const ThreadingMode = @import("broker_config.zig").ThreadingMode;
 const IdleStrategyName = @import("broker_config.zig").IdleStrategyName;
 
-
 pub const ConfigError = error{
     FileNotFound,
     IoError,
@@ -30,19 +29,22 @@ pub const ConfigLoader = struct {
     /// Load configuration from a file. Tries BRZ_CONFIG_FILE env var first,
     /// falls back to broker.properties in the current directory.
     pub fn load(self: *const ConfigLoader) ConfigError!BrokerConfig {
-        const path = std.posix.getenv("BRZ_CONFIG_FILE") orelse "broker.properties";
+        const path = getEnvVar("BRZ_CONFIG_FILE") orelse "broker.properties";
         return self.loadFromFile(path);
     }
 
     /// Load configuration from a specific file path.
     pub fn loadFromFile(self: *const ConfigLoader, path: []const u8) ConfigError!BrokerConfig {
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => return ConfigError.FileNotFound,
             else => return ConfigError.IoError,
         };
-        defer file.close();
+        defer file.close(io);
 
-        const content = file.readToEndAlloc(self.allocator, 1024 * 1024) catch
+        var reader_buf: [4096]u8 = undefined;
+        var reader = file.reader(io, &reader_buf);
+        const content = reader.interface.allocRemaining(self.allocator, .limited(1024 * 1024)) catch
             return ConfigError.IoError;
         defer self.allocator.free(content);
 
@@ -163,6 +165,8 @@ pub const ConfigLoader = struct {
         if (props.get("broker.io.uring.registered.buffers")) |v|
             config.io_uring_registered_buffers = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
+        if (props.get("broker.benchmark.latency.tracing.enabled")) |v|
+            config.benchmark_latency_tracing_enabled = std.mem.eql(u8, v, "true");
 
         // ── Validate and compute derived fields ─────────────────
         try validate(&config);
@@ -231,7 +235,7 @@ fn parseProperties(
     var line_iter = std.mem.splitScalar(u8, content, '\n');
     while (line_iter.next()) |raw_line| {
         // Strip trailing \r for Windows-style line endings.
-        const line = std.mem.trimRight(u8, raw_line, &[_]u8{'\r'});
+        const line = std.mem.trimEnd(u8, raw_line, &[_]u8{'\r'});
         const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
 
         // Skip empty lines and comments.
@@ -296,6 +300,7 @@ fn applyEnvOverrides(
         "broker.io.uring.queue.depth",
         "broker.io.uring.sqpoll",
         "broker.io.uring.registered.buffers",
+        "broker.benchmark.latency.tracing.enabled",
     };
 
     var env_name_buf: [256]u8 = undefined;
@@ -314,11 +319,18 @@ fn applyEnvOverrides(
             env_name_buf[len] = 0;
             break :blk env_name_buf[0..len :0];
         };
-        if (std.posix.getenv(env_name)) |env_value| {
+        if (getEnvVar(env_name)) |env_value| {
             const owned = try allocator.dupe(u8, env_value);
             try props.put(key, owned);
         }
     }
+}
+
+fn getEnvVar(name: []const u8) ?[]const u8 {
+    return if (std.Io.Threaded.global_single_threaded.environ.process_environ.getPosix(name)) |value|
+        value
+    else
+        null;
 }
 
 fn validate(config: *BrokerConfig) ConfigError!void {

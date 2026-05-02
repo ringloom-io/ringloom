@@ -133,7 +133,7 @@ pub const BrokerMetadataFile = struct {
 
         // Create file, truncate to total_size, mmap.
         const fd = try platform.createFile(path);
-        errdefer std.posix.close(fd);
+        errdefer platform.closeFd(fd);
         try platform.ftruncate(fd, total_size);
 
         const mapped = try platform.mmap(fd, total_size);
@@ -203,7 +203,7 @@ pub const BrokerMetadataFile = struct {
         const path = try buildBrokerPath(&path_buf, storage_path, group, node_id);
 
         const fd = try platform.openFile(path);
-        errdefer std.posix.close(fd);
+        errdefer platform.closeFd(fd);
 
         const file_size = try platform.fileSize(fd);
         const mapped = try platform.mmap(fd, file_size);
@@ -358,7 +358,7 @@ pub const BrokerMetadataFile = struct {
     /// Unmap the file and close the file descriptor.
     pub fn close(self: *BrokerMetadataFile) void {
         platform.munmap(self.mapped_bytes);
-        std.posix.close(self.fd);
+        platform.closeFd(self.fd);
         self.* = undefined;
     }
 
@@ -415,11 +415,11 @@ pub const BrokerMetadataFile = struct {
 
     fn ensureDirectoryExists(file_path: []const u8) !void {
         const dir_path = std.fs.path.dirname(file_path) orelse return error.InvalidPath;
-        // Use makePath to create all intermediate directories.
-        var root_dir = std.fs.openDirAbsolute("/", .{}) catch return error.FileNotFound;
-        defer root_dir.close();
+        const io = std.Io.Threaded.global_single_threaded.io();
+        var root_dir = std.Io.Dir.openDirAbsolute(io, "/", .{}) catch return error.FileNotFound;
+        defer root_dir.close(io);
         const relative = if (dir_path.len > 0 and dir_path[0] == '/') dir_path[1..] else dir_path;
-        root_dir.makePath(relative) catch return error.FileNotFound;
+        root_dir.createDirPath(io, relative) catch return error.FileNotFound;
     }
 };
 
@@ -434,10 +434,10 @@ test "BrokerMetadataHeader has correct size" {
 test "create broker metadata file and verify layout" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
 
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     var file = try BrokerMetadataFile.create(
         storage_path,
@@ -479,9 +479,9 @@ test "create broker metadata file and verify layout" {
 test "incrementAndGetNextServiceId is atomic" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     var file = try BrokerMetadataFile.create(storage_path, "test-group", 1, 64 * 1024, 64 * 1024);
     defer file.close();
@@ -501,9 +501,9 @@ test "incrementAndGetNextServiceId is atomic" {
 test "reject non-power-of-two buffer sizes" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     // 1000 is not a power of two.
     const result = BrokerMetadataFile.create(storage_path, "test-group", 1, 1000, 64 * 1024);
@@ -513,9 +513,9 @@ test "reject non-power-of-two buffer sizes" {
 test "two threads share a broker metadata file" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     // Thread 1 (broker): create the file.
     var broker_file = try BrokerMetadataFile.create(
@@ -551,9 +551,9 @@ test "two threads share a broker metadata file" {
 test "atomic nextServiceId visible across mappings" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     var file1 = try BrokerMetadataFile.create(storage_path, "test-group", 1, 4096, 4096);
     defer file1.close();
@@ -578,9 +578,9 @@ test "atomic nextServiceId visible across mappings" {
 test "concurrent incrementAndGetNextServiceId from multiple threads" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     var file = try BrokerMetadataFile.create(storage_path, "test-group", 1, 4096, 4096);
     defer file.close();
@@ -612,9 +612,9 @@ test "concurrent incrementAndGetNextServiceId from multiple threads" {
 test "create with flow control regions" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     var file = try BrokerMetadataFile.createWithFlowControl(
         storage_path,
@@ -647,9 +647,9 @@ test "create with flow control regions" {
 test "open reads back flow control regions" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     // Create with FC.
     var file1 = try BrokerMetadataFile.createWithFlowControl(
@@ -685,9 +685,9 @@ test "open reads back flow control regions" {
 test "open backward compat with no FC regions" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     // Create without FC (old-style).
     var file1 = try BrokerMetadataFile.create(storage_path, "test-group", 1, 4096, 4096);
@@ -706,9 +706,9 @@ test "open backward compat with no FC regions" {
 test "different node_ids create independent files" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const storage_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(storage_path);
-    try tmp_dir.dir.makePath("test-group/services");
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
 
     // Create broker metadata for node 1 and node 2 under the same group.
     var broker1 = try BrokerMetadataFile.create(storage_path, "test-group", 1, 4096, 4096);

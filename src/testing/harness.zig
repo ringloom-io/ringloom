@@ -32,6 +32,7 @@ const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
+const io_compat = @import("io_compat.zig");
 
 const temp_env = @import("temp_env.zig");
 const TempEnv = temp_env.TempEnv;
@@ -41,7 +42,6 @@ const ConfigGen = config_gen.ConfigGen;
 
 const process_runner = @import("process_runner.zig");
 const ProcessHandle = process_runner.ProcessHandle;
-const ProcessState = process_runner.ProcessState;
 
 const readiness = @import("readiness.zig");
 const log_capture = @import("log_capture.zig");
@@ -70,6 +70,7 @@ pub const BrokerSpec = struct {
     messages_buffer_size: u32 = 1_048_576,
     sender_cpu_affinity: ?u32 = null,
     receiver_cpu_affinity: ?u32 = null,
+    benchmark_latency_tracing_enabled: bool = false,
 };
 
 /// Describes the configuration for a service process to be started by
@@ -457,11 +458,11 @@ test "TestHarness markFailed preserves environment" {
     h.deinit();
 
     // Then — the directory should still exist because we marked failed.
-    var dir = try fs.cwd().openDir(base_copy, .{});
-    dir.close();
+    var dir = try io_compat.openDir(base_copy, .{});
+    dir.close(io_compat.io());
 
     // Manual cleanup.
-    try fs.cwd().deleteTree(base_copy);
+    try io_compat.deleteTree(base_copy);
 }
 
 test "TestHarness setBinDir overrides default" {

@@ -36,7 +36,7 @@ fn messageHandler(_: i32, payload: []const u8) void {
     received_leader_changes += 1;
 
     var buf: [512]u8 = undefined;
-    var stdout_w = std.fs.File.stdout().writer(&buf);
+    var stdout_w = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &buf);
     const stdout = &stdout_w.interface;
     stdout.print("leader-test: received control msg #{d}, len={d}\n", .{
         received_leader_changes,
@@ -47,7 +47,7 @@ fn messageHandler(_: i32, payload: []const u8) void {
 
 // ── Arg parsing helpers ──────────────────────────────────────────────
 
-fn parseStringArg(args: []const []const u8, flag: []const u8, default: []const u8) []const u8 {
+fn parseStringArg(args: []const [:0]const u8, flag: []const u8, default: []const u8) []const u8 {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {
@@ -57,7 +57,7 @@ fn parseStringArg(args: []const []const u8, flag: []const u8, default: []const u
     return default;
 }
 
-fn parseIntArg(comptime T: type, args: []const []const u8, flag: []const u8, default: T) T {
+fn parseIntArg(comptime T: type, args: []const [:0]const u8, flag: []const u8, default: T) T {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {
@@ -79,13 +79,14 @@ fn installSignalHandler() void {
     std.posix.sigaction(std.posix.SIG.INT, &handler, null);
 }
 
-fn signalHandler(_: c_int) callconv(.c) void {
+fn signalHandler(_: std.posix.SIG) callconv(.c) void {
     shutdown_requested.store(true, .release);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
     const allocator = switch (builtin.mode) {
         .Debug, .ReleaseSafe => debug_alloc.allocator(),
@@ -95,8 +96,7 @@ pub fn main() !void {
         _ = debug_alloc.deinit();
     };
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     // ── Parse CLI arguments ──────────────────────────────────────────
 
@@ -107,10 +107,10 @@ pub fn main() !void {
     const max_runtime_ms: u64 = parseIntArg(u64, args, "--max-runtime-ms", 30000);
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_w.interface;
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_w = std.fs.File.stderr().writer(&stderr_buf);
+    var stderr_w = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_w.interface;
 
     try stdout.print("leader-test: starting service_name={s} group={s} storage_path={s} max_runtime_ms={d}\n", .{
@@ -183,7 +183,7 @@ pub fn main() !void {
         }
 
         // Sleep 100ms between iterations.
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        brz_common.platform.sleepNanos(100 * std.time.ns_per_ms);
     }
 
     // ── Shutdown ─────────────────────────────────────────────────────
