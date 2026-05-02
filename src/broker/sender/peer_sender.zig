@@ -5,6 +5,7 @@
 //! and reconnection backoff state.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const WriteQueue = @import("write_queue.zig").WriteQueue;
 const constants = @import("brz_common").platform.constants;
 
@@ -49,6 +50,27 @@ pub const PeerSender = struct {
     /// Monotonic timestamp (ns) of next reconnection attempt.
     next_reconnect_ns: i64,
 
+    // ── io_uring async send state ────────────────────────────────────
+
+    /// Whether an io_uring send is in flight for this peer.
+    io_pending: bool,
+
+    /// Number of frames submitted in the current in-flight writev batch.
+    in_flight_frames: u32,
+
+    /// Total bytes submitted in the current in-flight writev batch.
+    in_flight_bytes: usize,
+
+    /// Generation counter, incremented on each disconnect/reconnect.
+    /// Used to ignore stale CQEs from previous connections.
+    io_generation: u8,
+
+    /// Per-peer iovec storage for io_uring writev batches.
+    /// Must remain valid from SQE submission until CQE harvest.
+    send_iovecs: [max_send_batch]std.posix.iovec_const,
+
+    pub const max_send_batch = 64;
+
     const Self = @This();
 
     pub fn init(
@@ -71,6 +93,11 @@ pub const PeerSender = struct {
             .last_send_ns = 0,
             .reconnect_delay_ms = constants.default_reconnect_initial_delay_ms,
             .next_reconnect_ns = 0,
+            .io_pending = false,
+            .in_flight_frames = 0,
+            .in_flight_bytes = 0,
+            .io_generation = 0,
+            .send_iovecs = undefined,
         };
     }
 
@@ -84,6 +111,10 @@ pub const PeerSender = struct {
         self.write_blocked = false;
         self.partial_write_offset = 0;
         self.write_queue.clear();
+        self.io_generation +%= 1;
+        self.io_pending = false;
+        self.in_flight_frames = 0;
+        self.in_flight_bytes = 0;
     }
 
     /// Advance the reconnect backoff timer (exponential with cap).
@@ -104,6 +135,30 @@ pub const PeerSender = struct {
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         if (self.socket_fd >= 0) std.posix.close(self.socket_fd);
         self.write_queue.deinit(allocator);
+    }
+
+    // ── io_uring user_data encoding ──────────────────────────────────
+
+    /// Encode peer identity into io_uring user_data for CQE correlation.
+    /// Layout: [0:7]=node_id, [8:15]=generation, [16:31]=frame_count
+    pub fn encodeUserData(self: *const Self, frame_count: u16) u64 {
+        return @as(u64, self.node_id) |
+            (@as(u64, self.io_generation) << 8) |
+            (@as(u64, frame_count) << 16);
+    }
+
+    /// Decode user_data from a CQE back to node_id, generation, frame_count.
+    pub fn decodeUserData(user_data: u64) struct { node_id: u8, generation: u8, frame_count: u16 } {
+        return .{
+            .node_id = @truncate(user_data),
+            .generation = @truncate(user_data >> 8),
+            .frame_count = @truncate(user_data >> 16),
+        };
+    }
+
+    /// Return the number of frames available to submit (excluding in-flight ones).
+    pub fn availableToSend(self: *const Self) u32 {
+        return self.write_queue.count -| self.in_flight_frames;
     }
 };
 

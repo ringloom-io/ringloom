@@ -262,7 +262,11 @@ pub const ReceiverEventLoop = struct {
         // ── Phase 3: Read from connected peers ───────────────────────
         work_count += self.readFromPeers();
 
-        // ── Phase 4: Check heartbeat timeouts ─────────────────────────
+        // ── Phase 4: Read again to catch data that arrived during
+        //             frame parsing (mirrors sender double-flush) ──────
+        work_count += self.readFromPeers();
+
+        // ── Phase 5: Check heartbeat timeouts ─────────────────────────
         work_count += self.checkHeartbeatTimeouts(now_ns);
 
         return work_count;

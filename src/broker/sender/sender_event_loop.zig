@@ -10,6 +10,7 @@
 //! control.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const brz_common = @import("brz_common");
 const constants = brz_common.platform.constants;
 const Clock = brz_common.platform.clock.Clock;
@@ -29,6 +30,10 @@ const PeerSender = @import("peer_sender.zig").PeerSender;
 const ConnectionState = @import("peer_sender.zig").ConnectionState;
 const SendBufferPool = @import("send_buffer_pool.zig").SendBufferPool;
 const SenderCommand = @import("sender_command.zig").SenderCommand;
+
+const linux = std.os.linux;
+const posix = std.posix;
+const log = std.log.scoped(.sender);
 
 // ── Counter IDs ───────────────────────────────────────────────────────
 
@@ -157,10 +162,17 @@ pub const SenderEventLoop = struct {
     /// FNV-1a hash of the cluster group name (for handshake validation).
     group_name_hash: u32,
 
-    /// Pre-allocated iovec array for writev batching.
-    writev_iovecs: [max_writev_batch]std.posix.iovec_const = undefined,
+    /// Pre-allocated iovec array for writev batching (sync fallback path).
+    writev_iovecs: [max_writev_batch]posix.iovec_const = undefined,
+
+    /// io_uring ring for batched async TCP sends (Linux only).
+    io_ring: ?linux.IoUring,
+
+    /// CQE harvest buffer.
+    cqe_buf: [max_cqe_batch]linux.io_uring_cqe = undefined,
 
     const max_writev_batch = 64;
+    const max_cqe_batch = 64;
 
     const Self = @This();
 
@@ -180,6 +192,12 @@ pub const SenderEventLoop = struct {
         allocator: std.mem.Allocator,
         group_name: []const u8,
     ) !Self {
+        // io_uring sender is available for multi-peer scenarios where
+        // batching many writevs into one io_uring_enter() reduces syscalls.
+        // For the common 1-peer case, sync writev is faster (no SQE/CQE overhead).
+        // Disabled by default; enable via broker config for high fan-out topologies.
+        const io_ring: ?linux.IoUring = null;
+
         return .{
             .send_ring_buffer = send_ring_buffer,
             .peers = PeerMap.init(),
@@ -191,10 +209,15 @@ pub const SenderEventLoop = struct {
             .allocator = allocator,
             .pending_send_count = 0,
             .group_name_hash = HandshakeFrame.hashGroupName(group_name),
+            .io_ring = io_ring,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.io_ring) |*ring| {
+            ring.deinit();
+        }
+        self.io_ring = null;
         var iter = self.peers.iterator();
         while (iter.next()) |peer| {
             peer.deinit(self.allocator);
@@ -210,33 +233,60 @@ pub const SenderEventLoop = struct {
         const now_ns = Clock.monotonicNanos();
         self.pending_send_count = 0;
 
-        // ── Phase 1: Flush write queues to TCP first ─────────────────
+        // ── Phase 0: Harvest io_uring completions ────────────────────
+        // Process completed sends before flushing new data to free queue
+        // space and clear io_pending flags as early as possible.
+        if (self.io_ring != null) {
+            work_count += self.harvestSendCompletions();
+        }
+
+        // ── Phase 1: Flush write queues to TCP ───────────────────────
         // Flush before draining to keep write queues shallow and reduce
         // overflow-induced drops under high message rates.
         work_count += self.flushWriteQueues();
 
+        // ── Phase 1b: Immediate harvest after io_uring submit ────────
+        // For io_uring, the kernel often completes socket writes immediately
+        // (just copying to TCP send buffer). Harvesting here eliminates the
+        // 1-cycle latency penalty for these fast completions.
+        if (self.io_ring != null) {
+            work_count += self.harvestSendCompletions();
+        }
+
         // ── Phase 2: Drain send ring buffer ──────────────────────────
         // Limit drain to available write queue space to apply backpressure
         // when TCP can't keep up, preventing write queue overflow.
-        const drain_limit = self.availableWriteQueueSpace();
-        if (drain_limit > 0) {
-            tls_self = self;
-            defer {
-                tls_self = null;
+        {
+            const drain_limit = self.availableWriteQueueSpace();
+            if (drain_limit > 0) {
+                tls_self = self;
+                defer {
+                    tls_self = null;
+                }
+                work_count += self.send_ring_buffer.read(
+                    onOutboundMessageThunk,
+                    @min(constants.send_batch_limit, drain_limit),
+                );
             }
-            work_count += self.send_ring_buffer.read(
-                onOutboundMessageThunk,
-                @min(constants.send_batch_limit, drain_limit),
-            );
         }
 
-        // ── Phase 3: Send heartbeats ─────────────────────────────────
+        // ── Phase 3: Flush newly drained messages ────────────────────
+        // Second flush to immediately send messages just drained from
+        // the ring buffer, minimizing latency for the common case.
+        work_count += self.flushWriteQueues();
+
+        // ── Phase 3b: Immediate harvest after second flush ───────────
+        if (self.io_ring != null) {
+            work_count += self.harvestSendCompletions();
+        }
+
+        // ── Phase 4: Send heartbeats ─────────────────────────────────
         if (now_ns - self.last_heartbeat_ns >= constants.default_heartbeat_interval_ns) {
             self.sendHeartbeats(now_ns);
             self.last_heartbeat_ns = now_ns;
         }
 
-        // ── Phase 4: Process reconnections ───────────────────────────
+        // ── Phase 5: Process reconnections ───────────────────────────
         self.processReconnections(now_ns);
 
         work_count += self.pending_send_count;
@@ -301,7 +351,7 @@ pub const SenderEventLoop = struct {
             // Only send heartbeat if no data was sent within the interval.
             if (now_ns - peer.last_send_ns < constants.default_heartbeat_interval_ns) continue;
 
-            // Build and send a heartbeat frame directly to TCP.
+            // Build a heartbeat frame.
             var heartbeat: TcpFrameHeader = .{
                 .frame_length = constants.tcp_header_length,
                 .flags = 0x01, // heartbeat flag
@@ -312,25 +362,38 @@ pub const SenderEventLoop = struct {
                 .template_id = constants.heartbeat_template_id,
                 .correlation_id = 0,
             };
-            const heartbeat_bytes = std.mem.asBytes(&heartbeat);
-            const written = std.posix.write(peer.socket_fd, heartbeat_bytes) catch |err| {
-                switch (err) {
-                    error.WouldBlock => continue,
-                    else => {
-                        self.disconnectPeer(peer);
-                        continue;
-                    },
-                }
-            };
-            if (written < heartbeat_bytes.len) {
-                // Partial heartbeat write — treat as error, disconnect.
-                self.disconnectPeer(peer);
-                continue;
-            }
 
-            peer.last_send_ns = now_ns;
-            self.counters.increment(self.counter_ids.heartbeats_sent);
-            self.pending_send_count += 1;
+            if (self.io_ring != null) {
+                // With io_uring: route heartbeat through write queue to avoid
+                // mixing sync writes with async I/O on the same fd.
+                const heartbeat_bytes = std.mem.asBytes(&heartbeat);
+                peer.write_queue.enqueue(heartbeat_bytes) catch {
+                    continue;
+                };
+                peer.last_send_ns = now_ns;
+                self.counters.increment(self.counter_ids.heartbeats_sent);
+                self.pending_send_count += 1;
+            } else {
+                // Sync path: direct write.
+                const heartbeat_bytes = std.mem.asBytes(&heartbeat);
+                const written = posix.write(peer.socket_fd, heartbeat_bytes) catch |err| {
+                    switch (err) {
+                        error.WouldBlock => continue,
+                        else => {
+                            self.disconnectPeer(peer);
+                            continue;
+                        },
+                    }
+                };
+                if (written < heartbeat_bytes.len) {
+                    self.disconnectPeer(peer);
+                    continue;
+                }
+
+                peer.last_send_ns = now_ns;
+                self.counters.increment(self.counter_ids.heartbeats_sent);
+                self.pending_send_count += 1;
+            }
         }
     }
 
@@ -338,6 +401,7 @@ pub const SenderEventLoop = struct {
 
     /// Return the minimum available write queue space across all connected peers.
     /// This limits ring buffer drain to prevent write queue overflow.
+    /// With io_uring, in-flight frames still occupy queue slots until CQE arrives.
     fn availableWriteQueueSpace(self: *Self) u32 {
         var min_space: u32 = constants.send_batch_limit;
         var has_connected = false;
@@ -357,6 +421,138 @@ pub const SenderEventLoop = struct {
     // ── TCP Write Queue Flush ────────────────────────────────────────
 
     fn flushWriteQueues(self: *Self) u32 {
+        if (self.io_ring != null) {
+            return self.flushWriteQueuesIoUring();
+        }
+        return self.flushWriteQueuesSync();
+    }
+
+    /// io_uring path: prepare writev SQEs for all peers, submit in one batch.
+    /// Only one outstanding writev per socket to prevent TCP stream corruption
+    /// on partial writes (second writev would interleave with incomplete first).
+    fn flushWriteQueuesIoUring(self: *Self) u32 {
+        var ring = &(self.io_ring.?);
+        var sqe_count: u32 = 0;
+
+        var peer_iter = self.peers.iterator();
+        while (peer_iter.next()) |peer| {
+            if (peer.state != .connected) continue;
+            if (peer.io_pending) continue;
+            if (peer.write_queue.isEmpty()) continue;
+
+            // Fill iovecs from queued frames (no in-flight since io_pending guards).
+            const batch_limit = @min(@as(u32, PeerSender.max_send_batch), constants.write_budget_per_peer);
+            const n = peer.write_queue.fillIovecsFrom(
+                &peer.send_iovecs,
+                0,
+                peer.partial_write_offset,
+                batch_limit,
+            );
+            if (n == 0) continue;
+
+            // Compute total bytes for this batch.
+            var total_bytes: usize = 0;
+            for (peer.send_iovecs[0..n]) |iov| total_bytes += iov.len;
+
+            // Encode user_data with node_id, generation, and frame count.
+            const user_data = peer.encodeUserData(@intCast(n));
+
+            // Submit writev SQE.
+            _ = ring.writev(user_data, peer.socket_fd, peer.send_iovecs[0..n], 0) catch {
+                // SQ full — skip this peer, will retry next cycle.
+                continue;
+            };
+
+            peer.io_pending = true;
+            peer.in_flight_frames = n;
+            peer.in_flight_bytes = total_bytes;
+            sqe_count += 1;
+        }
+
+        // Single syscall to submit all prepared SQEs.
+        if (sqe_count > 0) {
+            _ = ring.submit() catch {};
+        }
+
+        return 0; // Actual completion counting happens in harvestSendCompletions.
+    }
+
+    /// Harvest io_uring CQEs for completed sends.
+    /// With io_pending, each peer has at most one outstanding batch.
+    fn harvestSendCompletions(self: *Self) u32 {
+        var ring = &(self.io_ring.?);
+        var work_count: u32 = 0;
+
+        const count = ring.copy_cqes(&self.cqe_buf, 0) catch 0;
+
+        for (self.cqe_buf[0..count]) |cqe| {
+            const decoded = PeerSender.decodeUserData(cqe.user_data);
+            const peer = self.peers.get(decoded.node_id) orelse continue;
+
+            // Stale CQE from a previous connection generation — ignore.
+            if (decoded.generation != peer.io_generation) continue;
+
+            peer.io_pending = false;
+
+            if (cqe.res <= 0) {
+                // Error or zero-byte send — disconnect.
+                peer.in_flight_frames = 0;
+                peer.in_flight_bytes = 0;
+                self.disconnectPeer(peer);
+                continue;
+            }
+
+            const written: usize = @intCast(cqe.res);
+
+            // Walk the WriteQueue from head to determine which frames
+            // were fully written.
+            var bytes_remaining = written;
+            var frames_completed: u32 = 0;
+            while (frames_completed < decoded.frame_count) {
+                const frame_size = peer.write_queue.peekFrameSize(frames_completed);
+                if (frame_size == 0) break;
+                const effective_size: usize = if (frames_completed == 0)
+                    frame_size - peer.partial_write_offset
+                else
+                    frame_size;
+                if (bytes_remaining >= effective_size) {
+                    bytes_remaining -= effective_size;
+                    frames_completed += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Dequeue fully-written frames.
+            for (0..frames_completed) |_| {
+                peer.write_queue.dequeue();
+            }
+
+            peer.in_flight_frames -|= frames_completed;
+            peer.in_flight_bytes -|= (written - bytes_remaining);
+
+            if (frames_completed > 0) {
+                peer.last_send_ns = Clock.monotonicNanos();
+                work_count += frames_completed;
+            }
+
+            if (bytes_remaining > 0) {
+                // Partial write — update offset into the partially-written frame.
+                if (frames_completed == 0) {
+                    peer.partial_write_offset += bytes_remaining;
+                } else {
+                    peer.partial_write_offset = bytes_remaining;
+                }
+            } else {
+                peer.partial_write_offset = 0;
+            }
+        }
+
+        return work_count;
+    }
+
+    /// Synchronous writev path (fallback when io_uring is not available).
+    fn flushWriteQueuesSync(self: *Self) u32 {
         var work_count: u32 = 0;
 
         var peer_iter = self.peers.iterator();
@@ -375,7 +571,7 @@ pub const SenderEventLoop = struct {
                 var total_bytes: usize = 0;
                 for (iovs) |iov| total_bytes += iov.len;
 
-                const written = std.posix.writev(peer.socket_fd, iovs) catch |err| {
+                const written = posix.writev(peer.socket_fd, iovs) catch |err| {
                     switch (err) {
                         error.WouldBlock => {
                             peer.write_blocked = true;
@@ -532,6 +728,9 @@ pub const SenderEventLoop = struct {
         peer.resetBackoff();
         peer.write_blocked = false;
         peer.partial_write_offset = 0;
+        peer.io_pending = false;
+        peer.in_flight_frames = 0;
+        peer.in_flight_bytes = 0;
         self.counters.increment(self.counter_ids.peers_connected);
     }
 
@@ -543,6 +742,11 @@ pub const SenderEventLoop = struct {
         peer.state = .disconnected;
         peer.write_blocked = false;
         peer.partial_write_offset = 0;
+        // Bump generation so stale CQEs from this connection are ignored.
+        peer.io_generation +%= 1;
+        peer.io_pending = false;
+        peer.in_flight_frames = 0;
+        peer.in_flight_bytes = 0;
         peer.advanceBackoff(Clock.monotonicNanos());
         self.counters.increment(self.counter_ids.peers_disconnected);
     }

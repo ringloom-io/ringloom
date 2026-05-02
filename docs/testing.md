@@ -137,14 +137,14 @@ zig build perf
 > suppresses stdout for passing tests, so result JSON files are not easily
 > inspectable. Use the manual script (Option B) to capture results.
 
-### Option B: Manual benchmark script
+### Option B: Manual benchmark script (all sizes)
 
-The `scripts/run-benchmarks.sh` script builds binaries and orchestrates brokers
-and services directly, writing JSON result files to an output directory.
+The `scripts/run-benchmarks.sh` script orchestrates brokers and services
+directly, writing JSON result files to an output directory.
 
 ```bash
-# Build binaries first
-zig build install && zig build test-bins
+# Build ReleaseFast binaries first
+zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=ReleaseFast
 
 # Run all benchmarks (local + cross-broker)
 ./scripts/run-benchmarks.sh
@@ -162,8 +162,39 @@ zig build install && zig build test-bins
 Results are written to `/tmp/brz-bench-results/` by default. Each test produces
 two JSON files:
 
-- `local-latency-ping-<size>.json` — send-side metrics (throughput, send latency)
-- `local-latency-echo-<size>.json` — receiver-side metrics (end-to-end one-way latency)
+- `*-latency-ping-<size>.json` — send-side metrics (throughput, send latency)
+- `*-latency-echo-<size>.json` — receiver-side metrics (end-to-end one-way latency)
+
+### Option C: Single-size benchmark (best-of-N)
+
+The `scripts/bench-single-size.sh` script runs a single message size repeatedly
+and keeps the best result. This is the recommended approach for getting clean
+numbers, since you can close CPU-intensive applications (IDEs, agents, browsers)
+and run each size in isolation.
+
+```bash
+# Build ReleaseFast binaries first
+zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=ReleaseFast
+
+# Best-of-10 for 128 B cross-broker
+./scripts/bench-single-size.sh 128 10
+
+# Best-of-5 for 512 B cross-broker
+./scripts/bench-single-size.sh 512 5
+
+# Best-of-5 for 32 B local IPC
+./scripts/bench-single-size.sh 32 5 --local
+
+# Custom output directory
+./scripts/bench-single-size.sh 1024 5 --output-dir ./my-results
+```
+
+Best results are saved to `/tmp/brz-bench-best/` by default. The script prints
+a summary with throughput and latency percentiles after all runs complete.
+
+**Tip:** For the most reliable results, run each size independently with all
+other CPU-intensive processes stopped. Benchmark variance on a busy system can
+be extreme — throughput can fluctuate 2–3× between runs due to background load.
 
 The script tests message sizes: 32, 128, 512, 1024, and 4096 bytes.
 
@@ -495,7 +526,8 @@ On failure, upload:
 
 ```text
 scripts/
-└── run-benchmarks.sh          # Manual benchmark orchestration script
+├── run-benchmarks.sh          # Manual benchmark orchestration script (all sizes)
+└── bench-single-size.sh       # Single-size best-of-N benchmark script
 src/
 ├── bin/                    # Executable entry points
 │   ├── brz_broker_main.zig

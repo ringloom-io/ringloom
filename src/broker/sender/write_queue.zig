@@ -102,13 +102,28 @@ pub const WriteQueue = struct {
         self.count -= 1;
     }
 
+    /// Peek at the size of the frame at `offset` slots from the head.
+    /// Returns 0 if offset is beyond the queue.
+    pub fn peekFrameSize(self: *const Self, offset: u32) u32 {
+        if (offset >= self.count) return 0;
+        const slot_index = (self.head +% offset) & self.mask;
+        return self.lengths[slot_index];
+    }
+
     /// Return the number of contiguous frames available for vectored write.
     pub fn contiguousCount(self: *const Self, limit: u32) u32 {
-        if (self.count == 0) return 0;
+        return self.contiguousCountFrom(0, limit);
+    }
 
-        const start = self.head & self.mask;
+    /// Return the number of contiguous frames starting `skip` frames from head.
+    /// Used by io_uring path to skip in-flight frames.
+    pub fn contiguousCountFrom(self: *const Self, skip: u32, limit: u32) u32 {
+        if (self.count <= skip) return 0;
+        const available = self.count - skip;
+
+        const start = (self.head +% skip) & self.mask;
         const until_wrap = self.capacity - start;
-        return @min(@min(self.count, until_wrap), limit);
+        return @min(@min(available, until_wrap), limit);
     }
 
     /// Fill an iovec array with pointers to contiguous queued frames.
@@ -120,11 +135,22 @@ pub const WriteQueue = struct {
         first_offset: usize,
         limit: u32,
     ) u32 {
-        const n = self.contiguousCount(@min(limit, @as(u32, @intCast(iovecs.len))));
+        return self.fillIovecsFrom(iovecs, 0, first_offset, limit);
+    }
+
+    /// Fill iovecs starting `skip` frames from head (to skip in-flight frames).
+    pub fn fillIovecsFrom(
+        self: *const Self,
+        iovecs: []std.posix.iovec_const,
+        skip: u32,
+        first_offset: usize,
+        limit: u32,
+    ) u32 {
+        const n = self.contiguousCountFrom(skip, @min(limit, @as(u32, @intCast(iovecs.len))));
         if (n == 0) return 0;
 
         for (0..n) |i| {
-            const slot_index = (self.head +% @as(u32, @intCast(i))) & self.mask;
+            const slot_index = (self.head +% skip +% @as(u32, @intCast(i))) & self.mask;
             const len = self.lengths[slot_index];
             const offset = @as(usize, slot_index) * @as(usize, self.max_frame_size);
 
