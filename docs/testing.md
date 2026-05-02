@@ -140,7 +140,13 @@ zig build perf
 ### Option B: Manual benchmark script (all sizes)
 
 The `scripts/run-benchmarks.sh` script orchestrates brokers and services
-directly, writing JSON result files to an output directory.
+directly, writing JSON result files to an output directory. It now captures
+both:
+
+- **paced transit latency** runs (`send_interval_ns=10000`) for meaningful
+  end-to-end latency baselines
+- **saturated benchmark** runs (`send_interval_ns=0`) for throughput and
+  queueing behavior under load
 
 ```bash
 # Build ReleaseFast binaries first
@@ -159,11 +165,17 @@ zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=Relea
 ./scripts/run-benchmarks.sh --output-dir ./my-results
 ```
 
-Results are written to `/tmp/brz-bench-results/` by default. Each test produces
-two JSON files:
+Results are written to `/tmp/brz-bench-results/` by default.
 
-- `*-latency-ping-<size>.json` — send-side metrics (throughput, send latency)
-- `*-latency-echo-<size>.json` — receiver-side metrics (end-to-end one-way latency)
+- **Local** runs publish both ping and echo JSON, because the local throughput
+  table intentionally uses the ping-side send rate as a same-host IPC metric.
+- **Remote** runs publish only the echo-side JSON:
+  - `remote-transit-latency-echo-<size>.json` — paced end-to-end one-way latency
+  - `remote-saturated-benchmark-echo-<size>.json` — saturated queueing latency under load
+
+Remote ping JSON is kept internal to the harness because those send-side values
+only measure enqueue into broker A's local ring buffer, not actual cross-broker
+transport behavior.
 
 ### Option C: Single-size benchmark (best-of-N)
 
@@ -571,7 +583,6 @@ src/
 │   ├── local_latency_bench.zig
 │   ├── local_throughput_bench.zig
 │   ├── remote_latency_bench.zig
-│   ├── remote_throughput_bench.zig
 │   ├── backpressure_bench.zig
 │   └── recovery_bench.zig
 └── testing/                # Test harness library (brz_testing module)

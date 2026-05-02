@@ -12,7 +12,6 @@ comptime {
     _ = @import("local_latency_bench.zig");
     _ = @import("local_throughput_bench.zig");
     _ = @import("remote_latency_bench.zig");
-    _ = @import("remote_throughput_bench.zig");
     _ = @import("backpressure_bench.zig");
     _ = @import("recovery_bench.zig");
 }

@@ -57,7 +57,8 @@ WORK_DIR=$(mktemp -d /tmp/brz-bench-XXXXXX)
 STORAGE="$WORK_DIR/storage"
 CONFIGS="$WORK_DIR/config"
 LOGS="$WORK_DIR/logs"
-mkdir -p "$STORAGE/brz-test/services" "$CONFIGS" "$LOGS" "$RESULTS_DIR"
+INTERNAL_RESULTS="$WORK_DIR/internal-results"
+mkdir -p "$STORAGE/brz-test/services" "$CONFIGS" "$LOGS" "$INTERNAL_RESULTS" "$RESULTS_DIR"
 
 PIDS=()
 
@@ -98,10 +99,13 @@ stop_pid() {
     PIDS=("${new_pids[@]+"${new_pids[@]}"}")
 }
 
-# ── Local latency benchmark ──────────────────────────────────────────
+# ── Local benchmarks ────────────────────────────────────────────────
 
 run_local_bench() {
     local SIZE=$1
+    local PREFIX="$2"
+    local SEND_INTERVAL_NS="$3"
+    local LABEL="$4"
     local TAG="${SIZE}B"
     local WARMUP=10000
     local COUNT=100000
@@ -111,7 +115,7 @@ run_local_bench() {
         COUNT=50000
     fi
 
-    echo "  local-latency-$TAG ..."
+    echo "  $LABEL-$TAG ..."
 
     # Single broker.
     cat > "$CONFIGS/broker_local.properties" << EOF
@@ -143,7 +147,7 @@ EOF
         --broker-node-id 1 \
         --quiet \
         --idle-strategy yielding \
-        --result-file "$RESULTS_DIR/local-latency-echo-$TAG.json" \
+        --result-file "$RESULTS_DIR/$PREFIX-echo-$TAG.json" \
         > "$LOGS/echo_local_$TAG.log" 2>&1 &
     PIDS+=($!)
     local ECHO_PID=${PIDS[-1]}
@@ -160,8 +164,9 @@ EOF
         --message-size "$SIZE" \
         --warmup-count "$WARMUP" \
         --idle-strategy yielding \
-        --result-file "$RESULTS_DIR/local-latency-ping-$TAG.json" \
+        --result-file "$RESULTS_DIR/$PREFIX-ping-$TAG.json" \
         --spin-timeout-ms 100 \
+        --send-interval-ns "$SEND_INTERVAL_NS" \
         > "$LOGS/ping_local_$TAG.log" 2>&1
 
     # Drain and stop.
@@ -175,7 +180,7 @@ EOF
     mkdir -p "$STORAGE/brz-test/services"
 }
 
-# ── Cross-broker latency benchmark ───────────────────────────────────
+# ── Cross-broker benchmarks ──────────────────────────────────────────
 
 write_two_broker_configs() {
     cat > "$CONFIGS/broker_1.properties" << EOF
@@ -213,7 +218,11 @@ EOF
 
 run_remote_bench() {
     local SIZE=$1
+    local PREFIX="$2"
+    local SEND_INTERVAL_NS="$3"
+    local LABEL="$4"
     local TAG="${SIZE}B"
+    local PING_RESULT_FILE="$INTERNAL_RESULTS/$PREFIX-ping-$TAG.json"
     local WARMUP=10000
     local COUNT=100000
 
@@ -222,7 +231,7 @@ run_remote_bench() {
         COUNT=50000
     fi
 
-    echo "  remote-latency-$TAG ..."
+    echo "  $LABEL-$TAG ..."
 
     write_two_broker_configs
 
@@ -248,7 +257,7 @@ run_remote_bench() {
         --broker-node-id 2 \
         --quiet \
         --idle-strategy yielding \
-        --result-file "$RESULTS_DIR/remote-latency-echo-$TAG.json" \
+        --result-file "$RESULTS_DIR/$PREFIX-echo-$TAG.json" \
         > "$LOGS/echo_remote_$TAG.log" 2>&1 &
     PIDS+=($!)
     local ECHO_PID=${PIDS[-1]}
@@ -265,8 +274,9 @@ run_remote_bench() {
         --message-size "$SIZE" \
         --warmup-count "$WARMUP" \
         --idle-strategy yielding \
-        --result-file "$RESULTS_DIR/remote-latency-ping-$TAG.json" \
+        --result-file "$PING_RESULT_FILE" \
         --spin-timeout-ms 100 \
+        --send-interval-ns "$SEND_INTERVAL_NS" \
         > "$LOGS/ping_remote_$TAG.log" 2>&1
 
     sleep 2
@@ -285,20 +295,34 @@ echo "BRZ Broker Benchmark Suite"
 echo "=========================="
 echo "Binaries:   $BIN"
 echo "Results:    $RESULTS_DIR"
+echo "Transit:    paced (10,000 ns send interval)"
+echo "Saturated:  unpaced (0 ns send interval)"
 echo ""
 
 if [[ "$RUN_LOCAL" == true ]]; then
-    echo "Running local (single-broker) latency benchmarks..."
+    echo "Running local (single-broker) transit latency benchmarks..."
     for SIZE in 32 128 512 1024 4096; do
-        run_local_bench $SIZE
+        run_local_bench "$SIZE" "local-transit-latency" 10000 "local-transit-latency"
+    done
+    echo ""
+
+    echo "Running local (single-broker) saturated benchmark runs..."
+    for SIZE in 32 128 512 1024 4096; do
+        run_local_bench "$SIZE" "local-saturated-benchmark" 0 "local-saturated-benchmark"
     done
     echo ""
 fi
 
 if [[ "$RUN_REMOTE" == true ]]; then
-    echo "Running cross-broker latency benchmarks..."
+    echo "Running cross-broker transit latency benchmarks..."
     for SIZE in 32 128 512 1024 4096; do
-        run_remote_bench $SIZE
+        run_remote_bench "$SIZE" "remote-transit-latency" 10000 "remote-transit-latency"
+    done
+    echo ""
+
+    echo "Running cross-broker saturated benchmark runs..."
+    for SIZE in 32 128 512 1024 4096; do
+        run_remote_bench "$SIZE" "remote-saturated-benchmark" 0 "remote-saturated-benchmark"
     done
     echo ""
 fi

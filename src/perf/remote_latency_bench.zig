@@ -85,13 +85,6 @@ fn runRemoteLatencyBench(
     });
     try harness.waitForServiceReady(echo, service_ready_timeout_ms);
 
-    const result_path = try std.fmt.allocPrint(
-        allocator,
-        "{s}/remote-latency-{s}.json",
-        .{ harness.env.results_path, tag },
-    );
-    defer allocator.free(result_path);
-
     // When — ping service on broker A sends messages across brokers with
     //        spinning backpressure to reduce send failures.
     const ping = try harness.startService(.{
@@ -103,7 +96,6 @@ fn runRemoteLatencyBench(
             "--message-count",   message_count,
             "--message-size",    size_str,
             "--warmup-count",    warmup_count,
-            "--result-file",     result_path,
             "--spin-timeout-ms", "100",
         },
     });
@@ -127,7 +119,7 @@ fn runRemoteLatencyBench(
 test "cross-broker round-trip latency - 32B" {
     // Given — two brokers on loopback, echo on B, ping on A (32-byte messages).
     // When  — ping sends 100 000 round-trip messages across brokers.
-    // Then  — ping exits successfully and writes latency results.
+    // Then  — ping exits successfully; echo writes latency results.
     try runRemoteLatencyBench(std.testing.allocator, "32", "32");
 }
 
@@ -141,20 +133,20 @@ test "cross-broker round-trip latency - 128B" {
 test "cross-broker round-trip latency - 512B" {
     // Given — two brokers on loopback, echo on B, ping on A (512-byte messages).
     // When  — ping sends 100 000 round-trip messages across brokers.
-    // Then  — ping exits successfully and writes latency results.
+    // Then  — ping exits successfully; echo writes latency results.
     try runRemoteLatencyBench(std.testing.allocator, "512", "512");
 }
 
 test "cross-broker round-trip latency - 1024B" {
     // Given — two brokers on loopback, echo on B, ping on A (1024-byte messages).
     // When  — ping sends 100 000 round-trip messages across brokers.
-    // Then  — ping exits successfully and writes latency results.
+    // Then  — ping exits successfully; echo writes latency results.
     try runRemoteLatencyBench(std.testing.allocator, "1024", "1024");
 }
 
 test "cross-broker round-trip latency - 4096B" {
     // Given — two brokers on loopback, echo on B, ping on A (4096-byte messages).
     // When  — ping sends 100 000 round-trip messages across brokers.
-    // Then  — ping exits successfully and writes latency results.
+    // Then  — ping exits successfully; echo writes latency results.
     try runRemoteLatencyBench(std.testing.allocator, "4096", "4096");
 }

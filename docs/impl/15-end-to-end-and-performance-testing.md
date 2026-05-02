@@ -1209,7 +1209,6 @@ Run on merge to main and nightly:
 Run nightly or manually:
 
 - latency benchmarks
-- throughput benchmarks
 - backpressure benchmarks
 - recovery benchmarks
 
@@ -1321,7 +1320,6 @@ test/
     local_latency_bench.zig
     local_throughput_bench.zig
     remote_latency_bench.zig
-    remote_throughput_bench.zig
     backpressure_bench.zig
     recovery_bench.zig
 ```
