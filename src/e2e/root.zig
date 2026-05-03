@@ -1,4 +1,4 @@
-//! End-to-end test suite for the BRZ broker.
+//! End-to-end test suite for the RingLoom broker.
 //!
 //! These tests spawn real broker and service processes, wait for readiness,
 //! and assert correctness of the integrated system.

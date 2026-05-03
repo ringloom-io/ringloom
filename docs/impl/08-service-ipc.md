@@ -25,7 +25,7 @@ All code targets **Zig 0.15.x** stable.
 6. [Service Discovery (Client Side)](#6-service-discovery-client-side)
 7. [ServiceClient — Client-Side Proxy](#7-serviceclient--client-side-proxy)
 8. [ServiceInstance](#8-serviceinstance)
-9. [BrzEngine — Main Entry Point](#9-brzengine--main-entry-point)
+9. [RingLoomEngine — Main Entry Point](#9-ringloomengine--main-entry-point)
 10. [MessageConsumer](#10-messageconsumer)
 11. [ControlAgent](#11-controlagent)
 12. [Message Header — Routing Fields](#12-message-header--routing-fields)
@@ -99,7 +99,7 @@ MPSC ring buffer.
 │  Location:   Broker's metadata file, send buffer region                 │
 │  Direction:  Service writes, broker reads (MPSC)                        │
 │  Messages:   Cross-host outbound application messages                   │
-│              (routed by targetNodeId in the BRZ message header)         │
+│              (routed by targetNodeId in the RingLoom message header)         │
 │                                                                         │
 │  Channel 4: Producers → Service Messages                                │
 │  ────────────────────────────────────                                   │
@@ -142,7 +142,7 @@ When a service starts, it executes the following sequence:
 ### 3.1 Create Service Metadata File
 
 ```zig
-// src/service/brz_engine.zig
+// src/service/ringloom_engine.zig
 
 const std = @import("std");
 const platform = @import("../platform.zig");
@@ -364,7 +364,7 @@ target service's messages ring buffer. The broker is not involved. This is the f
 path:
 
 - **No broker hop** — the message does not traverse Channel 3 or any broker thread.
-- **No serialization beyond the application payload** — the BRZ message header is
+- **No serialization beyond the application payload** — the RingLoom message header is
   written directly into the ring buffer record.
 - **Sub-microsecond latency** — measured at ~100 ns for small messages on modern
   hardware.
@@ -387,7 +387,7 @@ Service A                                  Service B
 ### 4.1 IpcProducer
 
 The `IpcProducer` wraps a ring buffer backed by a target service's messages buffer
-region. It is the `BrzProducer` implementation for same-host IPC.
+region. It is the `RingLoomProducer` implementation for same-host IPC.
 
 ```zig
 // src/ipc/ipc_producer.zig
@@ -568,7 +568,7 @@ message into the target service's messages ring buffer.
 │           ▼                           │   │           │                            │
 │  ┌──────────────────┐   TCP frame     │   │  ┌──────────────────┐                 │
 │  │ Sender Event     │ ══════════════════════►│ Receiver Event   │                 │
-│  │ Loop (doc 05)    │   (brz_tcp)    │   │  │ Loop (doc 06)    │                 │
+│  │ Loop (doc 05)    │   (ringloom_tcp)    │   │  │ Loop (doc 06)    │                 │
 │  └──────────────────┘                 │   │  └──────────────────┘                 │
 │                                       │   │                                       │
 └───────────────────────────────────────┘   └───────────────────────────────────────┘
@@ -576,11 +576,11 @@ message into the target service's messages ring buffer.
 
 ### 5.1 Writing to the Broker's Send Ring Buffer
 
-The sending service builds a message with a BRZ message header (§12) containing
+The sending service builds a message with a RingLoom message header (§12) containing
 routing fields, then writes it into the broker's send ring buffer.
 
 ```zig
-// src/service/brz_engine.zig
+// src/service/ringloom_engine.zig
 
 const message_header = @import("../message/message_header.zig");
 const MessageHeader = message_header.MessageHeader;
@@ -601,7 +601,7 @@ fn sendToRemoteService(
     const total_len = MessageHeader.encoded_length + payload.len;
     var claim = send_rb.tryClaim(total_len) orelse return error.SendBufferFull;
 
-    // 3. Write the BRZ message header into the claimed region.
+    // 3. Write the RingLoom message header into the claimed region.
     //    The header contains all routing information the broker needs
     //    to forward this message to the correct remote host and service.
     var writable = claim.writableSlice();
@@ -644,7 +644,7 @@ fn onSendBufferMessage(msg_type: i32, payload: []const u8) void {
     } else {
         // Message is for a remote host — forward via TCP.
         // The MessageRoutingPublisher looks up the target node's TCP connection
-        // (via brz_tcp) and transmits the message.
+        // (via ringloom_tcp) and transmits the message.
         routing_publisher.sendToRemoteNode(header.target_node_id, payload);
     }
 }
@@ -773,7 +773,7 @@ pub const ServiceClient = struct {
     instances: std.ArrayList(ServiceInstance),
     balancer: load_balancer.ClientLoadBalancer,
 
-    /// IPC context — set during BrzEngine initialization.
+    /// IPC context — set during RingLoomEngine initialization.
     broker_meta: *BrokerMetadataFile,
     local_node_id: i16,
     local_service_id: i32,
@@ -1116,14 +1116,14 @@ pub const ServiceInstance = struct {
 
 ---
 
-## 9. BrzEngine — Main Entry Point
+## 9. RingLoomEngine — Main Entry Point
 
-The `BrzEngine` is the service's main entry point. It orchestrates the startup
+The `RingLoomEngine` is the service's main entry point. It orchestrates the startup
 sequence, owns the metadata files and agent threads, and provides the application-facing
 API for creating clients and registering message handlers.
 
 ```zig
-// src/service/brz_engine.zig
+// src/service/ringloom_engine.zig
 
 const std = @import("std");
 const platform = @import("../platform.zig");
@@ -1141,7 +1141,7 @@ const ThreadRunner = platform.ThreadRunner;
 const EventLoop = platform.EventLoop;
 const Clock = platform.Clock;
 
-pub const BrzEngine = struct {
+pub const RingLoomEngine = struct {
     config: ServiceConfig,
     allocator: std.mem.Allocator,
 
@@ -1165,7 +1165,7 @@ pub const BrzEngine = struct {
 
     const Self = @This();
 
-    /// Start the BrzEngine: create metadata, register with broker,
+    /// Start the RingLoomEngine: create metadata, register with broker,
     /// start heartbeat, launch agent threads.
     pub fn start(allocator: std.mem.Allocator, config: ServiceConfig) !*Self {
         var engine = try allocator.create(Self);
@@ -1497,7 +1497,7 @@ pub const ControlAgent = struct {
 
 ### 11.1 Threading Model Summary
 
-Each service (BrzEngine) runs two agent threads:
+Each service (RingLoomEngine) runs two agent threads:
 
 | Thread Name | Agent | Ring Buffer | Direction | Idle Strategy |
 |------------|-------|-------------|-----------|---------------|
@@ -1513,7 +1513,7 @@ are infrequent and sub-millisecond latency is not required.
 
 ## 12. Message Header — Routing Fields
 
-Every application message written to a ring buffer carries a BRZ message header as a
+Every application message written to a ring buffer carries a RingLoom message header as a
 prefix. This header contains the routing information needed by the broker (for cross-host
 messages) and by the service (for dispatching).
 
@@ -1522,7 +1522,7 @@ messages) and by the service (for dispatching).
 
 const std = @import("std");
 
-/// BRZ message header — fixed-size prefix on every application message.
+/// RingLoom message header — fixed-size prefix on every application message.
 ///
 /// Layout (28 bytes total):
 ///   +0:   correlation_id       (i64)
@@ -1621,7 +1621,7 @@ pub const MessageFragmentingProducer = struct {
     const Self = @This();
 
     pub fn init(producer: *IpcProducer, max_message_length: usize) Self {
-        // Reserve space for the ring buffer record header and BRZ message header.
+        // Reserve space for the ring buffer record header and RingLoom message header.
         const overhead = constants.ring_buffer_record_header_length +
             message_header.MessageHeader.encoded_length;
         return .{
@@ -1915,7 +1915,7 @@ test "two services exchange messages via direct IPC" {
     //        Service A will write to Service B's messages ring buffer.
 
     const service_b = try memory.ServiceMetadataFile.create(.{
-        .storage_path = "/tmp/brz-test",
+        .storage_path = "/tmp/ringloom-test",
         .group = "test",
         .service_name = "service-b",
         .service_id = 2,
@@ -1963,7 +1963,7 @@ const constants = @import("../memory/constants.zig");
 test "service registration: register → response → subscribe → instances" {
     // Given: a broker metadata file.
     const broker_meta = try memory.BrokerMetadataFile.create(.{
-        .storage_path = "/tmp/brz-test",
+        .storage_path = "/tmp/ringloom-test",
         .group = "test",
         .node_id = 1,
     });
@@ -2014,7 +2014,7 @@ const MessageHeader = message_header.MessageHeader;
 test "cross-host message written to send RB contains routing header" {
     // Given: a broker metadata file with a send ring buffer.
     const broker_meta = try memory.BrokerMetadataFile.create(.{
-        .storage_path = "/tmp/brz-test",
+        .storage_path = "/tmp/ringloom-test",
         .group = "test",
         .node_id = 1,
     });
@@ -2127,7 +2127,7 @@ src/
     ipc_test.zig                   # Unit tests: write + poll roundtrip
     ipc_integration_test.zig       # Integration: two services, direct IPC
   service/
-    brz_engine.zig                 # BrzEngine — main entry point, start/stop
+    ringloom_engine.zig                 # RingLoomEngine — main entry point, start/stop
     message_consumer.zig           # MessageConsumer — messages RB polling agent
     control_agent.zig              # ControlAgent — control RB polling + heartbeat
     service_client.zig             # ServiceClient — client proxy with load balancing
@@ -2138,7 +2138,7 @@ src/
     registration_integration_test.zig   # Integration: registration flow
     cross_host_integration_test.zig     # Integration: cross-host send RB routing
   message/
-    message_header.zig             # MessageHeader — BRZ routing header (28 bytes)
+    message_header.zig             # MessageHeader — RingLoom routing header (28 bytes)
     message_fragmenting_producer.zig    # Fragments large messages across records
     message_assembler.zig          # Reassembles fragments on consumer side
     control_encoding.zig           # Encode/decode control messages (register, etc.)
@@ -2148,7 +2148,7 @@ src/
 ### Module Dependency Graph
 
 ```
-brz_engine.zig
+ringloom_engine.zig
   ├── message_consumer.zig ─── ipc_consumer.zig ─── ring_buffer.zig (doc 03)
   ├── control_agent.zig ─────── ring_buffer.zig (doc 03)
   │                           └── control_encoding.zig

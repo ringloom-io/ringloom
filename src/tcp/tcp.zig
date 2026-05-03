@@ -1,4 +1,4 @@
-//! brz_tcp — TCP transport library for BRZ broker.
+//! ringloom_tcp — TCP transport library for RingLoom broker.
 //!
 //! This is the root module that provides public API and re-exports.
 //! The library handles connection management, framing, handshake,
@@ -40,7 +40,7 @@ pub fn DefaultEngine() type {
     return switch (builtin.os.tag) {
         .linux => io_uring_engine.IoUringEngine,
         .macos, .freebsd => kqueue_engine.KqueueEngine,
-        else => @compileError("Unsupported platform for brz_tcp"),
+        else => @compileError("Unsupported platform for ringloom_tcp"),
     };
 }
 

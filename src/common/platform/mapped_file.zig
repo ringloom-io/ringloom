@@ -1,7 +1,7 @@
-//! Memory-mapped file abstraction for the BRZ broker.
+//! Memory-mapped file abstraction for the RingLoom broker.
 //!
 //! Provides POSIX mmap-based memory mapping for shared memory IPC.
-//! The metadata files on /dev/shm (tmpfs) are the backbone of BRZ's
+//! The metadata files on /dev/shm (tmpfs) are the backbone of RingLoom's
 //! same-host communication.
 
 const std = @import("std");
@@ -297,7 +297,7 @@ pub fn ensureServicesDirectory(
 test "MappedFile create and close on tmpfs" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const dir = "/tmp/brz-test-mapped-file";
+    const dir = "/tmp/ringloom-test-mapped-file";
 
     // Cleanup from previous runs.
     std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
@@ -319,7 +319,7 @@ test "MappedFile create and close on tmpfs" {
 test "MappedFile create with sub-page size rounds up" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const dir = "/tmp/brz-test-mapped-file-roundup";
+    const dir = "/tmp/ringloom-test-mapped-file-roundup";
     std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
 
@@ -332,7 +332,7 @@ test "MappedFile create with sub-page size rounds up" {
 test "MappedFile ptrAt" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const dir = "/tmp/brz-test-mapped-file-ptrat";
+    const dir = "/tmp/ringloom-test-mapped-file-ptrat";
     std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
 
@@ -363,7 +363,7 @@ test "isProcessAlive" {
 test "MappedFile rejects live PID" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const dir = "/tmp/brz-test-mapped-file-pid";
+    const dir = "/tmp/ringloom-test-mapped-file-pid";
     std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
 
@@ -381,7 +381,7 @@ test "MappedFile rejects live PID" {
 test "MappedFile allows reuse of dead PID" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const dir = "/tmp/brz-test-mapped-file-dead";
+    const dir = "/tmp/ringloom-test-mapped-file-dead";
     std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(defaultIo(), dir) catch {};
 

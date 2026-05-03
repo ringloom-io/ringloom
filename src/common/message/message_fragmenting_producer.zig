@@ -15,7 +15,7 @@ pub const MessageFragmentingProducer = struct {
     const Self = @This();
 
     pub fn init(ring_buffer: *RingBuffer, max_message_length: usize) Self {
-        // Reserve space for the ring buffer record header and BRZ message header.
+        // Reserve space for the ring buffer record header and RingLoom message header.
         const overhead = constants.ring_buffer_record_header_length +
             message_header.MessageHeader.encoded_length;
         const max_payload = if (max_message_length > overhead)

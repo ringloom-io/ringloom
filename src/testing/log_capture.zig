@@ -1,4 +1,4 @@
-//! Log capture and failure diagnostics for BRZ end-to-end tests.
+//! Log capture and failure diagnostics for RingLoom end-to-end tests.
 //!
 //! `LogCapture` accumulates raw bytes from a child process's stdout or
 //! stderr pipe into a growable buffer and provides search, tail, and
@@ -403,7 +403,7 @@ test "writeToFile persists accumulated data" {
 
     try lc.append("persisted content\n");
 
-    const tmp_path = "/tmp/brz-test-log-capture-write.txt";
+    const tmp_path = "/tmp/ringloom-test-log-capture-write.txt";
 
     // When
     try lc.writeToFile(tmp_path);

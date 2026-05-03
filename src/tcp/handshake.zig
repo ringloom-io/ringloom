@@ -10,7 +10,7 @@ const std = @import("std");
 ///
 /// Wire layout:
 ///   Offset  Size  Type   Field
-///   0       4     u32    magic (0x42525A00)
+///   0       4     u32    magic (0x474E4952, "RING" little-endian)
 ///   4       1     u8     protocol_version
 ///   5       1     u8     source_node_id
 ///   6       1     u8     target_node_id
@@ -28,7 +28,7 @@ pub const HandshakeFrame = extern struct {
     group_name_hash: u32,
     reserved: u32 = 0,
 
-    pub const magic_value: u32 = 0x42525A00;
+    pub const magic_value: u32 = 0x474E4952;
     pub const protocol_version_current: u8 = 1;
     pub const size: usize = @sizeOf(HandshakeFrame);
 

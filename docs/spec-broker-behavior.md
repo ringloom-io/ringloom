@@ -1,9 +1,9 @@
-# BRZ Broker Behavioral Specification
+# RingLoom Broker Behavioral Specification
 
 **Version:** 1.0
 **Date:** 2026-03-14
 **Status:** Draft
-**Applies to:** BRZ v0.1.0
+**Applies to:** RingLoom v0.1.0
 
 ---
 
@@ -45,7 +45,7 @@
    - `controlBufferLength`: Computed from configured control buffer size + blocking trailer.
    - `messagesBufferLength`: Computed from configured messages buffer size + blocking trailer.
    - `serviceId`: `0`
-   - `nodeId`: From `broker.node.id`. This value is stored as `int16` in the metadata file (2 bytes, little-endian) but transmitted as `uint8` in `brzMessageHeader` fields. Values fit within 0–255; cast to `uint8` when comparing with BRZ message headers.
+   - `nodeId`: From `broker.node.id`. This value is stored as `int16` in the metadata file (2 bytes, little-endian) but transmitted as `uint8` in `ringloomMessageHeader` fields. Values fit within 0–255; cast to `uint8` when comparing with RingLoom message headers.
    - `pid`: Current OS process ID.
    - `startTimestampMs`: Current epoch milliseconds.
 
@@ -80,7 +80,7 @@ Aeron provides reliable UDP transport for cross-host communication between broke
 | Stream | Default Stream ID | Header Type | Purpose |
 |--------|-------------------|-------------|---------|
 | Admin | `100` (`broker.admin.stream.id`) | `brokerMessageHeader` (8 bytes) | Broker-to-broker cluster messages: election, heartbeat, state sync. |
-| Message | `101` (`broker.message.stream.id`) | `brzMessageHeader` (19 bytes) | Cross-host service message routing. |
+| Message | `101` (`broker.message.stream.id`) | `ringloomMessageHeader` (19 bytes) | Cross-host service message routing. |
 
 ### 2.2 Channel Format
 
@@ -107,7 +107,7 @@ Each broker creates the following Aeron resources:
 
 ### 2.4 Media Driver
 
-- **Directory:** `<brz_directory>/aeron/` (where `brz_directory = <storage_path>/<broker_group_name>`).
+- **Directory:** `<ringloom_directory>/aeron/` (where `ringloom_directory = <storage_path>/<broker_group_name>`).
 - **Embedded mode** (`broker.media.driver.enabled = true`): The broker starts its own `MediaDriver` instance.
 - **External mode** (`broker.media.driver.enabled = false`): The broker connects to a pre-existing media driver at the configured directory.
 
@@ -209,7 +209,7 @@ When a service receives `ServiceInstances`:
    - Create an `IpcProducer` that writes directly to the target service's messages ring buffer (same-host, zero-copy path).
 
 2. For each instance where `nodeId != localNodeId`:
-   - Create a producer that writes to the local broker's messages ring buffer with the remote `targetNodeId` and `targetServiceId` set in the BRZ header.
+   - Create a producer that writes to the local broker's messages ring buffer with the remote `targetNodeId` and `targetServiceId` set in the RingLoom header.
    - The broker handles forwarding to the remote node.
 
 3. Remove any previously tracked instances that are not in the new list.
@@ -265,7 +265,7 @@ Brokers send `BrokerHeartbeat` messages to peer brokers via the admin Aeron stre
 | Health check interval | 3 seconds | Broker reads heartbeat timestamps. |
 | Heartbeat timeout | 10 seconds | If `elapsed > 10s`, the service is considered dead. |
 
-These values are currently hardcoded in the reference implementation. Implementors should use the same defaults for compatibility, though future BRZ versions may make these configurable.
+These values are currently hardcoded in the reference implementation. Implementors should use the same defaults for compatibility, though future RingLoom versions may make these configurable.
 
 ---
 
@@ -303,15 +303,15 @@ When `targetNodeId != sourceNodeId` (services on different brokers):
 
 1. Service A writes to Broker 1's **messages ring buffer** with `targetNodeId = 2` and `targetServiceId = B's ID`.
 2. `MessageRoutingConsumer` polls Broker 1's messages ring buffer.
-3. For each message, parse the `targetNodeId` from the BRZ header.
+3. For each message, parse the `targetNodeId` from the RingLoom header.
 4. Look up the `AeronProducer` (ExclusivePublication) for the target node.
 5. `MessageRoutingPublisher` forwards the message via the Aeron message stream.
-6. If transport encryption is enabled, encrypt the payload before sending (BRZ header remains plaintext).
+6. If transport encryption is enabled, encrypt the payload before sending (RingLoom header remains plaintext).
 
 **Receiving side (Broker 2):**
 
 1. `MessageRoutingSubscriber` polls the Aeron message stream subscription.
-2. For each received message, parse the `targetServiceId` from the BRZ header.
+2. For each received message, parse the `targetServiceId` from the RingLoom header.
 3. If transport encryption is enabled, decrypt the payload.
 4. Look up the target service's `BuffersProvider` (messages ring buffer) via `targetServiceId`.
 5. Write the decrypted message to the target service's messages ring buffer.
@@ -319,7 +319,7 @@ When `targetNodeId != sourceNodeId` (services on different brokers):
 
 ### 6.3 Routing Decision
 
-The routing decision is made solely by the `targetNodeId` field in the BRZ header:
+The routing decision is made solely by the `targetNodeId` field in the RingLoom header:
 
 | Condition | Action |
 |-----------|--------|
@@ -409,7 +409,7 @@ Service leader election is an optional per-service feature that designates one i
 ### 8.1 Opt-In
 
 Leader election is enabled per-service via:
-- Service configuration: `brz.service.leader_election.enabled = true`
+- Service configuration: `ringloom.service.leader_election.enabled = true`
 - Registration message: `leaderElectionEnabled = T` (BooleanType)
 
 If not enabled, all instances are equal (no leader concept).

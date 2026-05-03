@@ -1,6 +1,6 @@
-//! BRZ Service — service-side runtime library.
+//! RingLoom Service — service-side runtime library.
 //!
-//! This is the root source file for the `brz_service` library module.
+//! This is the root source file for the `ringloom_service` library module.
 //! It re-exports the service engine, client types, control agent,
 //! message consumer, load balancer, IPC wrappers, and service configuration.
 //!
@@ -8,9 +8,9 @@
 
 // ── Service engine and lifecycle ─────────────────────────────────────
 
-pub const brz_engine = @import("brz_engine.zig");
-pub const BrzEngine = brz_engine.BrzEngine;
-pub const ServiceConfig = brz_engine.ServiceConfig;
+pub const ringloom_engine = @import("ringloom_engine.zig");
+pub const RingLoomEngine = ringloom_engine.RingLoomEngine;
+pub const ServiceConfig = ringloom_engine.ServiceConfig;
 
 // ── Message consumption ──────────────────────────────────────────────
 
@@ -66,7 +66,7 @@ pub const config = struct {
 
 comptime {
     // Service engine and agents
-    _ = @import("brz_engine.zig");
+    _ = @import("ringloom_engine.zig");
     _ = @import("message_consumer.zig");
     _ = @import("control_agent.zig");
 
@@ -88,7 +88,7 @@ comptime {
 }
 
 test "service module exports canonical service APIs" {
-    _ = BrzEngine;
+    _ = RingLoomEngine;
     _ = ServiceConfig;
     _ = MessageConsumer;
     _ = ControlAgent;

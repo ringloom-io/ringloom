@@ -1,12 +1,12 @@
 const std = @import("std");
-const net = @import("brz_tcp").socket;
+const net = @import("ringloom_tcp").socket;
 
-const brz_common = @import("brz_common");
-const config_mod = @import("brz_common").config.broker_config;
-const config_loader_mod = brz_common.config.config_loader;
-const platform = brz_common.platform;
-const memory = brz_common.memory;
-const concurrent = brz_common.concurrent;
+const ringloom_common = @import("ringloom_common");
+const config_mod = @import("ringloom_common").config.broker_config;
+const config_loader_mod = ringloom_common.config.config_loader;
+const platform = ringloom_common.platform;
+const memory = ringloom_common.memory;
+const concurrent = ringloom_common.concurrent;
 const control = @import("../control.zig");
 const cluster = @import("../cluster.zig");
 const sender = @import("../sender.zig");
@@ -27,8 +27,8 @@ const SenderEventLoop = sender.SenderEventLoop;
 const ReceiverEventLoop = receiver.ReceiverEventLoop;
 const BrokerThreads = threading.BrokerThreads;
 const RoutingRegistry = receiver.ServiceRegistry;
-const CommandQueue = brz_common.concurrent.command_queue.CommandQueue;
-const Command = brz_common.concurrent.command_queue.Command;
+const CommandQueue = ringloom_common.concurrent.command_queue.CommandQueue;
+const Command = ringloom_common.concurrent.command_queue.Command;
 const admin_dispatch = cluster.admin_dispatch;
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
 
@@ -455,7 +455,7 @@ test "BrokerApplication initializes and can request shutdown" {
         .local_host = "127.0.0.1",
         .local_port = 19001,
         .peer_endpoints = &.{},
-        .group_name = "brz-test-app",
+        .group_name = "ringloom-test-app",
         .storage_path = "/tmp",
     };
 

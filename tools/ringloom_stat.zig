@@ -1,12 +1,12 @@
-//! brz-stat — External monitoring tool for the BRZ broker.
+//! ringloom-stat — External monitoring tool for the RingLoom broker.
 //!
 //! Reads the broker's metadata file via mmap (read-only) and prints
 //! counters and error log entries. Zero overhead on the broker process.
 //!
 //! Usage:
-//!   brz-stat [path-to-broker.dat]
+//!   ringloom-stat [path-to-broker.dat]
 //!
-//! If no path is given, defaults to /dev/shm/brz/services/broker_0.dat.
+//! If no path is given, defaults to /dev/shm/ringloom/services/broker_0.dat.
 
 const std = @import("std");
 
@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    const path = if (args.len > 1) args[1] else "/dev/shm/brz/services/broker_0.dat";
+    const path = if (args.len > 1) args[1] else "/dev/shm/ringloom/services/broker_0.dat";
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Print header info.
-    try stdout.print("=== BRZ Broker Status ({s}) ===\n", .{path});
+    try stdout.print("=== RingLoom Broker Status ({s}) ===\n", .{path});
     try stdout.print("Node ID:           {d}\n", .{header.node_id});
     try stdout.print("Service ID:        {d}\n", .{header.service_id});
     try stdout.print("PID:               {d}\n", .{header.pid});

@@ -1,4 +1,4 @@
-//! Message handling module for the BRZ broker.
+//! Message handling module for the RingLoom broker.
 //!
 //! This is the single import point for message-related functionality.
 //! It re-exports the message header, control encoding, fragmentation,

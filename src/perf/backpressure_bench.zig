@@ -7,7 +7,7 @@
 //! Topology: 1 broker, 1 slow-consumer service, 1 ping service (producer).
 
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 const BrokerSpec = testing_mod.BrokerSpec;
 const ServiceSpec = testing_mod.ServiceSpec;
@@ -48,7 +48,7 @@ test "backpressure onset detection - 128B escalating load" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const slow = try harness.startService(.{
-        .executable_name = "brz-test-slow-consumer-service",
+        .executable_name = "ringloom-test-slow-consumer-service",
         .service_name = "slow-consumer",
         .extra_args = &.{ "--delay-per-message-ms", "1" },
     });
@@ -69,7 +69,7 @@ test "backpressure onset detection - 128B escalating load" {
         defer allocator.free(result_path);
 
         const ping = try harness.startService(.{
-            .executable_name = "brz-test-ping-service",
+            .executable_name = "ringloom-test-ping-service",
             .service_name = "ping",
             .extra_args = &.{
                 "--target-service",  "slow-consumer",
@@ -104,7 +104,7 @@ test "backpressure onset detection - 1024B escalating load" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const slow = try harness.startService(.{
-        .executable_name = "brz-test-slow-consumer-service",
+        .executable_name = "ringloom-test-slow-consumer-service",
         .service_name = "slow-consumer",
         .extra_args = &.{ "--delay-per-message-ms", "1" },
     });
@@ -133,7 +133,7 @@ test "backpressure onset detection - 1024B escalating load" {
         defer allocator.free(result_path);
 
         const ping = try harness.startService(.{
-            .executable_name = "brz-test-ping-service",
+            .executable_name = "ringloom-test-ping-service",
             .service_name = "ping",
             .extra_args = &.{
                 "--target-service",  "slow-consumer",
@@ -171,7 +171,7 @@ test "backpressure varying consumer delay - 128B" {
     // When — for each delay value, start a slow consumer and blast messages.
     for (delays_ms) |delay_str| {
         const slow = try harness.startService(.{
-            .executable_name = "brz-test-slow-consumer-service",
+            .executable_name = "ringloom-test-slow-consumer-service",
             .service_name = "slow-consumer",
             .extra_args = &.{ "--delay-per-message-ms", delay_str },
         });
@@ -185,7 +185,7 @@ test "backpressure varying consumer delay - 128B" {
         defer allocator.free(result_path);
 
         const ping = try harness.startService(.{
-            .executable_name = "brz-test-ping-service",
+            .executable_name = "ringloom-test-ping-service",
             .service_name = "ping",
             .extra_args = &.{
                 "--target-service",  "slow-consumer",
@@ -222,7 +222,7 @@ test "backpressure onset detection - 4096B large payload" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const slow = try harness.startService(.{
-        .executable_name = "brz-test-slow-consumer-service",
+        .executable_name = "ringloom-test-slow-consumer-service",
         .service_name = "slow-consumer",
         .extra_args = &.{ "--delay-per-message-ms", "2" },
     });
@@ -250,7 +250,7 @@ test "backpressure onset detection - 4096B large payload" {
         defer allocator.free(result_path);
 
         const ping = try harness.startService(.{
-            .executable_name = "brz-test-ping-service",
+            .executable_name = "ringloom-test-ping-service",
             .service_name = "ping",
             .extra_args = &.{
                 "--target-service",  "slow-consumer",
@@ -285,7 +285,7 @@ test "sustained backpressure - steady state under overload" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const slow = try harness.startService(.{
-        .executable_name = "brz-test-slow-consumer-service",
+        .executable_name = "ringloom-test-slow-consumer-service",
         .service_name = "slow-consumer",
         .extra_args = &.{ "--delay-per-message-ms", "5" },
     });
@@ -300,7 +300,7 @@ test "sustained backpressure - steady state under overload" {
 
     // When — send a very large batch to force sustained backpressure.
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
             "--target-service",  "slow-consumer",

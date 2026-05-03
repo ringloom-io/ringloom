@@ -5,7 +5,7 @@
 //! detection and exponential backoff for reconnection.
 
 const std = @import("std");
-const Clock = @import("brz_common").platform.Clock;
+const Clock = @import("ringloom_common").platform.Clock;
 const io_engine = @import("io_engine.zig");
 const frame_mod = @import("frame.zig");
 const handshake_mod = @import("handshake.zig");

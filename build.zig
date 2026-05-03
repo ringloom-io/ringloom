@@ -6,57 +6,57 @@ pub fn build(b: *std.Build) void {
 
     // ── Library modules ──────────────────────────────────────────────
 
-    const brz_common = b.addModule("brz_common", .{
+    const ringloom_common = b.addModule("ringloom_common", .{
         .root_source_file = b.path("src/common/root.zig"),
         .target = target,
     });
 
-    const brz_tcp = b.addModule("brz_tcp", .{
+    const ringloom_tcp = b.addModule("ringloom_tcp", .{
         .root_source_file = b.path("src/tcp/tcp.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "brz_common", .module = brz_common },
+            .{ .name = "ringloom_common", .module = ringloom_common },
         },
     });
 
-    const brz_service = b.addModule("brz_service", .{
+    const ringloom_service = b.addModule("ringloom_service", .{
         .root_source_file = b.path("src/service/root.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "brz_common", .module = brz_common },
+            .{ .name = "ringloom_common", .module = ringloom_common },
         },
     });
 
-    const brz_broker = b.addModule("brz_broker", .{
+    const ringloom_broker = b.addModule("ringloom_broker", .{
         .root_source_file = b.path("src/broker/root.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "brz_common", .module = brz_common },
-            .{ .name = "brz_tcp", .module = brz_tcp },
+            .{ .name = "ringloom_common", .module = ringloom_common },
+            .{ .name = "ringloom_tcp", .module = ringloom_tcp },
         },
     });
 
-    const brz_testing = b.addModule("brz_testing", .{
+    const ringloom_testing = b.addModule("ringloom_testing", .{
         .root_source_file = b.path("src/testing/root.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "brz_common", .module = brz_common },
+            .{ .name = "ringloom_common", .module = ringloom_common },
         },
     });
 
     // ── Broker executable ────────────────────────────────────────────
 
     const broker_exe = b.addExecutable(.{
-        .name = "brz-broker",
+        .name = "ringloom-broker",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bin/brz_broker_main.zig"),
+            .root_source_file = b.path("src/bin/ringloom_broker_main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "brz_common", .module = brz_common },
-                .{ .name = "brz_broker", .module = brz_broker },
-                .{ .name = "brz_tcp", .module = brz_tcp },
-                .{ .name = "brz_service", .module = brz_service },
+                .{ .name = "ringloom_common", .module = ringloom_common },
+                .{ .name = "ringloom_broker", .module = ringloom_broker },
+                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
+                .{ .name = "ringloom_service", .module = ringloom_service },
             },
         }),
     });
@@ -81,12 +81,12 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_bin_entries = [_]TestBinEntry{
-        .{ .source_name = "test_echo_service", .exe_name = "brz-test-echo-service" },
-        .{ .source_name = "test_ping_service", .exe_name = "brz-test-ping-service" },
-        .{ .source_name = "test_forwarder_service", .exe_name = "brz-test-forwarder-service" },
-        .{ .source_name = "test_leader_service", .exe_name = "brz-test-leader-service" },
-        .{ .source_name = "test_slow_consumer_service", .exe_name = "brz-test-slow-consumer-service" },
-        .{ .source_name = "test_crashy_service", .exe_name = "brz-test-crashy-service" },
+        .{ .source_name = "test_echo_service", .exe_name = "ringloom-test-echo-service" },
+        .{ .source_name = "test_ping_service", .exe_name = "ringloom-test-ping-service" },
+        .{ .source_name = "test_forwarder_service", .exe_name = "ringloom-test-forwarder-service" },
+        .{ .source_name = "test_leader_service", .exe_name = "ringloom-test-leader-service" },
+        .{ .source_name = "test_slow_consumer_service", .exe_name = "ringloom-test-slow-consumer-service" },
+        .{ .source_name = "test_crashy_service", .exe_name = "ringloom-test-crashy-service" },
     };
 
     const test_bins_step = b.step("test-bins", "Build all test service binaries");
@@ -101,9 +101,9 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
-                    .{ .name = "brz_common", .module = brz_common },
-                    .{ .name = "brz_service", .module = brz_service },
-                    .{ .name = "brz_testing", .module = brz_testing },
+                    .{ .name = "ringloom_common", .module = ringloom_common },
+                    .{ .name = "ringloom_service", .module = ringloom_service },
+                    .{ .name = "ringloom_testing", .module = ringloom_testing },
                 },
             }),
         });
@@ -126,8 +126,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/broker/root.zig"),
             .target = target,
             .imports = &.{
-                .{ .name = "brz_common", .module = brz_common },
-                .{ .name = "brz_tcp", .module = brz_tcp },
+                .{ .name = "ringloom_common", .module = ringloom_common },
+                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
             },
         }),
     });
@@ -138,7 +138,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/tcp/tcp.zig"),
             .target = target,
             .imports = &.{
-                .{ .name = "brz_common", .module = brz_common },
+                .{ .name = "ringloom_common", .module = ringloom_common },
             },
         }),
     });
@@ -149,7 +149,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/service/root.zig"),
             .target = target,
             .imports = &.{
-                .{ .name = "brz_common", .module = brz_common },
+                .{ .name = "ringloom_common", .module = ringloom_common },
             },
         }),
     });
@@ -157,12 +157,12 @@ pub fn build(b: *std.Build) void {
 
     const exe_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bin/brz_broker_main.zig"),
+            .root_source_file = b.path("src/bin/ringloom_broker_main.zig"),
             .target = target,
             .imports = &.{
-                .{ .name = "brz_common", .module = brz_common },
-                .{ .name = "brz_broker", .module = brz_broker },
-                .{ .name = "brz_service", .module = brz_service },
+                .{ .name = "ringloom_common", .module = ringloom_common },
+                .{ .name = "ringloom_broker", .module = ringloom_broker },
+                .{ .name = "ringloom_service", .module = ringloom_service },
             },
         }),
     });
@@ -173,7 +173,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/testing/root.zig"),
             .target = target,
             .imports = &.{
-                .{ .name = "brz_common", .module = brz_common },
+                .{ .name = "ringloom_common", .module = ringloom_common },
             },
         }),
     });
@@ -201,8 +201,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/e2e/root.zig"),
             .target = target,
             .imports = &.{
-                .{ .name = "brz_common", .module = brz_common },
-                .{ .name = "brz_testing", .module = brz_testing },
+                .{ .name = "ringloom_common", .module = ringloom_common },
+                .{ .name = "ringloom_testing", .module = ringloom_testing },
             },
         }),
     });
@@ -226,8 +226,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
-                .{ .name = "brz_common", .module = brz_common },
-                .{ .name = "brz_testing", .module = brz_testing },
+                .{ .name = "ringloom_common", .module = ringloom_common },
+                .{ .name = "ringloom_testing", .module = ringloom_testing },
             },
         }),
     });
@@ -240,12 +240,12 @@ pub fn build(b: *std.Build) void {
     const perf_step = b.step("perf", "Run performance benchmarks (ReleaseFast)");
     perf_step.dependOn(&run_perf_tests.step);
 
-    // ── brz-stat utility ─────────────────────────────────────────────
+    // ── ringloom-stat utility ─────────────────────────────────────────────
 
     const stat_exe = b.addExecutable(.{
-        .name = "brz-stat",
+        .name = "ringloom-stat",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/brz_stat.zig"),
+            .root_source_file = b.path("tools/ringloom_stat.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -258,6 +258,6 @@ pub fn build(b: *std.Build) void {
         stat_run_cmd.addArgs(args);
     }
 
-    const stat_step = b.step("stat", "Run the brz-stat monitoring tool");
+    const stat_step = b.step("stat", "Run the ringloom-stat monitoring tool");
     stat_step.dependOn(&stat_run_cmd.step);
 }

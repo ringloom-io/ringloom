@@ -1,4 +1,4 @@
-//! Broker metadata file layout for the BRZ broker.
+//! Broker metadata file layout for the RingLoom broker.
 //!
 //! The broker's metadata file is memory-mapped on /dev/shm and shared with
 //! all local services. It contains the broker's control ring buffer

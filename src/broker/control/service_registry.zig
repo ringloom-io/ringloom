@@ -5,7 +5,7 @@
 //! control thread — no locking required.
 
 const std = @import("std");
-const BuffersProvider = @import("brz_common").memory.buffers_provider.BuffersProvider;
+const BuffersProvider = @import("ringloom_common").memory.buffers_provider.BuffersProvider;
 
 /// A single service instance, local or remote.
 pub const ServiceInstance = struct {

@@ -2,7 +2,7 @@
 #
 # tune-system.sh — Apply runtime Linux kernel tuning for low-latency benchmarks.
 #
-# Configures the system for deterministic, low-latency operation of the BRZ
+# Configures the system for deterministic, low-latency operation of the RingLoom
 # broker.  Pairs with BIOS/firmware and kernel boot parameter changes described
 # in docs/testing.md.
 #
@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-STATE_FILE="/tmp/brz-tune-state.env"
+STATE_FILE="/tmp/ringloom-tune-state.env"
 
 # Cores reserved for OS/interrupts (used for IRQ affinity migration).
 # Adjust if your isolation scheme differs.
@@ -143,7 +143,7 @@ revert_state() {
 # ── Apply Tuning ─────────────────────────────────────────────────────
 
 apply_tuning() {
-    echo "BRZ Broker — Low-Latency System Tuning"
+    echo "RingLoom Broker — Low-Latency System Tuning"
     echo "======================================="
     echo ""
 

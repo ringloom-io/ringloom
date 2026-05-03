@@ -1,4 +1,4 @@
-//! Platform constants for the BRZ broker.
+//! Platform constants for the RingLoom broker.
 //!
 //! Every numeric constant referenced by the ring buffer, metadata file,
 //! wire protocol, and timing subsystems. Centralizing them here means the
@@ -83,7 +83,7 @@ pub const broker_service_name: []const u8 = "broker";
 // ── TCP Protocol Constants ────────────────────────────────────────────
 
 pub const protocol_version: u8 = 1;
-pub const handshake_magic: u32 = 0x42525A00;
+pub const handshake_magic: u32 = 0x474E4952; // "RING" when written little-endian
 pub const heartbeat_template_id: u16 = 0xFFFF;
 pub const direction_sender: u8 = 0x01;
 pub const direction_receiver: u8 = 0x02;

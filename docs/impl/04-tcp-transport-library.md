@@ -1,4 +1,4 @@
-# 04 — TCP Transport Library (brz\_tcp)
+# 04 — TCP Transport Library (ringloom\_tcp)
 
 > **Depends on:** [01 — Platform Abstraction](01-platform-abstraction.md) (clocks, error
 > utilities), [02 — Memory Layout & Shared Memory](02-memory-layout-and-shared-memory.md)
@@ -8,12 +8,12 @@
 > [06 — Receive Path](06-receive-path.md) (TCP reads, frame parsing),
 > [11 — Cluster Management](11-cluster-management.md) (peer lifecycle)
 
-This document specifies `brz_tcp` — a **standalone Zig library** that provides
-high-performance, non-blocking TCP I/O for the BRZ broker. The library is compiled
-as a separate module (`brz_tcp`) and imported by the broker and tests without
+This document specifies `ringloom_tcp` — a **standalone Zig library** that provides
+high-performance, non-blocking TCP I/O for the RingLoom broker. The library is compiled
+as a separate module (`ringloom_tcp`) and imported by the broker and tests without
 pulling in broker-internal types.
 
-`brz_tcp` owns three responsibilities:
+`ringloom_tcp` owns three responsibilities:
 
 1. **Platform I/O** — abstracting the kernel I/O facility (io\_uring on Linux,
    kqueue on macOS) behind a common interface so that all higher layers are
@@ -102,7 +102,7 @@ All code targets **Zig 0.14.x** stable.
 
 ## 1. Overview
 
-`brz_tcp` replaces the previous UDP transport layer. TCP eliminates the need for
+`ringloom_tcp` replaces the previous UDP transport layer. TCP eliminates the need for
 application-level retransmission, sequencing, fragmentation, and NAK handling. The
 kernel provides reliable, ordered byte-stream delivery. The library focuses on
 efficient I/O submission, connection lifecycle, and message framing.
@@ -184,7 +184,7 @@ is injected at compile time.
 
 ### 2.1 Core Types
 
-**File: `src/brz_tcp/io_engine.zig`**
+**File: `src/ringloom_tcp/io_engine.zig`**
 
 ```zig
 /// Opaque handle to a TCP connection within the I/O engine.
@@ -288,7 +288,7 @@ through Zig's `std.os.linux.IoUring` wrapper.
 
 ### 3.1 Ring Setup
 
-**File: `src/brz_tcp/io_uring_engine.zig`**
+**File: `src/ringloom_tcp/io_uring_engine.zig`**
 
 ```zig
 const std = @import("std");
@@ -623,7 +623,7 @@ readiness notifications for TCP sockets.
 
 ### 4.1 Filter Configuration
 
-**File: `src/brz_tcp/kqueue_engine.zig`**
+**File: `src/ringloom_tcp/kqueue_engine.zig`**
 
 ```zig
 const std = @import("std");
@@ -832,13 +832,13 @@ const backend = b.option(Backend, "tcp-backend", "TCP I/O backend") orelse
     switch (builtin.os.tag) {
         .linux => .io_uring,
         .macos => .kqueue,
-        else => @compileError("Unsupported OS for brz_tcp"),
+        else => @compileError("Unsupported OS for ringloom_tcp"),
     };
 
-const brz_tcp = b.addModule("brz_tcp", .{
-    .root_source_file = b.path("lib/brz_tcp/root.zig"),
+const ringloom_tcp = b.addModule("ringloom_tcp", .{
+    .root_source_file = b.path("lib/ringloom_tcp/root.zig"),
 });
-brz_tcp.addOptions("build_options", options);
+ringloom_tcp.addOptions("build_options", options);
 ```
 
 The selected backend is passed as a build option and resolved at comptime in the
@@ -890,7 +890,7 @@ state, drives the handshake, enforces reconnection policy, and monitors health.
 
 ### 6.2 State Enum and Connection Slot
 
-**File: `src/brz_tcp/connection_manager.zig`**
+**File: `src/ringloom_tcp/connection_manager.zig`**
 
 ```zig
 pub const ConnectionState = enum(u8) {
@@ -982,7 +982,7 @@ Attempt 4: 800 ms
 Attempt 5+: 1000 ms (cap)
 ```
 
-**File: `src/brz_tcp/connection_manager.zig`**
+**File: `src/ringloom_tcp/connection_manager.zig`**
 
 ```zig
 const backoff_initial_ms: u64 = 100;
@@ -1081,7 +1081,7 @@ The handshake frame is exactly **24 bytes**:
 ```
  Offset   Size   Type       Field
 ──────────────────────────────────────────────────
-  0       4      u32        magic (0x42525A00)
+  0       4      u32        magic (0x474E4952)
   4       1      u8         protocol_version
   5       1      u8         source_node_id
   6       1      u8         target_node_id
@@ -1097,7 +1097,7 @@ The handshake frame is exactly **24 bytes**:
 
 | Field | Description |
 |-------|-------------|
-| `magic` | `0x42525A00` — ASCII "BRZ" followed by a version nibble. Used to quickly reject non-BRZ connections. |
+| `magic` | `0x474E4952` — "RING" when written little-endian. Used to quickly reject non-RingLoom connections. |
 | `protocol_version` | Current version: `1`. Peers must agree on version. |
 | `source_node_id` | The `node_id` of the sender of this handshake frame. |
 | `target_node_id` | The `node_id` the sender expects to reach. |
@@ -1108,7 +1108,7 @@ The handshake frame is exactly **24 bytes**:
 
 ### 7.2 Handshake Packed Struct
 
-**File: `src/brz_tcp/handshake.zig`**
+**File: `src/ringloom_tcp/handshake.zig`**
 
 ```zig
 const std = @import("std");
@@ -1123,7 +1123,7 @@ pub const HandshakeFrame = packed struct {
     group_name_hash: u32,
     reserved: u32 = 0,
 
-    pub const magic_value: u32 = 0x42525A00;
+    pub const magic_value: u32 = 0x474E4952;
     pub const protocol_version_current: u8 = 1;
     pub const size = @sizeOf(HandshakeFrame);
 
@@ -1200,7 +1200,7 @@ pub fn validate(
 
 | Check | Error | Severity |
 |-------|-------|----------|
-| Bad magic | `InvalidMagic` | Close immediately — not a BRZ peer. |
+| Bad magic | `InvalidMagic` | Close immediately — not a RingLoom peer. |
 | Version mismatch | `UnsupportedProtocolVersion` | Close — incompatible protocol. |
 | Wrong target | `WrongTargetNode` | Close — misconfigured peer. |
 | Self-connection | `SelfConnection` | Close — configuration error. |
@@ -1283,7 +1283,7 @@ All multi-byte fields are **little-endian** (native on x86-64 and ARM64 in LE mo
 
 ### 8.2 Frame Header Packed Struct
 
-**File: `src/brz_tcp/frame.zig`**
+**File: `src/ringloom_tcp/frame.zig`**
 
 ```zig
 const std = @import("std");
@@ -1365,7 +1365,7 @@ complete header with a partial payload, or multiple complete frames. The
                                  └──────────────────┘
 ```
 
-**File: `src/brz_tcp/frame.zig`**
+**File: `src/ringloom_tcp/frame.zig`**
 
 ```zig
 pub const FrameReader = struct {
@@ -1608,7 +1608,7 @@ immediately transitions the slot to `DRAINING` and closes the TCP socket. There
 is no error recovery within a single TCP stream — the peer must reconnect.
 
 This design is intentional. Framing errors indicate either a bug, a network
-corruption event, or a non-BRZ peer. Attempting to resynchronize a corrupted
+corruption event, or a non-RingLoom peer. Attempting to resynchronize a corrupted
 byte stream is complex, fragile, and unnecessary when reconnection is cheap.
 
 | Error | Source | Action |
@@ -1640,7 +1640,7 @@ set of options for low-latency, high-throughput messaging.
 
 ### 9.2 Configuration Code
 
-**File: `src/brz_tcp/socket_config.zig`**
+**File: `src/ringloom_tcp/socket_config.zig`**
 
 ```zig
 const std = @import("std");
@@ -1692,7 +1692,7 @@ connection manager, and framing layer into a cohesive interface.
 
 ### 10.1 `TcpTransport` Struct
 
-**File: `src/brz_tcp/transport.zig`**
+**File: `src/ringloom_tcp/transport.zig`**
 
 ```zig
 const std = @import("std");
@@ -1920,10 +1920,10 @@ pub fn TcpTransportImpl(comptime Engine: type) type {
 
 ```zig
 const std = @import("std");
-const brz_tcp = @import("brz_tcp");
-const TcpTransport = brz_tcp.TcpTransport;
-const FrameHeader = brz_tcp.FrameHeader;
-const HandshakeFrame = brz_tcp.HandshakeFrame;
+const ringloom_tcp = @import("ringloom_tcp");
+const TcpTransport = ringloom_tcp.TcpTransport;
+const FrameHeader = ringloom_tcp.FrameHeader;
+const HandshakeFrame = ringloom_tcp.HandshakeFrame;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -1952,7 +1952,7 @@ pub fn main() !void {
     }
 }
 
-fn handleMessage(handle: brz_tcp.ConnectionHandle, header: FrameHeader, payload: ?[]u8) void {
+fn handleMessage(handle: ringloom_tcp.ConnectionHandle, header: FrameHeader, payload: ?[]u8) void {
     if (header.isHeartbeat()) return;
     // Process application message...
     _ = handle;
@@ -1964,7 +1964,7 @@ fn handleMessage(handle: brz_tcp.ConnectionHandle, header: FrameHeader, payload:
 
 ## 11. Build Integration
 
-`brz_tcp` is compiled as a separate Zig module. The broker and tests import it
+`ringloom_tcp` is compiled as a separate Zig module. The broker and tests import it
 as a dependency.
 
 ### 11.1 Module Definition
@@ -1988,22 +1988,22 @@ pub fn build(b: *std.Build) void {
 
     options.addOption(TcpBackend, "tcp_backend", backend);
 
-    // brz_tcp module.
-    const brz_tcp = b.addModule("brz_tcp", .{
-        .root_source_file = b.path("lib/brz_tcp/root.zig"),
+    // ringloom_tcp module.
+    const ringloom_tcp = b.addModule("ringloom_tcp", .{
+        .root_source_file = b.path("lib/ringloom_tcp/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    brz_tcp.addOptions("build_options", options);
+    ringloom_tcp.addOptions("build_options", options);
 
-    // Broker executable depends on brz_tcp.
+    // Broker executable depends on ringloom_tcp.
     const broker = b.addExecutable(.{
-        .name = "brz-broker",
+        .name = "ringloom-broker",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    broker.root_module.addImport("brz_tcp", brz_tcp);
+    broker.root_module.addImport("ringloom_tcp", ringloom_tcp);
     b.installArtifact(broker);
 }
 
@@ -2023,7 +2023,7 @@ fn detectBackend(target: std.Build.ResolvedTarget) TcpBackend {
 
 ### 11.2 Compile-Time Backend Selection
 
-**File: `lib/brz_tcp/root.zig`**
+**File: `lib/ringloom_tcp/root.zig`**
 
 ```zig
 const std = @import("std");
@@ -2069,7 +2069,7 @@ pub fn createEngine(allocator: std.mem.Allocator, max_conns: u16) !Engine {
     } else if (comptime builtin.os.tag == .macos) {
         return KqueueEngine.init(allocator, max_conns);
     } else {
-        @compileError("Unsupported OS for brz_tcp");
+        @compileError("Unsupported OS for ringloom_tcp");
     }
 }
 ```
@@ -2134,28 +2134,28 @@ const MockEngine = struct {
 **File: `build.zig`** (test targets excerpt)
 
 ```zig
-    // Unit tests for brz_tcp.
-    const brz_tcp_tests = b.addTest(.{
-        .root_source_file = b.path("lib/brz_tcp/root.zig"),
+    // Unit tests for ringloom_tcp.
+    const ringloom_tcp_tests = b.addTest(.{
+        .root_source_file = b.path("lib/ringloom_tcp/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    brz_tcp_tests.addOptions("build_options", options);
+    ringloom_tcp_tests.addOptions("build_options", options);
 
-    const run_brz_tcp_tests = b.addRunArtifact(brz_tcp_tests);
-    const test_step = b.step("test-tcp", "Run brz_tcp unit tests");
-    test_step.dependOn(&run_brz_tcp_tests.step);
+    const run_ringloom_tcp_tests = b.addRunArtifact(ringloom_tcp_tests);
+    const test_step = b.step("test-tcp", "Run ringloom_tcp unit tests");
+    test_step.dependOn(&run_ringloom_tcp_tests.step);
 
     // Integration tests (require two sockets).
     const integration_tests = b.addTest(.{
-        .root_source_file = b.path("test/brz_tcp_integration.zig"),
+        .root_source_file = b.path("test/ringloom_tcp_integration.zig"),
         .target = target,
         .optimize = optimize,
     });
-    integration_tests.root_module.addImport("brz_tcp", brz_tcp);
+    integration_tests.root_module.addImport("ringloom_tcp", ringloom_tcp);
 
     const run_integration = b.addRunArtifact(integration_tests);
-    const integration_step = b.step("test-tcp-integration", "Run brz_tcp integration tests");
+    const integration_step = b.step("test-tcp-integration", "Run ringloom_tcp integration tests");
     integration_step.dependOn(&run_integration.step);
 ```
 
@@ -2168,7 +2168,7 @@ const MockEngine = struct {
 Frame encoding and decoding are tested with known byte patterns. The tests
 exercise partial reads, boundary conditions, and error cases.
 
-**File: `lib/brz_tcp/frame.zig`** (test section)
+**File: `lib/ringloom_tcp/frame.zig`** (test section)
 
 ```zig
 const testing = std.testing;
@@ -2358,14 +2358,14 @@ test "Handshake validation rejects group mismatch" {
 Integration tests create real TCP connections (loopback) and verify end-to-end
 behavior:
 
-**File: `test/brz_tcp_integration.zig`**
+**File: `test/ringloom_tcp_integration.zig`**
 
 ```zig
 const std = @import("std");
-const brz_tcp = @import("brz_tcp");
-const TcpTransport = brz_tcp.TcpTransport;
-const FrameHeader = brz_tcp.FrameHeader;
-const HandshakeFrame = brz_tcp.HandshakeFrame;
+const ringloom_tcp = @import("ringloom_tcp");
+const TcpTransport = ringloom_tcp.TcpTransport;
+const FrameHeader = ringloom_tcp.FrameHeader;
+const HandshakeFrame = ringloom_tcp.HandshakeFrame;
 
 test "two transports can connect and exchange messages" {
     const allocator = std.testing.allocator;
@@ -2422,7 +2422,7 @@ test "two transports can connect and exchange messages" {
     attempts = 0;
     while (attempts < 1000) : (attempts += 1) {
         _ = t1.poll(struct {
-            fn cb(_: brz_tcp.ConnectionHandle, header: FrameHeader, _payload: ?[]u8) void {
+            fn cb(_: ringloom_tcp.ConnectionHandle, header: FrameHeader, _payload: ?[]u8) void {
                 if (header.correlation_id == 42) {
                     received = true;
                 }
@@ -2433,7 +2433,7 @@ test "two transports can connect and exchange messages" {
     try std.testing.expect(received);
 }
 
-fn noopCallback(_: brz_tcp.ConnectionHandle, _: FrameHeader, _: ?[]u8) void {}
+fn noopCallback(_: ringloom_tcp.ConnectionHandle, _: FrameHeader, _: ?[]u8) void {}
 ```
 
 ### 12.4 Platform-Specific Tests
@@ -2497,7 +2497,7 @@ test "exponential backoff schedule" {
 
 ## Appendix A — Wire Byte-Order Reference
 
-All wire formats in `brz_tcp` use **little-endian** byte order. This matches the
+All wire formats in `ringloom_tcp` use **little-endian** byte order. This matches the
 native byte order of x86-64 and ARM64 (in LE mode), which are the only supported
 target architectures. No byte-swapping is needed on these platforms.
 
@@ -2519,7 +2519,7 @@ struct `toBytes`/`fromBytes` would need to be replaced with explicit
 
 | Code | Source | Meaning |
 |------|--------|---------|
-| `InvalidMagic` | Handshake | Received frame does not start with `0x42525A00`. |
+| `InvalidMagic` | Handshake | Received frame does not start with `0x474E4952`. |
 | `UnsupportedProtocolVersion` | Handshake | Peer uses a different protocol version. |
 | `WrongTargetNode` | Handshake | `target_node_id` does not match local node. |
 | `SelfConnection` | Handshake | `source_node_id` equals local node (loop). |

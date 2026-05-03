@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# run-benchmarks.sh — Run BRZ broker performance benchmarks manually.
+# run-benchmarks.sh — Run RingLoom broker performance benchmarks manually.
 #
 # Orchestrates broker(s) and test services directly, collecting JSON result
 # files into a results directory.  Useful when `zig build perf` output is
@@ -12,7 +12,7 @@
 # Options:
 #   --local-only    Run only the local (single-broker) latency benchmarks.
 #   --remote-only   Run only the cross-broker latency benchmarks.
-#   --output-dir    Directory for result JSON files (default: /tmp/brz-bench-results).
+#   --output-dir    Directory for result JSON files (default: /tmp/ringloom-bench-results).
 #
 # Prerequisites:
 #   zig build install && zig build test-bins
@@ -26,7 +26,7 @@ BIN="$PROJECT_ROOT/zig-out/bin"
 # Defaults.
 RUN_LOCAL=true
 RUN_REMOTE=true
-RESULTS_DIR="/tmp/brz-bench-results"
+RESULTS_DIR="/tmp/ringloom-bench-results"
 
 # ── Parse arguments ───────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ done
 
 # ── Verify binaries exist ────────────────────────────────────────────
 
-for bin in brz-broker brz-test-echo-service brz-test-ping-service; do
+for bin in ringloom-broker ringloom-test-echo-service ringloom-test-ping-service; do
     if [[ ! -x "$BIN/$bin" ]]; then
         echo "ERROR: $BIN/$bin not found.  Run:  zig build install && zig build test-bins"
         exit 1
@@ -53,12 +53,12 @@ done
 
 # ── Workspace setup ──────────────────────────────────────────────────
 
-WORK_DIR=$(mktemp -d /tmp/brz-bench-XXXXXX)
+WORK_DIR=$(mktemp -d /tmp/ringloom-bench-XXXXXX)
 STORAGE="$WORK_DIR/storage"
 CONFIGS="$WORK_DIR/config"
 LOGS="$WORK_DIR/logs"
 INTERNAL_RESULTS="$WORK_DIR/internal-results"
-mkdir -p "$STORAGE/brz-test/services" "$CONFIGS" "$LOGS" "$INTERNAL_RESULTS" "$RESULTS_DIR"
+mkdir -p "$STORAGE/ringloom-test/services" "$CONFIGS" "$LOGS" "$INTERNAL_RESULTS" "$RESULTS_DIR"
 
 PIDS=()
 
@@ -121,7 +121,7 @@ run_local_bench() {
     cat > "$CONFIGS/broker_local.properties" << EOF
 broker.node.id=1
 broker.local.host.port=127.0.0.1:19010
-broker.group.name=brz-test
+broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
@@ -133,16 +133,16 @@ broker.io.uring.sqpoll=true
 broker.benchmark.latency.tracing.enabled=true
 EOF
 
-    "$BIN/brz-broker" --config "$CONFIGS/broker_local.properties" \
+    "$BIN/ringloom-broker" --config "$CONFIGS/broker_local.properties" \
         > "$LOGS/broker_local_$TAG.log" 2>&1 &
     PIDS+=($!)
     local BROKER_PID=${PIDS[-1]}
     wait_for_ready "$LOGS/broker_local_$TAG.log" 5
 
     # Echo service with latency measurement.
-    "$BIN/brz-test-echo-service" \
+    "$BIN/ringloom-test-echo-service" \
         --storage-path "$STORAGE" \
-        --group brz-test \
+        --group ringloom-test \
         --service-name echo \
         --broker-node-id 1 \
         --quiet \
@@ -154,9 +154,9 @@ EOF
     wait_for_ready "$LOGS/echo_local_$TAG.log" 5
 
     # Ping service.
-    "$BIN/brz-test-ping-service" \
+    "$BIN/ringloom-test-ping-service" \
         --storage-path "$STORAGE" \
-        --group brz-test \
+        --group ringloom-test \
         --service-name ping \
         --broker-node-id 1 \
         --target-service echo \
@@ -176,8 +176,8 @@ EOF
     sleep 1
 
     # Clean storage for next run.
-    rm -rf "$STORAGE/brz-test"
-    mkdir -p "$STORAGE/brz-test/services"
+    rm -rf "$STORAGE/ringloom-test"
+    mkdir -p "$STORAGE/ringloom-test/services"
 }
 
 # ── Cross-broker benchmarks ──────────────────────────────────────────
@@ -187,7 +187,7 @@ write_two_broker_configs() {
 broker.node.id=1
 broker.local.host.port=127.0.0.1:19001
 broker.member.host.ports=2@127.0.0.1:19002
-broker.group.name=brz-test
+broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
@@ -203,7 +203,7 @@ EOF
 broker.node.id=2
 broker.local.host.port=127.0.0.1:19002
 broker.member.host.ports=1@127.0.0.1:19001
-broker.group.name=brz-test
+broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
@@ -235,12 +235,12 @@ run_remote_bench() {
 
     write_two_broker_configs
 
-    "$BIN/brz-broker" --config "$CONFIGS/broker_1.properties" \
+    "$BIN/ringloom-broker" --config "$CONFIGS/broker_1.properties" \
         > "$LOGS/broker_a_$TAG.log" 2>&1 &
     PIDS+=($!)
     local BA_PID=${PIDS[-1]}
 
-    "$BIN/brz-broker" --config "$CONFIGS/broker_2.properties" \
+    "$BIN/ringloom-broker" --config "$CONFIGS/broker_2.properties" \
         > "$LOGS/broker_b_$TAG.log" 2>&1 &
     PIDS+=($!)
     local BB_PID=${PIDS[-1]}
@@ -250,9 +250,9 @@ run_remote_bench() {
     sleep 2  # cluster settle
 
     # Echo on broker B.
-    "$BIN/brz-test-echo-service" \
+    "$BIN/ringloom-test-echo-service" \
         --storage-path "$STORAGE" \
-        --group brz-test \
+        --group ringloom-test \
         --service-name echo \
         --broker-node-id 2 \
         --quiet \
@@ -264,9 +264,9 @@ run_remote_bench() {
     wait_for_ready "$LOGS/echo_remote_$TAG.log" 5
 
     # Ping on broker A.
-    "$BIN/brz-test-ping-service" \
+    "$BIN/ringloom-test-ping-service" \
         --storage-path "$STORAGE" \
-        --group brz-test \
+        --group ringloom-test \
         --service-name ping \
         --broker-node-id 1 \
         --target-service echo \
@@ -285,13 +285,13 @@ run_remote_bench() {
     stop_pid "$BA_PID"
     sleep 1
 
-    rm -rf "$STORAGE/brz-test"
-    mkdir -p "$STORAGE/brz-test/services"
+    rm -rf "$STORAGE/ringloom-test"
+    mkdir -p "$STORAGE/ringloom-test/services"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────
 
-echo "BRZ Broker Benchmark Suite"
+echo "RingLoom Broker Benchmark Suite"
 echo "=========================="
 echo "Binaries:   $BIN"
 echo "Results:    $RESULTS_DIR"

@@ -1,6 +1,6 @@
 //! Recovery Time Benchmarks
 //!
-//! Measures how quickly the BRZ system recovers from failures:
+//! Measures how quickly the RingLoom system recovers from failures:
 //!
 //! 1. **Service recovery** — a service crashes, the broker detects the loss via
 //!    heartbeat timeout, and a replacement service registers successfully.
@@ -11,9 +11,9 @@
 //!    messaging resumes end-to-end.
 
 const std = @import("std");
-const platform = @import("brz_common").platform;
+const platform = @import("ringloom_common").platform;
 const Clock = platform.Clock;
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 const BrokerSpec = testing_mod.BrokerSpec;
 const ServiceSpec = testing_mod.ServiceSpec;
@@ -36,7 +36,7 @@ test "service recovery time after crash" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const crashy = try harness.startService(.{
-        .executable_name = "brz-test-crashy-service",
+        .executable_name = "ringloom-test-crashy-service",
         .service_name = "crashy",
         .extra_args = &.{ "--crash-after-ms", "2000" },
     });
@@ -53,7 +53,7 @@ test "service recovery time after crash" {
 
     // Start a replacement service under the same logical name.
     const replacement = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "crashy",
         .extra_args = &.{"--quiet"},
     });
@@ -102,7 +102,7 @@ test "service recovery time after kill" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "killable",
         .extra_args = &.{"--quiet"},
     });
@@ -118,7 +118,7 @@ test "service recovery time after kill" {
 
     // Start a replacement.
     const replacement = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "killable",
         .extra_args = &.{"--quiet"},
     });
@@ -184,7 +184,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     platform.sleepNanos(2 * std.time.ns_per_s);
 
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
         .broker_node_id = 2,
         .extra_args = &.{"--quiet"},
@@ -200,7 +200,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     defer allocator.free(baseline_result_path);
 
     const baseline_ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .broker_node_id = 1,
         .extra_args = &.{
@@ -236,7 +236,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
 
     // Re-register echo on the restarted broker.
     const echo2 = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
         .broker_node_id = 2,
         .extra_args = &.{"--quiet"},
@@ -254,7 +254,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     defer allocator.free(recovered_result_path);
 
     const recovery_ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .broker_node_id = 1,
         .extra_args = &.{
@@ -323,7 +323,7 @@ test "broker recovery - local services survive remote broker restart" {
     platform.sleepNanos(2 * std.time.ns_per_s);
 
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
         .broker_node_id = 1,
         .extra_args = &.{"--quiet"},
@@ -343,7 +343,7 @@ test "broker recovery - local services survive remote broker restart" {
     defer allocator.free(result_path);
 
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .broker_node_id = 1,
         .extra_args = &.{
@@ -393,7 +393,7 @@ test "rapid service restart recovery" {
 
     for (0..iterations) |i| {
         const svc = try harness.startService(.{
-            .executable_name = "brz-test-echo-service",
+            .executable_name = "ringloom-test-echo-service",
             .service_name = "rapid",
             .extra_args = &.{"--quiet"},
         });
@@ -407,7 +407,7 @@ test "rapid service restart recovery" {
         platform.sleepNanos(12 * std.time.ns_per_s);
 
         const replacement = try harness.startService(.{
-            .executable_name = "brz-test-echo-service",
+            .executable_name = "ringloom-test-echo-service",
             .service_name = "rapid",
             .extra_args = &.{"--quiet"},
         });

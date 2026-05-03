@@ -1,4 +1,4 @@
-//! Control plane module for the BRZ broker.
+//! Control plane module for the RingLoom broker.
 //!
 //! This is the single import point for control-plane functionality.
 //! It re-exports the ControlLoop, ServiceRegistry, control messages,

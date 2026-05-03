@@ -1,6 +1,6 @@
-//! Atomic operations for the BRZ broker.
+//! Atomic operations for the RingLoom broker.
 //!
-//! Wraps Zig's atomic builtins with methods named to match BRZ conventions.
+//! Wraps Zig's atomic builtins with methods named to match RingLoom conventions.
 //! All methods inline to single hardware instructions on x86-64.
 
 const std = @import("std");
@@ -8,7 +8,7 @@ const constants = @import("constants.zig");
 
 /// A 64-bit atomic integer.
 ///
-/// Wraps Zig's `std.atomic.Value(i64)` with methods named to match BRZ conventions.
+/// Wraps Zig's `std.atomic.Value(i64)` with methods named to match RingLoom conventions.
 /// This is a thin wrapper — all methods inline to a single instruction on x86-64.
 pub const AtomicI64 = struct {
     value: std.atomic.Value(i64),

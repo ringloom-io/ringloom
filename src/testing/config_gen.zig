@@ -1,4 +1,4 @@
-//! Configuration file generator for BRZ end-to-end tests.
+//! Configuration file generator for RingLoom end-to-end tests.
 //!
 //! `ConfigGen` produces `.properties` files consumed by the broker and
 //! service runtimes.  Each generated file is written to the harness's
@@ -12,8 +12,8 @@
 //! broker.node.id=1
 //! broker.local.host.port=127.0.0.1:19001
 //! broker.member.host.ports=2@10.0.0.2:19002,3@10.0.0.3:19003
-//! broker.group.name=brz-test
-//! broker.storage.path=/tmp/brz-e2e-…/storage
+//! broker.group.name=ringloom-test
+//! broker.storage.path=/tmp/ringloom-e2e-…/storage
 //! broker.control.buffer.size=65536
 //! broker.messages.buffer.size=1048576
 //! broker.threading.mode=dedicated
@@ -22,11 +22,11 @@
 //!
 //! Service properties (`service_<name>.properties`):
 //! ```text
-//! brz.service.name=my-service
-//! brz.group.name=brz-test
-//! brz.storage.path=/tmp/brz-e2e-…/storage
-//! brz.broker.node.id=1
-//! brz.service.leader_election.enabled=false
+//! ringloom.service.name=my-service
+//! ringloom.group.name=ringloom-test
+//! ringloom.storage.path=/tmp/ringloom-e2e-…/storage
+//! ringloom.broker.node.id=1
+//! ringloom.service.leader_election.enabled=false
 //! ```
 
 const std = @import("std");
@@ -152,13 +152,13 @@ pub const ConfigGen = struct {
         defer buf = writer.toArrayList();
 
         try writer.writer.print("# Auto-generated service config for {s}\n", .{spec.service_name});
-        try writer.writer.print("brz.service.name={s}\n", .{spec.service_name});
-        try writer.writer.print("brz.group.name={s}\n", .{spec.group_name});
-        try writer.writer.print("brz.storage.path={s}\n", .{storage_path});
-        try writer.writer.print("brz.broker.node.id={d}\n", .{spec.broker_node_id});
+        try writer.writer.print("ringloom.service.name={s}\n", .{spec.service_name});
+        try writer.writer.print("ringloom.group.name={s}\n", .{spec.group_name});
+        try writer.writer.print("ringloom.storage.path={s}\n", .{storage_path});
+        try writer.writer.print("ringloom.broker.node.id={d}\n", .{spec.broker_node_id});
 
         const le_str = if (spec.leader_election_enabled) "true" else "false";
-        try writer.writer.print("brz.service.leader_election.enabled={s}\n", .{le_str});
+        try writer.writer.print("ringloom.service.leader_election.enabled={s}\n", .{le_str});
 
         return self.allocator.dupe(u8, writer.written());
     }
@@ -196,7 +196,7 @@ test "writeBrokerConfig generates valid properties file" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-config-gen-broker";
+    const tmp_dir = "/tmp/ringloom-test-config-gen-broker";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -213,7 +213,7 @@ test "writeBrokerConfig generates valid properties file" {
 
     try std.testing.expect(mem.indexOf(u8, content, "broker.node.id=1") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.local.host.port=127.0.0.1:19001") != null);
-    try std.testing.expect(mem.indexOf(u8, content, "broker.group.name=brz-test") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.group.name=ringloom-test") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.storage.path=/tmp/storage") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.control.buffer.size=65536") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.messages.buffer.size=1048576") != null);
@@ -225,7 +225,7 @@ test "writeBrokerConfig file is named broker_<node_id>.properties" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-config-gen-name";
+    const tmp_dir = "/tmp/ringloom-test-config-gen-name";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -244,7 +244,7 @@ test "writeBrokerConfig includes peer endpoints" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-config-gen-peers";
+    const tmp_dir = "/tmp/ringloom-test-config-gen-peers";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -273,7 +273,7 @@ test "writeBrokerConfig omits peer line when no peers" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-config-gen-nopeers";
+    const tmp_dir = "/tmp/ringloom-test-config-gen-nopeers";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -295,7 +295,7 @@ test "writeBrokerConfig respects custom spec values" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-config-gen-custom";
+    const tmp_dir = "/tmp/ringloom-test-config-gen-custom";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -333,7 +333,7 @@ test "writeServiceConfig generates valid properties file" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-config-gen-svc";
+    const tmp_dir = "/tmp/ringloom-test-config-gen-svc";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -351,18 +351,18 @@ test "writeServiceConfig generates valid properties file" {
     const content = try readFileContent(allocator, path);
     defer allocator.free(content);
 
-    try std.testing.expect(mem.indexOf(u8, content, "brz.service.name=my-service") != null);
-    try std.testing.expect(mem.indexOf(u8, content, "brz.group.name=brz-test") != null);
-    try std.testing.expect(mem.indexOf(u8, content, "brz.storage.path=/tmp/storage") != null);
-    try std.testing.expect(mem.indexOf(u8, content, "brz.broker.node.id=1") != null);
-    try std.testing.expect(mem.indexOf(u8, content, "brz.service.leader_election.enabled=false") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "ringloom.service.name=my-service") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "ringloom.group.name=ringloom-test") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "ringloom.storage.path=/tmp/storage") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "ringloom.broker.node.id=1") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "ringloom.service.leader_election.enabled=false") != null);
 }
 
 test "writeServiceConfig file is named service_<name>.properties" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-config-gen-svcname";
+    const tmp_dir = "/tmp/ringloom-test-config-gen-svcname";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -384,7 +384,7 @@ test "writeServiceConfig with leader election enabled" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-config-gen-svcle";
+    const tmp_dir = "/tmp/ringloom-test-config-gen-svcle";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -403,14 +403,14 @@ test "writeServiceConfig with leader election enabled" {
     const content = try readFileContent(allocator, path);
     defer allocator.free(content);
 
-    try std.testing.expect(mem.indexOf(u8, content, "brz.service.leader_election.enabled=true") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "ringloom.service.leader_election.enabled=true") != null);
 }
 
 test "writeServiceConfig with custom broker node and group" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-config-gen-svccustom";
+    const tmp_dir = "/tmp/ringloom-test-config-gen-svccustom";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -430,9 +430,9 @@ test "writeServiceConfig with custom broker node and group" {
     const content = try readFileContent(allocator, path);
     defer allocator.free(content);
 
-    try std.testing.expect(mem.indexOf(u8, content, "brz.broker.node.id=3") != null);
-    try std.testing.expect(mem.indexOf(u8, content, "brz.group.name=prod-group") != null);
-    try std.testing.expect(mem.indexOf(u8, content, "brz.storage.path=/opt/shm") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "ringloom.broker.node.id=3") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "ringloom.group.name=prod-group") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "ringloom.storage.path=/opt/shm") != null);
 }
 
 test "formatPeerEndpoints with empty peers returns empty string" {

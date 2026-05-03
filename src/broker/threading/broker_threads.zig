@@ -5,7 +5,7 @@
 //! Shutdown order: receiver → sender → control.
 
 const std = @import("std");
-const platform = @import("brz_common").platform;
+const platform = @import("ringloom_common").platform;
 const ThreadRunner = platform.ThreadRunner;
 const EventLoop = platform.EventLoop;
 const IdleStrategy = platform.IdleStrategy;
@@ -24,9 +24,9 @@ pub const BrokerThreads = struct {
         receiver_idle: IdleStrategy,
     ) BrokerThreads {
         return .{
-            .control_runner = ThreadRunner.init("brz-control", control_loop, control_idle),
-            .sender_runner = ThreadRunner.init("brz-sender", sender_loop, sender_idle),
-            .receiver_runner = ThreadRunner.init("brz-receiver", receiver_loop, receiver_idle),
+            .control_runner = ThreadRunner.init("ringloom-control", control_loop, control_idle),
+            .sender_runner = ThreadRunner.init("ringloom-sender", sender_loop, sender_idle),
+            .receiver_runner = ThreadRunner.init("ringloom-receiver", receiver_loop, receiver_idle),
         };
     }
 

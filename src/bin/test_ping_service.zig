@@ -11,17 +11,17 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const brz_service = @import("brz_service");
-const brz_common = @import("brz_common");
-const brz_testing = @import("brz_testing");
+const ringloom_service = @import("ringloom_service");
+const ringloom_common = @import("ringloom_common");
+const ringloom_testing = @import("ringloom_testing");
 
-const BrzEngine = brz_service.BrzEngine;
-const ServiceConfig = brz_service.ServiceConfig;
-const ServiceClient = brz_service.ServiceClient;
-const Clock = brz_common.Clock;
-const platform = brz_common.platform;
-const latency_trace = brz_common.message.latency_trace;
-const Histogram = brz_testing.Histogram;
+const RingLoomEngine = ringloom_service.RingLoomEngine;
+const ServiceConfig = ringloom_service.ServiceConfig;
+const ServiceClient = ringloom_service.ServiceClient;
+const Clock = ringloom_common.Clock;
+const platform = ringloom_common.platform;
+const latency_trace = ringloom_common.message.latency_trace;
+const Histogram = ringloom_testing.Histogram;
 
 // ── Mutable file-level state ─────────────────────────────────────────
 
@@ -133,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
         .idle_strategy = idle_strategy,
     };
 
-    const engine = BrzEngine.start(allocator, config) catch |err| {
+    const engine = RingLoomEngine.start(allocator, config) catch |err| {
         try stderr.print("ping: failed to start engine: {}\n", .{err});
         try stderr.flush();
         std.process.exit(1);

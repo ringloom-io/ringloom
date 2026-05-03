@@ -1,4 +1,4 @@
-//! Result writer for BRZ end-to-end tests and performance benchmarks.
+//! Result writer for RingLoom end-to-end tests and performance benchmarks.
 //!
 //! Provides structured result types (`PerfResult`, `CorrectnessResult`)
 //! and functions to serialise them as JSON files into a results directory.
@@ -170,7 +170,7 @@ test "writePerfResult creates valid JSON file" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-result-writer-perf";
+    const tmp_dir = "/tmp/ringloom-test-result-writer-perf";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -214,7 +214,7 @@ test "writePerfResult file is named suite_scenario.json" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-result-writer-name";
+    const tmp_dir = "/tmp/ringloom-test-result-writer-name";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -248,7 +248,7 @@ test "writeCorrectnessResult creates JSON for passing test" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-result-writer-pass";
+    const tmp_dir = "/tmp/ringloom-test-result-writer-pass";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -277,7 +277,7 @@ test "writeCorrectnessResult creates JSON for failing test" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-result-writer-fail";
+    const tmp_dir = "/tmp/ringloom-test-result-writer-fail";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 
@@ -304,7 +304,7 @@ test "writeCorrectnessResult file is named scenario.json" {
     // Given
     const allocator = std.testing.allocator;
 
-    const tmp_dir = "/tmp/brz-test-result-writer-cname";
+    const tmp_dir = "/tmp/ringloom-test-result-writer-cname";
     try test_io.createDirPath(tmp_dir);
     defer test_io.deleteTree(tmp_dir) catch {};
 

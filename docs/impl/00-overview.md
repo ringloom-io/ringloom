@@ -1,6 +1,6 @@
-# BRZ Broker Implementation Guide — Overview & Index
+# RingLoom Broker Implementation Guide — Overview & Index
 
-This document series describes how to build **BRZ**, a high-performance IPC broker in
+This document series describes how to build **RingLoom**, a high-performance IPC broker in
 **Zig**, from the ground up. Each document covers a self-contained layer of the system,
 ordered so that later documents build only on concepts and code introduced earlier.
 
@@ -8,7 +8,7 @@ ordered so that later documents build only on concepts and code introduced earli
 
 ## Project Overview
 
-BRZ is a high-performance IPC framework designed for low-latency, high-throughput
+RingLoom is a high-performance IPC framework designed for low-latency, high-throughput
 communication between services on the same host and across hosts.
 
 - **Same-host communication** uses shared-memory ring buffers. Services write messages
@@ -16,7 +16,7 @@ communication between services on the same host and across hosts.
   kernel involvement on the hot path.
 - **Cross-host communication** uses TCP connections between brokers. Each broker pair
   communicates over a pair of unidirectional TCP connections (one for sending, one for
-  receiving). The TCP transport lives in a separate library (`brz_tcp`) with pluggable
+  receiving). The TCP transport lives in a separate library (`ringloom_tcp`) with pluggable
   I/O backends: `io_uring` on Linux, `kqueue` on macOS, and future optional kernel-bypass
   backends (TCPDirect, F-Stack).
 - **A broker process runs on every host.** It coordinates message routing between local
@@ -44,9 +44,9 @@ This has been replaced with **plain TCP**:
 - Removed: NAK frames, retransmit buffers, loss detection, Status Messages, receive log
   buffers, fragment reassembly, and setup/teardown frame types.
 
-### Completion-Based I/O via `brz_tcp` Library
+### Completion-Based I/O via `ringloom_tcp` Library
 
-All TCP I/O goes through the `brz_tcp` library, which provides a platform-abstracted,
+All TCP I/O goes through the `ringloom_tcp` library, which provides a platform-abstracted,
 completion-based I/O engine:
 
 | Platform | Backend | API |
@@ -82,7 +82,7 @@ The documents are ordered so that each phase depends only on previous phases.
 | 1 | [`01-platform-abstraction.md`](01-platform-abstraction.md) | OS abstractions: `mmap`, clocks, threads, atomics, process synchronization (`futex`, `ulock`, `WaitOnAddress`) |
 | 2 | [`02-memory-layout-and-shared-memory.md`](02-memory-layout-and-shared-memory.md) | Metadata files, shared memory regions, memory-mapped I/O, file layout constants |
 | 3 | [`03-concurrent-data-structures.md`](03-concurrent-data-structures.md) | MPSC ring buffer, atomic counters, error log, trailer layout |
-| 4 | [`04-tcp-transport-library.md`](04-tcp-transport-library.md) | `brz_tcp` library: I/O engine interface, io_uring/kqueue backends, connection management, message framing |
+| 4 | [`04-tcp-transport-library.md`](04-tcp-transport-library.md) | `ringloom_tcp` library: I/O engine interface, io_uring/kqueue backends, connection management, message framing |
 | 5 | [`05-send-path.md`](05-send-path.md) | Send ring buffer, sender event loop, per-peer write queues, TCP write mechanics |
 | 6 | [`06-receive-path.md`](06-receive-path.md) | TCP framing, receiver event loop, message routing, connection acceptance |
 | 7 | [`08-service-ipc.md`](08-service-ipc.md) | Service ↔ broker IPC, same-host direct path, cross-host routed path |
@@ -90,7 +90,7 @@ The documents are ordered so that each phase depends only on previous phases.
 | 9 | [`10-threading-model.md`](10-threading-model.md) | Event loop architecture, idle strategies, inter-loop command passing |
 | 10 | [`11-cluster-management.md`](11-cluster-management.md) | Leader election, state synchronization, admin messages between brokers |
 | 11 | [`12-configuration-and-monitoring.md`](12-configuration-and-monitoring.md) | Configuration loading, monitoring counters, error handling patterns |
-| 12 | [`13-library-split-and-packaging.md`](13-library-split-and-packaging.md) | Library boundaries: `brz_common`, `brz_tcp`, `brz_broker`, `brz_service` |
+| 12 | [`13-library-split-and-packaging.md`](13-library-split-and-packaging.md) | Library boundaries: `ringloom_common`, `ringloom_tcp`, `ringloom_broker`, `ringloom_service` |
 | 13 | [`14-broker-executable.md`](14-broker-executable.md) | Broker main, startup sequence, signal handling |
 | 14 | [`15-e2e-testing.md`](15-e2e-testing.md) | End-to-end test framework, multi-broker test scenarios |
 
@@ -135,7 +135,7 @@ path is a bug.
    strategy engages (spin → yield → park). If work was done, the loop runs again
    immediately.
 
-7. **Completion-based I/O via `brz_tcp` (io_uring on Linux, kqueue on macOS).**
+7. **Completion-based I/O via `ringloom_tcp` (io_uring on Linux, kqueue on macOS).**
    TCP reads, writes, accepts, and connects all flow through the platform's async I/O
    engine. On Linux, `io_uring` batches submissions and completions for maximum
    throughput. On macOS, `kqueue` provides edge-triggered event notification.

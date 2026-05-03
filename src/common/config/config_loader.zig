@@ -40,10 +40,10 @@ pub const ConfigLoader = struct {
         return init(allocator, std.testing.io, null);
     }
 
-    /// Load configuration from a file. Tries BRZ_CONFIG_FILE env var first,
+    /// Load configuration from a file. Tries RINGLOOM_CONFIG_FILE env var first,
     /// falls back to broker.properties in the current directory.
     pub fn load(self: *const ConfigLoader) ConfigError!BrokerConfig {
-        const path = getEnvVar(self.environ_map, "BRZ_CONFIG_FILE") orelse "broker.properties";
+        const path = getEnvVar(self.environ_map, "RINGLOOM_CONFIG_FILE") orelse "broker.properties";
         return self.loadFromFile(path);
     }
 
@@ -321,9 +321,9 @@ fn applyEnvOverrides(
     var env_name_buf: [256]u8 = undefined;
 
     for (keys) |key| {
-        // Build env var name: "BRZ_" + key.replace('.', '_').toUpperCase()
-        var len: usize = 4;
-        @memcpy(env_name_buf[0..4], "BRZ_");
+        // Build env var name: "RINGLOOM_" + key.replace('.', '_').toUpperCase()
+        var len: usize = 9;
+        @memcpy(env_name_buf[0..9], "RINGLOOM_");
 
         for (key) |c| {
             env_name_buf[len] = if (c == '.') '_' else std.ascii.toUpper(c);
@@ -441,7 +441,7 @@ test "default values are applied for omitted properties" {
     const config = try loader.parseAndBuild(content);
 
     // Then
-    try std.testing.expectEqualStrings("brz", config.group_name);
+    try std.testing.expectEqualStrings("ringloom", config.group_name);
     try std.testing.expectEqualStrings("/dev/shm", config.storage_path);
     try std.testing.expectEqual(@as(u32, 65_536), config.control_buffer_size);
     try std.testing.expectEqual(@as(u32, 1_048_576), config.messages_buffer_size);

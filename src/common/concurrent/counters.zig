@@ -1,4 +1,4 @@
-//! Atomic counters manager for the BRZ broker.
+//! Atomic counters manager for the RingLoom broker.
 //!
 //! Manages shared atomic counters where each counter has a value (in one buffer)
 //! and metadata (in another buffer). The two buffers are separated so that

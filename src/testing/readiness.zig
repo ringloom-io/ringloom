@@ -1,4 +1,4 @@
-//! Readiness detection for BRZ end-to-end tests.
+//! Readiness detection for RingLoom end-to-end tests.
 //!
 //! Provides polling-based helpers that wait for child processes to reach
 //! a known-good state before the test proceeds.  The primary mechanism
@@ -23,7 +23,7 @@ const test_io = @import("io.zig");
 const process_runner = @import("process_runner.zig");
 const ProcessHandle = process_runner.ProcessHandle;
 const ProcessState = process_runner.ProcessState;
-const Clock = @import("brz_common").platform.Clock;
+const Clock = @import("ringloom_common").platform.Clock;
 
 /// Default polling interval used by wait functions (50 ms).
 pub const default_poll_interval_ms: u64 = 50;
@@ -277,7 +277,7 @@ fn countDirectoryEntries(path: []const u8) !usize {
 
 test "waitForFileExists succeeds when file already exists" {
     // Given — create a temporary file.
-    const tmp_path = "/tmp/brz-test-readiness-exists.marker";
+    const tmp_path = "/tmp/ringloom-test-readiness-exists.marker";
     var file = try test_io.createFile(tmp_path, .{});
     file.close(test_io.io());
     defer test_io.deleteFile(tmp_path) catch {};
@@ -288,7 +288,7 @@ test "waitForFileExists succeeds when file already exists" {
 
 test "waitForFileExists returns Timeout for missing file" {
     // Given — a path that does not exist.
-    const bogus_path = "/tmp/brz-test-readiness-missing-file-does-not-exist.marker";
+    const bogus_path = "/tmp/ringloom-test-readiness-missing-file-does-not-exist.marker";
 
     // When
     const result = waitForFileExists(bogus_path, 150);
@@ -299,14 +299,14 @@ test "waitForFileExists returns Timeout for missing file" {
 
 test "waitForDirectoryPopulated succeeds when directory has entries" {
     // Given
-    const dir_path = "/tmp/brz-test-readiness-populated";
+    const dir_path = "/tmp/ringloom-test-readiness-populated";
     try test_io.createDirPath(dir_path);
     defer test_io.deleteTree(dir_path) catch {};
 
     // Create two marker files.
-    var f1 = try test_io.createFile("/tmp/brz-test-readiness-populated/a.txt", .{});
+    var f1 = try test_io.createFile("/tmp/ringloom-test-readiness-populated/a.txt", .{});
     f1.close(test_io.io());
-    var f2 = try test_io.createFile("/tmp/brz-test-readiness-populated/b.txt", .{});
+    var f2 = try test_io.createFile("/tmp/ringloom-test-readiness-populated/b.txt", .{});
     f2.close(test_io.io());
 
     // When / Then — require at least 2 entries.
@@ -315,12 +315,12 @@ test "waitForDirectoryPopulated succeeds when directory has entries" {
 
 test "waitForDirectoryPopulated returns Timeout when not enough entries" {
     // Given
-    const dir_path = "/tmp/brz-test-readiness-underpop";
+    const dir_path = "/tmp/ringloom-test-readiness-underpop";
     try test_io.createDirPath(dir_path);
     defer test_io.deleteTree(dir_path) catch {};
 
     // Only one file, but we require 5.
-    var f = try test_io.createFile("/tmp/brz-test-readiness-underpop/only.txt", .{});
+    var f = try test_io.createFile("/tmp/ringloom-test-readiness-underpop/only.txt", .{});
     f.close(test_io.io());
 
     // When
@@ -373,7 +373,7 @@ test "waitForConditionCtx receives context" {
 test "waitForLogLine detects marker in echo output" {
     // Given
     const allocator = std.testing.allocator;
-    const logs_dir = "/tmp/brz-test-readiness-logline";
+    const logs_dir = "/tmp/ringloom-test-readiness-logline";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 
@@ -397,7 +397,7 @@ test "waitForLogLine detects marker in echo output" {
 test "waitForLogLine returns ProcessExited when child dies without marker" {
     // Given
     const allocator = std.testing.allocator;
-    const logs_dir = "/tmp/brz-test-readiness-nolog";
+    const logs_dir = "/tmp/ringloom-test-readiness-nolog";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 
@@ -424,7 +424,7 @@ test "waitForLogLine returns ProcessExited when child dies without marker" {
 test "waitForBrokerReady detects broker started marker" {
     // Given
     const allocator = std.testing.allocator;
-    const logs_dir = "/tmp/brz-test-readiness-broker";
+    const logs_dir = "/tmp/ringloom-test-readiness-broker";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 
@@ -445,7 +445,7 @@ test "waitForBrokerReady detects broker started marker" {
 test "waitForServiceReady detects service registered marker" {
     // Given
     const allocator = std.testing.allocator;
-    const logs_dir = "/tmp/brz-test-readiness-service";
+    const logs_dir = "/tmp/ringloom-test-readiness-service";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 

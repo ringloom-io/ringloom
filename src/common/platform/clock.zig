@@ -1,4 +1,4 @@
-//! Clock utilities for the BRZ broker.
+//! Clock utilities for the RingLoom broker.
 //!
 //! Provides monotonic nanosecond timestamps for timing and wall-clock
 //! millisecond timestamps for heartbeats.

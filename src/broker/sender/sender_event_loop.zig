@@ -11,21 +11,21 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const brz_common = @import("brz_common");
-const net = @import("brz_tcp").socket;
-const constants = brz_common.platform.constants;
-const Clock = brz_common.platform.clock.Clock;
-const AtomicBool = brz_common.platform.atomic.AtomicBool;
-const platform = brz_common.platform;
+const ringloom_common = @import("ringloom_common");
+const net = @import("ringloom_tcp").socket;
+const constants = ringloom_common.platform.constants;
+const Clock = ringloom_common.platform.clock.Clock;
+const AtomicBool = ringloom_common.platform.atomic.AtomicBool;
+const platform = ringloom_common.platform;
 
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
-const CountersManager = brz_common.concurrent.counters.CountersManager;
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
+const CountersManager = ringloom_common.concurrent.counters.CountersManager;
 
-const frame_parser = brz_common.protocol.frame_parser;
+const frame_parser = ringloom_common.protocol.frame_parser;
 const TcpFrameHeader = frame_parser.TcpFrameHeader;
-const latency_trace = brz_common.message.latency_trace;
+const latency_trace = ringloom_common.message.latency_trace;
 
-const tcp = @import("brz_tcp");
+const tcp = @import("ringloom_tcp");
 const HandshakeFrame = tcp.HandshakeFrame;
 const SocketConfig = tcp.SocketConfig;
 
@@ -188,7 +188,7 @@ pub const SenderEventLoop = struct {
         local_node_id: u8,
         allocator: std.mem.Allocator,
     ) !Self {
-        return Self.initWithGroup(send_ring_buffer, counters, local_node_id, allocator, "brz", false);
+        return Self.initWithGroup(send_ring_buffer, counters, local_node_id, allocator, "ringloom", false);
     }
 
     pub fn initWithGroup(

@@ -4,9 +4,9 @@
 //! the MessageConsumer agent.
 
 const std = @import("std");
-const brz_common = @import("brz_common");
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
-const constants = brz_common.memory.constants;
+const ringloom_common = @import("ringloom_common");
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
+const constants = ringloom_common.memory.constants;
 
 /// Callback signature for processing messages read from the ring buffer.
 pub const MessageHandler = RingBuffer.MessageHandler;

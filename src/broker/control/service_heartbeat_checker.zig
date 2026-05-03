@@ -6,11 +6,11 @@
 //! (collect then remove) avoids mutating the registry while iterating.
 
 const std = @import("std");
-const brz_common = @import("brz_common");
-const platform = brz_common.platform;
+const ringloom_common = @import("ringloom_common");
+const platform = ringloom_common.platform;
 const constants = platform.constants;
 const ServiceRegistry = @import("service_registry.zig").ServiceRegistry;
-const BuffersProvider = brz_common.memory.buffers_provider.BuffersProvider;
+const BuffersProvider = ringloom_common.memory.buffers_provider.BuffersProvider;
 const log = std.log.scoped(.heartbeat_checker);
 
 pub const ServiceHeartbeatChecker = struct {

@@ -12,8 +12,8 @@
 //! records the one-way latency in a histogram.
 
 const std = @import("std");
-const platform = @import("brz_common").platform;
-const testing_mod = @import("brz_testing");
+const platform = @import("ringloom_common").platform;
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 const result_writer = testing_mod.result_writer;
 
@@ -56,7 +56,7 @@ fn runLocalLatencyBench(
 
     // Given — echo service with one-way latency measurement enabled.
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
         .extra_args = &.{ "--quiet", "--result-file", echo_result_path },
     });
@@ -72,7 +72,7 @@ fn runLocalLatencyBench(
     // When — ping service sends messages with spinning backpressure and
     //        monotonic timestamp embedding for one-way latency measurement.
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
             "--target-service",  "echo",

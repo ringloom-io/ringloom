@@ -1,4 +1,4 @@
-//! Memory layout and shared memory subsystem for the BRZ broker.
+//! Memory layout and shared memory subsystem for the RingLoom broker.
 //!
 //! This is the single import point for all memory-related functionality.
 //! It re-exports the metadata file types, service scanner,

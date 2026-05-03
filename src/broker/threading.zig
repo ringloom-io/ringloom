@@ -1,4 +1,4 @@
-//! Threading model for the BRZ broker.
+//! Threading model for the RingLoom broker.
 //!
 //! This is the single import point for all threading-related functionality.
 //! It re-exports the command queue, composite event loop, threading mode,

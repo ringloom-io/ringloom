@@ -1,5 +1,5 @@
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 const readiness = testing_mod.readiness;
 
@@ -15,7 +15,7 @@ test "heartbeat timeout triggers service cleanup" {
 
     // — start crashy service that will exit abruptly after a delay
     const crashy = try harness.startService(.{
-        .executable_name = "brz-test-crashy-service",
+        .executable_name = "ringloom-test-crashy-service",
         .service_name = "crashy",
     });
     try harness.waitForServiceReady(crashy, 5000);
@@ -54,13 +54,13 @@ test "heartbeat timeout does not affect healthy services" {
 
     // — start a healthy echo service alongside a crashy one
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
 
     const crashy = try harness.startService(.{
-        .executable_name = "brz-test-crashy-service",
+        .executable_name = "ringloom-test-crashy-service",
         .service_name = "crashy",
     });
     try harness.waitForServiceReady(crashy, 5000);

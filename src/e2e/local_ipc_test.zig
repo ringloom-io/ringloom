@@ -1,5 +1,5 @@
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 
 test "two local services communicate via direct IPC" {
@@ -15,14 +15,14 @@ test "two local services communicate via direct IPC" {
 
     // Given — echo service is running and registered
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
 
     // When — start ping service that sends 10 messages to echo
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{ "--target-service", "echo", "--message-count", "10" },
     });
@@ -53,21 +53,21 @@ test "multiple services communicate via local IPC concurrently" {
 
     // Given — echo service is running
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
 
     // When — start two ping services concurrently, both targeting echo
     const ping_a = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping-a",
         .extra_args = &.{ "--target-service", "echo", "--message-count", "5" },
     });
     try harness.waitForServiceReady(ping_a, 5000);
 
     const ping_b = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping-b",
         .extra_args = &.{ "--target-service", "echo", "--message-count", "5" },
     });
@@ -100,14 +100,14 @@ test "local IPC with forwarder chain" {
 
     // Given — echo service is running at the end of the chain
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
 
     // Given — forwarder sits between ping and echo
     const forwarder = try harness.startService(.{
-        .executable_name = "brz-test-forwarder-service",
+        .executable_name = "ringloom-test-forwarder-service",
         .service_name = "forwarder",
         .extra_args = &.{ "--forward-to", "echo" },
     });
@@ -115,7 +115,7 @@ test "local IPC with forwarder chain" {
 
     // When — ping sends messages through forwarder to echo
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{ "--target-service", "forwarder", "--message-count", "5" },
     });

@@ -2,11 +2,11 @@
 
 const std = @import("std");
 const testing = std.testing;
-const brz_common = @import("brz_common");
+const ringloom_common = @import("ringloom_common");
 const IpcProducer = @import("ipc_producer.zig").IpcProducer;
 const IpcConsumer = @import("ipc_consumer.zig").IpcConsumer;
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
-const constants = brz_common.memory.constants;
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
+const constants = ringloom_common.memory.constants;
 
 const rb_alignment: ?std.mem.Alignment = @enumFromInt(std.math.log2(constants.ring_buffer_alignment));
 

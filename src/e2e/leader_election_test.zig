@@ -1,5 +1,5 @@
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 const readiness = testing_mod.readiness;
 
@@ -15,7 +15,7 @@ test "leader election elects one leader among two instances" {
 
     // When — start two leader-aware service instances with the same service name
     const leader_1 = try harness.startService(.{
-        .executable_name = "brz-test-leader-service",
+        .executable_name = "ringloom-test-leader-service",
         .service_name = "leader-svc",
         .leader_election_enabled = true,
         .extra_args = &.{"--instance-tag=A"},
@@ -23,7 +23,7 @@ test "leader election elects one leader among two instances" {
     try harness.waitForServiceReady(leader_1, 5000);
 
     const leader_2 = try harness.startService(.{
-        .executable_name = "brz-test-leader-service",
+        .executable_name = "ringloom-test-leader-service",
         .service_name = "leader-svc",
         .leader_election_enabled = true,
         .extra_args = &.{"--instance-tag=B"},
@@ -56,7 +56,7 @@ test "leader election fails over when leader stops" {
 
     // Start two leader-aware instances
     const leader_1 = try harness.startService(.{
-        .executable_name = "brz-test-leader-service",
+        .executable_name = "ringloom-test-leader-service",
         .service_name = "leader-svc",
         .leader_election_enabled = true,
         .extra_args = &.{"--instance-tag=primary"},
@@ -64,7 +64,7 @@ test "leader election fails over when leader stops" {
     try harness.waitForServiceReady(leader_1, 5000);
 
     const leader_2 = try harness.startService(.{
-        .executable_name = "brz-test-leader-service",
+        .executable_name = "ringloom-test-leader-service",
         .service_name = "leader-svc",
         .leader_election_enabled = true,
         .extra_args = &.{"--instance-tag=standby"},
@@ -102,7 +102,7 @@ test "leader election with three instances survives two failures" {
 
     // Start three leader-aware instances
     const instance_a = try harness.startService(.{
-        .executable_name = "brz-test-leader-service",
+        .executable_name = "ringloom-test-leader-service",
         .service_name = "leader-svc",
         .leader_election_enabled = true,
         .extra_args = &.{"--instance-tag=A"},
@@ -110,7 +110,7 @@ test "leader election with three instances survives two failures" {
     try harness.waitForServiceReady(instance_a, 5000);
 
     const instance_b = try harness.startService(.{
-        .executable_name = "brz-test-leader-service",
+        .executable_name = "ringloom-test-leader-service",
         .service_name = "leader-svc",
         .leader_election_enabled = true,
         .extra_args = &.{"--instance-tag=B"},
@@ -118,7 +118,7 @@ test "leader election with three instances survives two failures" {
     try harness.waitForServiceReady(instance_b, 5000);
 
     const instance_c = try harness.startService(.{
-        .executable_name = "brz-test-leader-service",
+        .executable_name = "ringloom-test-leader-service",
         .service_name = "leader-svc",
         .leader_election_enabled = true,
         .extra_args = &.{"--instance-tag=C"},

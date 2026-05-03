@@ -99,7 +99,7 @@ the hot path unconditionally safe.
 Configuration is loaded from a Java-style properties file at startup. The file path is
 determined by:
 
-1. The `BRZ_CONFIG_FILE` environment variable, if set.
+1. The `RINGLOOM_CONFIG_FILE` environment variable, if set.
 2. The default path: `broker.properties` in the current working directory.
 
 All properties follow a `broker.` prefix convention. Required properties must be present
@@ -110,7 +110,7 @@ or startup fails immediately with a descriptive error.
 | `broker.node.id` | `u8` | — | **Yes** | Unique node ID for this broker (0–255) |
 | `broker.local.host.port` | `host:port` | — | **Yes** | This broker's TCP listen address |
 | `broker.member.host.ports` | `id@host:port,...` | (empty) | No | Comma-separated peer list: `1@10.0.0.2:9100,2@10.0.0.3:9100` |
-| `broker.group.name` | `[]const u8` | `"brz"` | No | Group name (directory prefix under storage path) |
+| `broker.group.name` | `[]const u8` | `"ringloom"` | No | Group name (directory prefix under storage path) |
 | `broker.storage.path` | `[]const u8` | `/dev/shm` | No | Base path for metadata files |
 | `broker.control.buffer.size` | `u32` | `65536` | No | Control ring buffer capacity (bytes, power of 2) |
 | `broker.messages.buffer.size` | `u32` | `1048576` | No | Send ring buffer capacity (bytes, power of 2) |
@@ -194,7 +194,7 @@ pub const BrokerConfig = struct {
     peer_endpoints: []const PeerEndpoint,
 
     // ── Naming & storage ────────────────────────────────────────
-    group_name: []const u8 = "brz",
+    group_name: []const u8 = "ringloom",
     storage_path: []const u8 = "/dev/shm",
 
     // ── Buffer sizes (bytes — all must be power of 2 unless noted) ──
@@ -349,10 +349,10 @@ pub const ConfigLoader = struct {
         return .{ .allocator = allocator };
     }
 
-    /// Load configuration from a file. Tries `BRZ_CONFIG_FILE` env var first,
+    /// Load configuration from a file. Tries `RINGLOOM_CONFIG_FILE` env var first,
     /// falls back to `broker.properties` in the current directory.
     pub fn load(self: *const ConfigLoader) !BrokerConfig {
-        const path = std.posix.getenv("BRZ_CONFIG_FILE") orelse "broker.properties";
+        const path = std.posix.getenv("RINGLOOM_CONFIG_FILE") orelse "broker.properties";
         return self.loadFromFile(path);
     }
 
@@ -548,9 +548,9 @@ Every property can be overridden by an environment variable. The mapping is:
 
 1. Replace all `.` with `_`.
 2. Convert to uppercase.
-3. Prefix with `BRZ_`.
+3. Prefix with `RINGLOOM_`.
 
-Example: `broker.node.id` → `BRZ_BROKER_NODE_ID`.
+Example: `broker.node.id` → `RINGLOOM_BROKER_NODE_ID`.
 
 Environment variables take precedence over file values:
 
@@ -593,9 +593,9 @@ fn applyEnvOverrides(
     var env_name_buf: [256]u8 = undefined;
 
     for (keys) |key| {
-        // Build env var name: "BRZ_" + key.replace('.', '_').toUpperCase()
-        var len: usize = 4; // "BRZ_"
-        @memcpy(env_name_buf[0..4], "BRZ_");
+        // Build env var name: "RINGLOOM_" + key.replace('.', '_').toUpperCase()
+        var len: usize = 4; // "RINGLOOM_"
+        @memcpy(env_name_buf[0..4], "RINGLOOM_");
 
         for (key) |c| {
             env_name_buf[len] = if (c == '.') '_' else std.ascii.toUpper(c);
@@ -686,8 +686,8 @@ fn alignToPowerOfTwo(value: u32) u32 {
 ### 2.8 Service Configuration
 
 Services also have configuration, loaded from a separate file or supplied programmatically
-via the `BrzEngine` builder. Service config uses the same properties format with a
-`brz.service.` prefix:
+via the `RingLoomEngine` builder. Service config uses the same properties format with a
+`ringloom.service.` prefix:
 
 ```zig
 // src/config/service_config.zig
@@ -731,13 +731,13 @@ Service configuration properties file example:
 
 ```
 # service.properties
-brz.service.name=pricing
-brz.service.control.buffer.size=65536
-brz.service.messages.buffer.size=1048576
-brz.service.blocking.mode=false
-brz.service.heartbeat.timeout.ms=10000
-brz.service.idle.strategy=backoff
-brz.service.leader.election.enabled=false
+ringloom.service.name=pricing
+ringloom.service.control.buffer.size=65536
+ringloom.service.messages.buffer.size=1048576
+ringloom.service.blocking.mode=false
+ringloom.service.heartbeat.timeout.ms=10000
+ringloom.service.idle.strategy=backoff
+ringloom.service.leader.election.enabled=false
 ```
 
 ### 2.9 ThreadingMode & IdleStrategy Selection
@@ -1484,7 +1484,7 @@ pub const MonitoringSnapshot = struct {
 
     /// Format the snapshot as human-readable text to a writer.
     pub fn dump(self: *const MonitoringSnapshot, writer: anytype) !void {
-        try writer.print("=== BRZ Broker Node {d} — Monitoring Snapshot ===\n", .{self.node_id});
+        try writer.print("=== RingLoom Broker Node {d} — Monitoring Snapshot ===\n", .{self.node_id});
         try writer.print("Timestamp: {d} ms\n\n", .{self.timestamp_ms});
 
         try writer.print("--- Counters ---\n", .{});
@@ -1535,7 +1535,7 @@ pub const PeriodicMonitoringDump = struct {
         counters: *const SystemCounters,
         error_log: *const ErrorLog,
     ) PeriodicMonitoringDump {
-        const enabled = std.posix.getenv("BRZ_MONITORING_DUMP") != null;
+        const enabled = std.posix.getenv("RINGLOOM_MONITORING_DUMP") != null;
         return .{
             .enabled = enabled,
             .interval_ns = default_interval_ns,
@@ -1565,12 +1565,12 @@ pub const PeriodicMonitoringDump = struct {
 
 ### 7.4 External Monitoring Tool
 
-A standalone `brz-stat` tool reads the broker's metadata file and prints counters and
+A standalone `ringloom-stat` tool reads the broker's metadata file and prints counters and
 error log entries. It is a separate binary that `mmap`s the broker's `.dat` file
 read-only:
 
 ```zig
-// tools/brz_stat.zig
+// tools/ringloom_stat.zig
 
 const std = @import("std");
 const constants = @import("../src/platform/constants.zig");
@@ -1582,7 +1582,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const path = if (args.len > 1) args[1] else "/dev/shm/brz/services/broker_0.dat";
+    const path = if (args.len > 1) args[1] else "/dev/shm/ringloom/services/broker_0.dat";
 
     // Open and mmap the file read-only.
     const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
@@ -1631,7 +1631,7 @@ pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
 
     // Print counters.
-    try stdout.print("=== BRZ Counters ({s}) ===\n", .{path});
+    try stdout.print("=== RingLoom Counters ({s}) ===\n", .{path});
     counters.forEach(struct {
         fn print(id: usize, type_id: i32, label_text: []const u8, value: i64) void {
             _ = type_id;
@@ -1643,7 +1643,7 @@ pub fn main() !void {
     }.print);
 
     // Print error log.
-    try stdout.print("\n=== BRZ Error Log ===\n", .{});
+    try stdout.print("\n=== RingLoom Error Log ===\n", .{});
     error_log.forEach(struct {
         fn print(entry: ErrorLog.Entry) void {
             std.io.getStdOut().writer().print(
@@ -1710,7 +1710,7 @@ pub const Broker = struct {
         const loader = config_loader.ConfigLoader.init(allocator);
         const config = try loader.load();
 
-        std.log.info("BRZ Broker starting: node_id={d}, bind={s}:{d}, peers={d}", .{
+        std.log.info("RingLoom Broker starting: node_id={d}, bind={s}:{d}, peers={d}", .{
             config.node_id,
             config.local_host,
             config.local_port,
@@ -1775,7 +1775,7 @@ pub const Broker = struct {
         // ── Step 8: Create cluster manager (from doc 11) ────────
         // ...
 
-        std.log.info("BRZ Broker initialized: counters={d}, error_log={d}KB", .{
+        std.log.info("RingLoom Broker initialized: counters={d}, error_log={d}KB", .{
             SystemCounters.SystemCounter.count,
             config.error_log_buffer_size / 1024,
         });
@@ -1845,7 +1845,7 @@ All values are defined in `src/platform/constants.zig` (doc 01) and
 | Constant | Value | Description |
 |---|---|---|
 | `protocol_version` | `1` | TCP wire protocol version |
-| `handshake_magic` | `0x42525A00` | "BRZ\0" — TCP handshake magic bytes |
+| `handshake_magic` | `0x474E4952` | "RING" — TCP handshake magic bytes |
 | `handshake_length` | `24` | bytes | TCP handshake frame length |
 | `padding_msg_type_id` | `-1` | Sentinel msg_type_id for padding records in ring buffers |
 | `flag_admin` | `0x20` | Admin / cluster management message |
@@ -1909,7 +1909,7 @@ values in the properties table (§2.1) and the constants defined in doc 01.
 
 pub const defaults = struct {
     // Broker
-    pub const group_name = "brz";
+    pub const group_name = "ringloom";
     pub const storage_path = "/dev/shm";
     pub const control_buffer_size: u32 = 65_536;           // 64 KB
     pub const messages_buffer_size: u32 = 1_048_576;       // 1 MB
@@ -2010,7 +2010,7 @@ test "default values are applied for omitted properties" {
     const config = try loader.parseAndBuild(content);
 
     // Then
-    try testing.expectEqualStrings("brz", config.group_name);
+    try testing.expectEqualStrings("ringloom", config.group_name);
     try testing.expectEqualStrings("/dev/shm", config.storage_path);
     try testing.expectEqual(@as(u32, 65_536), config.control_buffer_size);
     try testing.expectEqual(@as(u32, 1_048_576), config.messages_buffer_size);
@@ -2786,7 +2786,7 @@ src/
     error_log.zig                 # ErrorLog (defined in doc 03 — referenced here)
     error_state.zig               # ErrorState + threadlocal (defined in doc 03 — referenced here)
 tools/
-  brz_stat.zig                   # Standalone monitoring tool — reads broker .dat file
+  ringloom_stat.zig                   # Standalone monitoring tool — reads broker .dat file
 ```
 
 **Dependency graph (within this step's new modules):**
@@ -2861,7 +2861,7 @@ periodic_dump.zig                ◄── broker.zig (wired into control loop)
 
 9.  **Create `src/monitoring/periodic_dump.zig`.** Implement `PeriodicMonitoringDump`
     with `doWork()` that periodically dumps a snapshot to stderr. Controlled by
-    `BRZ_MONITORING_DUMP` env var.
+    `RINGLOOM_MONITORING_DUMP` env var.
 
 10. **Wire counters into event loops.** Extend `ControlLoop` (doc 09/10),
     `SenderEventLoop` (doc 05), and `ReceiverEventLoop` (doc 06) to accept
@@ -2880,7 +2880,7 @@ periodic_dump.zig                ◄── broker.zig (wired into control loop)
     the file, slice out regions, initialize `CountersManager`, `SystemCounters`,
     `ErrorLog`, `PeriodicMonitoringDump`, and inject them into all event loops.
 
-14. **Create `tools/brz_stat.zig`.** Standalone binary that mmaps the broker's `.dat`
+14. **Create `tools/ringloom_stat.zig`.** Standalone binary that mmaps the broker's `.dat`
     file read-only and prints counters + error log. Add it to `build.zig` as a
     separate executable.
 

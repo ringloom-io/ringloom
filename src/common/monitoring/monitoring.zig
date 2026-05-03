@@ -87,7 +87,7 @@ pub const MonitoringSnapshot = struct {
 
     /// Format the snapshot as human-readable text to a writer.
     pub fn dump(self: *const MonitoringSnapshot, writer: *std.Io.Writer) !void {
-        try writer.print("=== BRZ Broker Node {d} — Monitoring Snapshot ===\n", .{self.node_id});
+        try writer.print("=== RingLoom Broker Node {d} — Monitoring Snapshot ===\n", .{self.node_id});
         try writer.print("Timestamp: {d} ms\n\n", .{self.timestamp_ms});
 
         try writer.print("--- Counters ---\n", .{});

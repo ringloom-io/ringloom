@@ -1,4 +1,4 @@
-//! Process synchronization primitives for the BRZ broker.
+//! Process synchronization primitives for the RingLoom broker.
 //!
 //! Provides cross-process wait/wake on a shared-memory i32 word.
 //! Dispatches to futex(2) on Linux, __ulock_wait/wake on macOS,

@@ -1,4 +1,4 @@
-//! Core types for the brz_tcp I/O engine abstraction.
+//! Core types for the ringloom_tcp I/O engine abstraction.
 //!
 //! Every platform backend (io_uring, kqueue) implements a common interface
 //! using these types. The broker programs against this interface; the

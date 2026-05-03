@@ -1,4 +1,4 @@
-//! Process runner for BRZ end-to-end tests.
+//! Process runner for RingLoom end-to-end tests.
 //!
 //! `ProcessHandle` manages the lifecycle of a child process spawned by
 //! the test harness: starting, liveness checks, graceful stop (SIGTERM),
@@ -28,7 +28,7 @@ const Allocator = std.mem.Allocator;
 const test_io = @import("io.zig");
 const log_capture = @import("log_capture.zig");
 const LogCapture = log_capture.LogCapture;
-const Clock = @import("brz_common").platform.Clock;
+const Clock = @import("ringloom_common").platform.Clock;
 
 /// The lifecycle state of a managed child process.
 pub const ProcessState = enum {
@@ -438,7 +438,7 @@ test "spawn and wait for a trivial child process" {
     // Given
     const allocator = std.testing.allocator;
 
-    const logs_dir = "/tmp/brz-test-process-runner";
+    const logs_dir = "/tmp/ringloom-test-process-runner";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 
@@ -462,7 +462,7 @@ test "stdout capture accumulates output from child" {
     // Given
     const allocator = std.testing.allocator;
 
-    const logs_dir = "/tmp/brz-test-process-runner-capture";
+    const logs_dir = "/tmp/ringloom-test-process-runner-capture";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 
@@ -471,7 +471,7 @@ test "stdout capture accumulates output from child" {
         allocator,
         "capture_test",
         "/bin/echo",
-        &.{"brz-marker-ready"},
+        &.{"ringloom-marker-ready"},
         logs_dir,
     );
     defer handle.deinit();
@@ -482,14 +482,14 @@ test "stdout capture accumulates output from child" {
     _ = try handle.drainAvailableOutput();
 
     // Then — the captured output must contain our marker.
-    try std.testing.expect(handle.stdout_capture.contains("brz-marker-ready"));
+    try std.testing.expect(handle.stdout_capture.contains("ringloom-marker-ready"));
 }
 
 test "kill terminates a long-running child" {
     // Given
     const allocator = std.testing.allocator;
 
-    const logs_dir = "/tmp/brz-test-process-runner-kill";
+    const logs_dir = "/tmp/ringloom-test-process-runner-kill";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 
@@ -517,7 +517,7 @@ test "stop sends SIGTERM to a running child" {
     // Given
     const allocator = std.testing.allocator;
 
-    const logs_dir = "/tmp/brz-test-process-runner-stop";
+    const logs_dir = "/tmp/ringloom-test-process-runner-stop";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 
@@ -549,7 +549,7 @@ test "markReady transitions state from spawned to ready" {
     // Given
     const allocator = std.testing.allocator;
 
-    const logs_dir = "/tmp/brz-test-process-runner-ready";
+    const logs_dir = "/tmp/ringloom-test-process-runner-ready";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 
@@ -575,7 +575,7 @@ test "setConfigPath stores and replaces config path" {
     // Given
     const allocator = std.testing.allocator;
 
-    const logs_dir = "/tmp/brz-test-process-runner-cfg";
+    const logs_dir = "/tmp/ringloom-test-process-runner-cfg";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 
@@ -605,7 +605,7 @@ test "waitForExit returns Timeout when child does not exit" {
     // Given
     const allocator = std.testing.allocator;
 
-    const logs_dir = "/tmp/brz-test-process-runner-timeout";
+    const logs_dir = "/tmp/ringloom-test-process-runner-timeout";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 
@@ -629,7 +629,7 @@ test "stdout log file is written alongside pipe capture" {
     // Given
     const allocator = std.testing.allocator;
 
-    const logs_dir = "/tmp/brz-test-process-runner-logfile";
+    const logs_dir = "/tmp/ringloom-test-process-runner-logfile";
     try test_io.createDirPath(logs_dir);
     defer test_io.deleteTree(logs_dir) catch {};
 

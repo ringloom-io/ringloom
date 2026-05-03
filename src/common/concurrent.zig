@@ -1,4 +1,4 @@
-//! Concurrent utilities for the BRZ broker.
+//! Concurrent utilities for the RingLoom broker.
 //!
 //! This is the single import point for all concurrency-related functionality.
 //! It re-exports the counters manager, deduplicating error log, and

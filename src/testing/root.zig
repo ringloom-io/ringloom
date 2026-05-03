@@ -1,7 +1,7 @@
-//! BRZ Testing Harness — orchestration library for end-to-end tests and
+//! RingLoom Testing Harness — orchestration library for end-to-end tests and
 //! performance benchmarks.
 //!
-//! This is the root source file for the `brz_testing` library module.
+//! This is the root source file for the `ringloom_testing` library module.
 //! It re-exports all public APIs: the test harness, temporary environment
 //! manager, configuration generator, process runner, readiness detection,
 //! log capture, result writers, and benchmark histogram.
@@ -9,7 +9,7 @@
 //! ## Quick start
 //!
 //! ```zig
-//! const testing_harness = @import("brz_testing");
+//! const testing_harness = @import("ringloom_testing");
 //! const TestHarness = testing_harness.TestHarness;
 //!
 //! var h = try TestHarness.init(allocator, "my_scenario");

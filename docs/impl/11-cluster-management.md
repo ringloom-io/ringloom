@@ -2,7 +2,7 @@
 
 > **Prerequisites:** [09 — Control Plane](09-control-plane.md) (service registration,
 > heartbeats, control ring buffer protocol), [04 — TCP Transport Library](04-tcp-transport-library.md)
-> (`brz_tcp` I/O engine, connection management, message framing), [10 — Threading Model](10-threading-model.md)
+> (`ringloom_tcp` I/O engine, connection management, message framing), [10 — Threading Model](10-threading-model.md)
 > (event loops, duty cycles, inter-loop command queues).
 >
 > **Depended on by:** [12 — Configuration & Monitoring](12-configuration-and-monitoring.md)
@@ -72,7 +72,7 @@ from doc 04 and SBE flyweights with `packed struct` overlays.
 
 ## 1. Overview
 
-A BRZ cluster consists of N broker processes, each running on a separate host, each
+A RingLoom cluster consists of N broker processes, each running on a separate host, each
 identified by a unique `nodeId` (a `u8`, range 0–255). Brokers communicate over
 TCP using the wire protocol from doc 04. Every broker maintains a full replica of the
 cluster's service registry — which services are running on which nodes — and converges
@@ -111,7 +111,7 @@ using the SETUP → SM handshake from doc 04:
 Broker A (nodeId=1)                        Broker B (nodeId=2)
      │                                          │
      │  TCP connect + Handshake {                │
-     │    magic=0x42525A00, version=1,           │
+     │    magic=0x474E4952, version=1,           │
      │    source=1, target=2, dir=SEND,          │
      │    epoch=1, group_hash=0xABCD}            │
      ├──────────────────────────────────────────►│
@@ -135,7 +135,7 @@ Broker A (nodeId=1)                        Broker B (nodeId=2)
    `NodeMembership` with `connection_state = .disconnected`.
 3. Enqueue a `connect_peer` command to the sender event loop (via the sender command
    queue from doc 10).
-4. The sender event loop initiates a TCP connection via `brz_tcp` and sends the
+4. The sender event loop initiates a TCP connection via `ringloom_tcp` and sends the
    24-byte handshake frame upon connection.
 5. When the receiver event loop accepts a TCP connection from a peer, it validates the
    handshake (magic, protocol version, group hash, target node ID, session epoch).
@@ -985,7 +985,7 @@ service IDs are monotonically incremented by the broker.
 This maps directly to the Java `ServiceLeaderElectionManager`.
 
 A service opts in by setting `leaderElectionEnabled = true` in its registration message
-(`brz.service.leader_election.enabled = true` in config). If not opted in, no leader
+(`ringloom.service.leader_election.enabled = true` in config). If not opted in, no leader
 is tracked for that service.
 
 ### 6.2 Triggers

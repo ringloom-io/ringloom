@@ -1,5 +1,5 @@
 const std = @import("std");
-const constants = @import("brz_common").platform.constants;
+const constants = @import("ringloom_common").platform.constants;
 
 /// Pre-allocated pool of frame-sized, 64-byte-aligned buffers for zero-allocation
 /// TCP frame building. Each buffer is acquired before constructing a frame and

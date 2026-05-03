@@ -1,5 +1,5 @@
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 const readiness = testing_mod.readiness;
 
@@ -15,7 +15,7 @@ test "service restart reuses metadata after cleanup" {
 
     // Start a crashy service that will exit abruptly after a delay
     const crashy = try harness.startService(.{
-        .executable_name = "brz-test-crashy-service",
+        .executable_name = "ringloom-test-crashy-service",
         .service_name = "ephemeral",
     });
     try harness.waitForServiceReady(crashy, 5000);
@@ -34,7 +34,7 @@ test "service restart reuses metadata after cleanup" {
     // The broker should allow re-registration; metadata file should be reused
     // since the original process is dead
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "ephemeral",
     });
     try harness.waitForServiceReady(echo, 5000);
@@ -63,7 +63,7 @@ test "service restart without prior cleanup still succeeds" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const crashy = try harness.startService(.{
-        .executable_name = "brz-test-crashy-service",
+        .executable_name = "ringloom-test-crashy-service",
         .service_name = "fast-restart",
     });
     try harness.waitForServiceReady(crashy, 5000);
@@ -77,7 +77,7 @@ test "service restart without prior cleanup still succeeds" {
     std.Io.sleep(std.testing.io, .fromNanoseconds(500 * std.time.ns_per_ms), .awake) catch unreachable;
 
     const replacement = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "fast-restart",
     });
     try harness.waitForServiceReady(replacement, 10000);

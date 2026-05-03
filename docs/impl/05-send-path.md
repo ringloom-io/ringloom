@@ -1,7 +1,7 @@
 # 05 — Send Path (TCP)
 
 > **Depends on:** [03 — Concurrent Data Structures](03-concurrent-data-structures.md) (MPSC ring buffer),
-> [04 — TCP Transport Library](04-tcp-transport-library.md) (`FrameHeader`, handshake frame, `brz_tcp` library)
+> [04 — TCP Transport Library](04-tcp-transport-library.md) (`FrameHeader`, handshake frame, `ringloom_tcp` library)
 >
 > **Depended on by:** [06 — Receive Path](06-receive-path.md) (coordinated connection management),
 > [08 — Service IPC](08-service-ipc.md) (send ring buffer integration)
@@ -9,7 +9,7 @@
 This document covers the **TCP sender path** — the subsystem that drains outbound
 messages from the send ring buffer, prepends a 24-byte length-prefixed frame header,
 enqueues them in per-peer write queues, and writes them to outgoing TCP connections
-via `brz_tcp` (io_uring on Linux, kqueue on macOS).
+via `ringloom_tcp` (io_uring on Linux, kqueue on macOS).
 
 The TCP send path is significantly simpler than the previous UDP design. TCP provides
 reliable, ordered byte-stream delivery, so there is no retransmit buffer, no message
@@ -60,7 +60,7 @@ Multiple local services write into a single shared-memory MPSC ring buffer locat
 broker's metadata file. A dedicated **sender thread** is the sole consumer. It reads
 messages, looks up the destination peer by `target_node_id`, prepends a 24-byte frame
 header, and enqueues the frame into the peer's write queue. The write queue is drained
-to the TCP connection via io_uring (Linux) or kqueue (macOS) through the `brz_tcp` library.
+to the TCP connection via io_uring (Linux) or kqueue (macOS) through the `ringloom_tcp` library.
 
 ### What Changed from UDP
 
@@ -84,7 +84,7 @@ to the TCP connection via io_uring (Linux) or kqueue (macOS) through the `brz_tc
 | 4 | Sender event loop | If peer CONNECTED → enqueue frame into peer's write queue |
 | 5 | Sender event loop | If peer not CONNECTED → drop message, increment counter |
 | 6 | Sender event loop | For each peer with queued data, submit TCP writes (up to `WRITE_BUDGET_PER_PEER`) |
-| 7 | `brz_tcp` | `submit_write` / `submit_writev` → io_uring SQE or kqueue kevent |
+| 7 | `ringloom_tcp` | `submit_write` / `submit_writev` → io_uring SQE or kqueue kevent |
 | 8 | Kernel | TCP sends data to remote peer |
 
 ---
@@ -177,7 +177,7 @@ const Clock = platform.Clock;
 const RingBuffer = @import("../concurrent/ring_buffer.zig").RingBuffer;
 const CommandQueue = @import("../concurrent/command_queue.zig").CommandQueue;
 const CountersManager = @import("../concurrent/counters.zig").CountersManager;
-const TcpIo = @import("../transport/brz_tcp.zig").TcpIo;
+const TcpIo = @import("../transport/ringloom_tcp.zig").TcpIo;
 const FrameHeader = @import("../protocol/frames.zig").FrameHeader;
 
 pub const SenderEventLoop = struct {
@@ -574,7 +574,7 @@ the ring buffer, effectively starving a peer that recovers from congestion.
 
 ## 6. TCP Write Mechanics
 
-The sender submits TCP writes through the `brz_tcp` library, which abstracts io_uring
+The sender submits TCP writes through the `ringloom_tcp` library, which abstracts io_uring
 (Linux) and kqueue (macOS).
 
 ### 6.1 Draining Write Queues
@@ -740,7 +740,7 @@ fn onWriteComplete(context: *anyopaque, user_data: u64, result: i32) void {
 
 ### 7.1 Wire Format
 
-The BRZ wire protocol uses a 24-byte length-prefixed frame header. All fields are
+The RingLoom wire protocol uses a 24-byte length-prefixed frame header. All fields are
 **little-endian**.
 
 ```
@@ -765,7 +765,7 @@ Offset  Size  Type   Field
 
 const std = @import("std");
 
-/// 24-byte frame header for the BRZ TCP wire protocol.
+/// 24-byte frame header for the RingLoom TCP wire protocol.
 /// All fields little-endian. Used for both data frames and heartbeats.
 ///
 /// The packed struct allows zero-copy overlay on wire bytes:

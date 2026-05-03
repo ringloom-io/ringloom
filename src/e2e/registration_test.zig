@@ -1,5 +1,5 @@
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 
 test "single service registers with broker" {
@@ -14,7 +14,7 @@ test "single service registers with broker" {
 
     // When — start echo service
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
@@ -39,20 +39,20 @@ test "multiple services register with broker" {
 
     // When — start multiple services
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
 
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{ "--target-service", "echo", "--message-count", "0" },
     });
     try harness.waitForServiceReady(ping, 5000);
 
     const forwarder = try harness.startService(.{
-        .executable_name = "brz-test-forwarder-service",
+        .executable_name = "ringloom-test-forwarder-service",
         .service_name = "forwarder",
     });
     try harness.waitForServiceReady(forwarder, 5000);
@@ -81,13 +81,13 @@ test "service registers and gets unique service id" {
 
     // When — start two instances of the same service name
     const echo1 = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo1, 5000);
 
     const echo2 = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo2, 5000);

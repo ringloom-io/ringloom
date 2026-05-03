@@ -6,8 +6,8 @@ const std = @import("std");
 const ServiceClient = @import("service_client.zig").ServiceClient;
 const ServiceInstance = @import("service_instance.zig").ServiceInstance;
 const IpcProducer = @import("ipc/ipc_producer.zig").IpcProducer;
-const brz_common = @import("brz_common");
-const memory = brz_common.memory;
+const ringloom_common = @import("ringloom_common");
+const memory = ringloom_common.memory;
 
 const BuffersProvider = memory.BuffersProvider;
 const BrokerMetadataFile = memory.BrokerMetadataFile;

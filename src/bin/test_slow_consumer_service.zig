@@ -6,12 +6,12 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const brz_service = @import("brz_service");
-const brz_common = @import("brz_common");
+const ringloom_service = @import("ringloom_service");
+const ringloom_common = @import("ringloom_common");
 
-const BrzEngine = brz_service.BrzEngine;
-const ServiceConfig = brz_service.ServiceConfig;
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
+const RingLoomEngine = ringloom_service.RingLoomEngine;
+const ServiceConfig = ringloom_service.ServiceConfig;
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 
 // ── Mutable file-level state (acceptable for a test binary) ──────────
 
@@ -32,7 +32,7 @@ fn messageHandler(_: i32, payload: []const u8) void {
 
     // Artificial delay — the whole point of this service.
     if (delay_per_message_ms > 0) {
-        brz_common.platform.sleepNanos(delay_per_message_ms * std.time.ns_per_ms);
+        ringloom_common.platform.sleepNanos(delay_per_message_ms * std.time.ns_per_ms);
     }
 
     if (max_messages > 0 and received_count >= max_messages) {
@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ── Start engine ─────────────────────────────────────────────────
 
-    const engine = BrzEngine.start(allocator, ServiceConfig{
+    const engine = RingLoomEngine.start(allocator, ServiceConfig{
         .storage_path = storage_path,
         .group = group,
         .service_name = service_name,
@@ -142,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
     // ── Main loop — sleep and check for shutdown ─────────────────────
 
     while (!shutdown_requested.load(.acquire)) {
-        brz_common.platform.sleepNanos(100 * std.time.ns_per_ms);
+        ringloom_common.platform.sleepNanos(100 * std.time.ns_per_ms);
     }
 
     // ── Shutdown ─────────────────────────────────────────────────────

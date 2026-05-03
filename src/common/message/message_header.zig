@@ -1,4 +1,4 @@
-//! BRZ message header — fixed-size prefix on every application message.
+//! RingLoom message header — fixed-size prefix on every application message.
 //!
 //! Layout (32 bytes total, extern struct for precise memory layout):
 //!   +0:   correlation_id       (i64)

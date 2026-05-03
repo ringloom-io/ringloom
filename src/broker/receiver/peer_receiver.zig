@@ -1,4 +1,4 @@
-//! Per-peer receiver connection state for the BRZ broker TCP receive path.
+//! Per-peer receiver connection state for the RingLoom broker TCP receive path.
 //!
 //! Each connected peer broker is represented by a PeerReceiver. This struct
 //! holds the per-peer TCP connection state, read state machine for TCP stream
@@ -8,11 +8,11 @@
 //! no gap detection, no NAK generation, and no fragment reassembly.
 
 const std = @import("std");
-const brz_common = @import("brz_common");
-const net = @import("brz_tcp").socket;
-const constants = brz_common.platform.constants;
-const Clock = brz_common.platform.clock.Clock;
-const frame_parser = brz_common.protocol.frame_parser;
+const ringloom_common = @import("ringloom_common");
+const net = @import("ringloom_tcp").socket;
+const constants = ringloom_common.platform.constants;
+const Clock = ringloom_common.platform.clock.Clock;
+const frame_parser = ringloom_common.protocol.frame_parser;
 const TcpFrameHeader = frame_parser.TcpFrameHeader;
 
 pub const LivenessState = enum {
@@ -190,7 +190,7 @@ pub const PeerReceiver = struct {
         session_epoch: u32,
     ) void {
         if (self.socket_fd >= 0) {
-            brz_common.platform.closeFd(self.socket_fd);
+            ringloom_common.platform.closeFd(self.socket_fd);
         }
         self.socket_fd = socket_fd;
         self.address = address;
@@ -204,7 +204,7 @@ pub const PeerReceiver = struct {
 
     pub fn close(self: *Self) void {
         if (self.socket_fd >= 0) {
-            brz_common.platform.closeFd(self.socket_fd);
+            ringloom_common.platform.closeFd(self.socket_fd);
             self.socket_fd = -1;
         }
         self.connected = false;

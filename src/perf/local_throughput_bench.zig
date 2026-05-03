@@ -8,7 +8,7 @@
 //! Sizes:     32 B · 256 B · 1024 B · 4096 B
 
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 
 const TestHarness = testing_mod.TestHarness;
 const BrokerSpec = testing_mod.BrokerSpec;
@@ -35,7 +35,7 @@ fn runLocalThroughputBench(
     try harness.waitForBrokerReady(broker, 5000);
 
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
         .extra_args = &.{"--quiet"},
     });
@@ -50,7 +50,7 @@ fn runLocalThroughputBench(
 
     // When — the ping service fires a sustained burst and records throughput.
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
             "--target-service",  "echo",

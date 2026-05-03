@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = @import("brz_tcp").socket;
+const net = @import("ringloom_tcp").socket;
 
 /// Commands sent from the control loop to the sender event loop via the command queue.
 pub const SenderCommand = union(enum) {

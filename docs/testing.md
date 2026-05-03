@@ -1,4 +1,4 @@
-# Testing Guide — BRZ Broker
+# Testing Guide — RingLoom Broker
 
 Instructions for running end-to-end correctness tests and performance benchmarks.
 Intended for developers working on the library and for automated agents.
@@ -93,7 +93,7 @@ zig build e2e
 ### How the harness works
 
 Each test:
-1. Creates an isolated temp workspace under `/tmp/brz-e2e-*`
+1. Creates an isolated temp workspace under `/tmp/ringloom-e2e-*`
 2. Generates broker and service config files
 3. Spawns processes from `zig-out/bin/`
 4. Waits for readiness using log markers and file existence checks
@@ -106,7 +106,7 @@ Each test:
 If a test fails, the harness preserves the temp directory. Look for:
 
 ```text
-/tmp/brz-e2e-<scenario>-<seq>/
+/tmp/ringloom-e2e-<scenario>-<seq>/
 ├── config/     # Generated broker/service properties files
 ├── logs/       # stdout/stderr capture per process
 ├── results/    # JSON result files (if produced)
@@ -165,7 +165,7 @@ zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=Relea
 ./scripts/run-benchmarks.sh --output-dir ./my-results
 ```
 
-Results are written to `/tmp/brz-bench-results/` by default.
+Results are written to `/tmp/ringloom-bench-results/` by default.
 
 - **Local** runs publish both ping and echo JSON, because the local throughput
   table intentionally uses the ping-side send rate as a same-host IPC metric.
@@ -206,7 +206,7 @@ zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=Relea
 ./scripts/bench-single-size.sh 1024 5 --output-dir ./my-results
 ```
 
-Best results are saved to `/tmp/brz-bench-best/` by default. The script prints
+Best results are saved to `/tmp/ringloom-bench-best/` by default. The script prints
 a summary with throughput, end-to-end latency percentiles, and—when the payload
 is large enough for tracing (32 B+)—a stage breakdown for broker A queueing,
 transport, and broker B local delivery.
@@ -420,7 +420,7 @@ sudo ./scripts/tune-system.sh --revert
 | `kernel.timer_migration=0` | Prevents timer callbacks from migrating to isolated cores. |
 | Migrate IRQs | Moves IRQ affinity to housekeeping cores 0–1 (best-effort; some IRQs are non-writable). |
 
-The script saves original settings to `/tmp/brz-tune-state.env` so that
+The script saves original settings to `/tmp/ringloom-tune-state.env` so that
 `--revert` restores the exact prior state rather than guessing defaults.
 
 ---
@@ -558,7 +558,7 @@ scripts/
 └── bench-single-size.sh       # Single-size best-of-N benchmark script
 src/
 ├── bin/                    # Executable entry points
-│   ├── brz_broker_main.zig
+│   ├── ringloom_broker_main.zig
 │   ├── test_echo_service.zig
 │   ├── test_ping_service.zig
 │   ├── test_forwarder_service.zig
@@ -585,7 +585,7 @@ src/
 │   ├── remote_latency_bench.zig
 │   ├── backpressure_bench.zig
 │   └── recovery_bench.zig
-└── testing/                # Test harness library (brz_testing module)
+└── testing/                # Test harness library (ringloom_testing module)
     ├── root.zig
     ├── harness.zig         # TestHarness orchestrator
     ├── temp_env.zig        # Isolated temp workspace
@@ -607,7 +607,7 @@ src/
 | `e2e` | End-to-end correctness tests (depends on `test-bins` + broker exe) |
 | `perf` | Performance benchmarks with `ReleaseFast` (depends on `test-bins` + broker exe) |
 | `run` | Run the broker executable |
-| `stat` | Run the `brz-stat` monitoring tool |
+| `stat` | Run the `ringloom-stat` monitoring tool |
 
 ---
 

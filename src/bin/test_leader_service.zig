@@ -10,13 +10,13 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const brz_service = @import("brz_service");
-const brz_common = @import("brz_common");
+const ringloom_service = @import("ringloom_service");
+const ringloom_common = @import("ringloom_common");
 
-const BrzEngine = brz_service.BrzEngine;
-const ServiceConfig = brz_service.ServiceConfig;
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
-const Clock = brz_common.platform.Clock;
+const RingLoomEngine = ringloom_service.RingLoomEngine;
+const ServiceConfig = ringloom_service.ServiceConfig;
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
+const Clock = ringloom_common.platform.Clock;
 
 // ── Mutable file-level state (acceptable for test binaries) ──────────
 
@@ -123,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
     });
     try stdout.flush();
 
-    // ── Start BrzEngine with leader election enabled ─────────────────
+    // ── Start RingLoomEngine with leader election enabled ─────────────────
 
     const config = ServiceConfig{
         .storage_path = storage_path,
@@ -133,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
         .leader_election_enabled = true,
     };
 
-    const engine = BrzEngine.start(allocator, config) catch |err| {
+    const engine = RingLoomEngine.start(allocator, config) catch |err| {
         try stderr.print("leader-test: failed to start engine: {any}\n", .{err});
         try stderr.flush();
         std.process.exit(1);
@@ -185,7 +185,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // Sleep 100ms between iterations.
-        brz_common.platform.sleepNanos(100 * std.time.ns_per_ms);
+        ringloom_common.platform.sleepNanos(100 * std.time.ns_per_ms);
     }
 
     // ── Shutdown ─────────────────────────────────────────────────────

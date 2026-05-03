@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const constants = @import("brz_common").platform.constants;
+const constants = @import("ringloom_common").platform.constants;
 
 /// Platform-specific I/O backend. Selected at comptime based on target OS.
 ///

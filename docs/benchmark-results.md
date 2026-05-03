@@ -1,4 +1,4 @@
-# Benchmark Results — BRZ Broker
+# Benchmark Results — RingLoom Broker
 
 Tracked performance benchmark results for regression detection and improvement
 comparison. Update this file after each significant performance-related change.

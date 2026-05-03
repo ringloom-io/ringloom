@@ -1,4 +1,4 @@
-//! io_uring wrapper for the BRZ broker (Linux only).
+//! io_uring wrapper for the RingLoom broker (Linux only).
 //!
 //! Wraps the Zig standard library's `std.os.linux.IoUring` and adds:
 //! - Ergonomic methods for UDP send/recv with `msghdr` setup
@@ -11,7 +11,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
-const constants = @import("brz_common").platform.constants;
+const constants = @import("ringloom_common").platform.constants;
 
 /// Configuration for io_uring initialization.
 pub const IoUringConfig = struct {

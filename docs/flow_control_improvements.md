@@ -608,7 +608,7 @@ pub const ServiceClient = struct {
     fc_config: FlowControlConfig,
 
     /// Cached pointer to the flow control counters region base.
-    /// Set during BrzEngine initialization.
+    /// Set during RingLoomEngine initialization.
     fc_region: ?*FlowControlRegion,
 
     // ── Flow Control API ─────────────────────────────

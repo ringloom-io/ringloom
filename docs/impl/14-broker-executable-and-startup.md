@@ -11,7 +11,7 @@
 This document defines the implementation changes required to make the project start a
 real broker process, rather than just compiling a library and printing a placeholder
 message. It also defines the executable boundary, startup sequence, shutdown sequence,
-build targets, and the separation between reusable libraries and the `brz-broker`
+build targets, and the separation between reusable libraries and the `ringloom-broker`
 binary.
 
 The goal is to address two concrete shortcomings:
@@ -97,7 +97,7 @@ memory and TCP.
 
 ### Primary goals
 
-- Make `brz-broker` start the actual broker.
+- Make `ringloom-broker` start the actual broker.
 - Separate reusable code from process-specific code.
 - Keep the executable thin and operationally focused.
 - Make startup and shutdown deterministic.
@@ -131,7 +131,7 @@ surface they depend on.
 
 The project should be split into three logical modules.
 
-### A. `brz_core`
+### A. `ringloom_core`
 
 Shared code used by both broker and services.
 
@@ -148,7 +148,7 @@ This includes:
 
 This module must **not** depend on broker-only code or service-only code.
 
-### B. `brz_broker`
+### B. `ringloom_broker`
 
 Broker-specific runtime.
 
@@ -163,9 +163,9 @@ This includes:
 - `threading`
 - broker-specific config/application wiring
 
-This module may depend on `brz_core`.
+This module may depend on `ringloom_core`.
 
-### C. `brz_service`
+### C. `ringloom_service`
 
 Service/client runtime.
 
@@ -178,19 +178,19 @@ This includes:
 - service-side config
 - service-side lifecycle helpers
 
-This module may depend on `brz_core`.
+This module may depend on `ringloom_core`.
 
 ### Dependency rule
 
 The dependency graph must be:
 
-- `brz_core` ← `brz_broker`
-- `brz_core` ← `brz_service`
+- `ringloom_core` ← `ringloom_broker`
+- `ringloom_core` ← `ringloom_service`
 
 And never:
 
-- `brz_broker` ← `brz_service`
-- `brz_service` ← `brz_broker`
+- `ringloom_broker` ← `ringloom_service`
+- `ringloom_service` ← `ringloom_broker`
 
 Broker and service communicate through shared memory files, ring buffers, and protocol
 definitions, not through direct code dependencies.
@@ -201,20 +201,20 @@ definitions, not through direct code dependencies.
 
 At minimum, the build must produce these executables:
 
-- `brz-broker` — standalone broker process
-- `brz-stat` — monitoring/statistics tool
+- `ringloom-broker` — standalone broker process
+- `ringloom-stat` — monitoring/statistics tool
 
 Future executables should fit naturally into the same structure:
 
-- `brz-service-*` sample services
-- `brz-e2e-*` test harness binaries
-- `brz-bench-*` benchmark binaries
+- `ringloom-service-*` sample services
+- `ringloom-e2e-*` test harness binaries
+- `ringloom-bench-*` benchmark binaries
 
-The executable target name for the broker should be `brz-broker` with a hyphen, matching
+The executable target name for the broker should be `ringloom-broker` with a hyphen, matching
 the process name and user-facing command.
 
-If the package/module name remains `brz_broker` internally, that is acceptable. The
-artifact name exposed to users should still be `brz-broker`.
+If the package/module name remains `ringloom_broker` internally, that is acceptable. The
+artifact name exposed to users should still be `ringloom-broker`.
 
 ---
 
@@ -234,20 +234,20 @@ The build should expose:
 
 The build graph should support these use cases:
 
-- import `brz_core` from broker code,
-- import `brz_core` from service code,
-- import `brz_broker` from the broker executable,
-- import `brz_service` from service executables and tests.
+- import `ringloom_core` from broker code,
+- import `ringloom_core` from service code,
+- import `ringloom_broker` from the broker executable,
+- import `ringloom_service` from service executables and tests.
 
 ### Required conceptual outputs
 
 | Output | Type | Purpose |
 |---|---|---|
-| `brz_core` | module/library | shared runtime |
-| `brz_broker` | module/library | broker runtime |
-| `brz_service` | module/library | service runtime |
-| `brz-broker` | executable | actual broker process |
-| `brz-stat` | executable | monitoring tool |
+| `ringloom_core` | module/library | shared runtime |
+| `ringloom_broker` | module/library | broker runtime |
+| `ringloom_service` | module/library | service runtime |
+| `ringloom-broker` | executable | actual broker process |
+| `ringloom-stat` | executable | monitoring tool |
 
 ---
 
@@ -257,8 +257,8 @@ Use these naming conventions consistently:
 
 | Kind | Name style | Example |
 |---|---|---|
-| Zig module | snake_case | `brz_core` |
-| Executable artifact | kebab-case | `brz-broker` |
+| Zig module | snake_case | `ringloom_core` |
+| Executable artifact | kebab-case | `ringloom-broker` |
 | Source root file | snake_case | `broker_application.zig` |
 | Public type | PascalCase | `BrokerApplication` |
 
@@ -457,18 +457,18 @@ The broker executable should support a minimal operational CLI.
 
 ### Required behavior
 
-- `brz-broker`
+- `ringloom-broker`
   - load config from default resolution rules,
   - start broker,
   - block until shutdown.
 
-- `brz-broker --config path/to/file.properties`
+- `ringloom-broker --config path/to/file.properties`
   - load config from explicit path.
 
-- `brz-broker --help`
+- `ringloom-broker --help`
   - print usage and exit `0`.
 
-- `brz-broker --version`
+- `ringloom-broker --version`
   - print version and exit `0`.
 
 ### Optional future flags
@@ -882,36 +882,36 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const brz_core = b.addModule("brz_core", .{
+    const ringloom_core = b.addModule("ringloom_core", .{
         .root_source_file = b.path("src/core.zig"),
         .target = target,
     });
 
-    const brz_broker = b.addModule("brz_broker", .{
+    const ringloom_broker = b.addModule("ringloom_broker", .{
         .root_source_file = b.path("src/broker.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "brz_core", .module = brz_core },
+            .{ .name = "ringloom_core", .module = ringloom_core },
         },
     });
 
-    const brz_service = b.addModule("brz_service", .{
+    const ringloom_service = b.addModule("ringloom_service", .{
         .root_source_file = b.path("src/service.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "brz_core", .module = brz_core },
+            .{ .name = "ringloom_core", .module = ringloom_core },
         },
     });
 
     const broker_exe = b.addExecutable(.{
-        .name = "brz-broker",
+        .name = "ringloom-broker",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "brz_broker", .module = brz_broker },
-                .{ .name = "brz_core", .module = brz_core },
+                .{ .name = "ringloom_broker", .module = ringloom_broker },
+                .{ .name = "ringloom_core", .module = ringloom_core },
             },
         }),
     });
@@ -950,7 +950,7 @@ This document requires a new class of tests.
 A minimal smoke test should verify:
 
 1. create temporary config,
-2. start `brz-broker`,
+2. start `ringloom-broker`,
 3. wait until broker metadata file exists,
 4. request shutdown,
 5. assert clean exit.
@@ -978,14 +978,14 @@ Implement this in small steps.
 
 ### Step 3 — Split root modules
 
-- introduce `brz_core`
-- introduce `brz_broker`
-- introduce `brz_service`
+- introduce `ringloom_core`
+- introduce `ringloom_broker`
+- introduce `ringloom_service`
 - re-export existing code through those roots
 
 ### Step 4 — Rename executable artifact
 
-- install `brz-broker` executable
+- install `ringloom-broker` executable
 - keep internal module names stable if needed
 
 ### Step 5 — Add smoke/integration tests
@@ -1002,7 +1002,7 @@ This order minimizes disruption while immediately fixing the broken executable b
 This document is satisfied when all of the following are true:
 
 1. Running `zig build run` starts a real broker, not a placeholder program.
-2. Running the installed `brz-broker` binary starts the broker event loops.
+2. Running the installed `ringloom-broker` binary starts the broker event loops.
 3. The executable can be stopped cleanly with `SIGINT` or `SIGTERM`.
 4. Broker startup logic is not embedded directly in `main.zig`.
 5. Shared code is separated from broker-only code through explicit module boundaries.
@@ -1019,11 +1019,11 @@ standalone process with a thin executable layer on top of a reusable broker runt
 
 The key architectural decisions are:
 
-- split code into `brz_core`, `brz_broker`, and `brz_service`,
+- split code into `ringloom_core`, `ringloom_broker`, and `ringloom_service`,
 - introduce a `BrokerApplication` process wrapper,
 - keep `Broker` focused on runtime lifecycle,
 - make `main.zig` a thin CLI/bootstrap layer,
-- ensure `brz-broker` actually starts the broker threads and waits for shutdown.
+- ensure `ringloom-broker` actually starts the broker threads and waits for shutdown.
 
 This document is the executable/startup counterpart to the existing runtime documents and
 is the foundation for the next two missing pieces:

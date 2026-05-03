@@ -7,8 +7,8 @@
 //! Message sizes tested: 32, 128, 512, 1024, 4096 bytes.
 
 const std = @import("std");
-const platform = @import("brz_common").platform;
-const testing_mod = @import("brz_testing");
+const platform = @import("ringloom_common").platform;
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 const BrokerSpec = testing_mod.BrokerSpec;
 const ServiceSpec = testing_mod.ServiceSpec;
@@ -78,7 +78,7 @@ fn runRemoteLatencyBench(
 
     // Given — echo service registered on broker B with latency measurement.
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
         .broker_node_id = broker_b_node_id,
         .extra_args = &.{ "--quiet", "--result-file", echo_result_path },
@@ -88,7 +88,7 @@ fn runRemoteLatencyBench(
     // When — ping service on broker A sends messages across brokers with
     //        spinning backpressure to reduce send failures.
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .broker_node_id = broker_a_node_id,
         .extra_args = &.{

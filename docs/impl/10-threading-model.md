@@ -67,7 +67,7 @@ configuration for production):
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Broker Process                           │
 │                                                                 │
-│  Thread 1: brz-control                                          │
+│  Thread 1: ringloom-control                                          │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  • Drain inter-loop command queue (1 per cycle)           │  │
 │  │  • Poll broker's control ring buffer                      │  │
@@ -79,7 +79,7 @@ configuration for production):
 │  │  • Scheduled tasks, counter updates                       │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                 │
-│  Thread 2: brz-sender                                           │
+│  Thread 2: ringloom-sender                                           │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  • Drain inter-loop command queue (1 per cycle)           │  │
 │  │  • Drain send ring buffer (outbound cross-host messages)  │  │
@@ -89,7 +89,7 @@ configuration for production):
 │  │  • Connection management + reconnection                   │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                 │
-│  Thread 3: brz-receiver                                         │
+│  Thread 3: ringloom-receiver                                         │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  • Drain inter-loop command queue (1 per cycle)           │  │
 │  │  • TCP read via io_uring (Linux) / kqueue (macOS)         │  │
@@ -103,20 +103,20 @@ configuration for production):
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Each **service** process (`BrzEngine`) runs 2 threads:
+Each **service** process (`RingLoomEngine`) runs 2 threads:
 
 ```
 ┌─────────────────────────────────────────┐
 │           Service Process               │
 │                                         │
-│  Thread 1: brz-svc-ctrl                 │
+│  Thread 1: ringloom-svc-ctrl                 │
 │  ┌───────────────────────────────────┐  │
 │  │  • Poll service's control RB      │  │
 │  │  • Handle registration responses  │  │
 │  │  • Write heartbeats               │  │
 │  └───────────────────────────────────┘  │
 │                                         │
-│  Thread 2: brz-svc-msg                  │
+│  Thread 2: ringloom-svc-msg                  │
 │  ┌───────────────────────────────────┐  │
 │  │  • Poll service's messages RB     │  │
 │  │  • Dispatch to application        │  │
@@ -302,9 +302,9 @@ pub const BrokerThreads = struct {
         receiver_idle: IdleStrategy,
     ) BrokerThreads {
         return .{
-            .control_runner = ThreadRunner.init("brz-control", control_loop, control_idle),
-            .sender_runner = ThreadRunner.init("brz-sender", sender_loop, sender_idle),
-            .receiver_runner = ThreadRunner.init("brz-receiver", receiver_loop, receiver_idle),
+            .control_runner = ThreadRunner.init("ringloom-control", control_loop, control_idle),
+            .sender_runner = ThreadRunner.init("ringloom-sender", sender_loop, sender_idle),
+            .receiver_runner = ThreadRunner.init("ringloom-receiver", receiver_loop, receiver_idle),
             .mode = .dedicated,
         };
     }
@@ -903,12 +903,12 @@ fn startSharedNetwork(broker: *Broker) !void {
     };
 
     broker.control_runner = ThreadRunner.init(
-        "brz-control",
+        "ringloom-control",
         broker.control_loop.eventLoop(),
         broker.config.control_idle_strategy,
     );
     broker.network_runner = ThreadRunner.init(
-        "brz-network",
+        "ringloom-network",
         broker.network_composite.eventLoop(),
         broker.config.network_idle_strategy,
     );
@@ -940,7 +940,7 @@ fn startShared(broker: *Broker) !void {
     };
 
     broker.shared_runner = ThreadRunner.init(
-        "brz-broker",
+        "ringloom-broker",
         broker.outer_composite.eventLoop(),
         broker.config.shared_idle_strategy,
     );
@@ -1003,8 +1003,8 @@ fn startDedicated(broker: *Broker) !void {
 7. Create command queue ring buffers (small, heap-allocated)
 8. Create event loop instances:
    a. ControlLoop — owns control RB, service registry, cluster manager
-   b. SenderEventLoop — owns send RB, outgoing TCP connections (via brz_tcp), per-peer write queues
-   c. ReceiverEventLoop — owns TCP listener, incoming TCP connections (via brz_tcp), routing table
+   b. SenderEventLoop — owns send RB, outgoing TCP connections (via ringloom_tcp), per-peer write queues
+   c. ReceiverEventLoop — owns TCP listener, incoming TCP connections (via ringloom_tcp), routing table
 9. Wire command queues between event loops
 10. Select threading mode, create ThreadRunners
 11. Start threads (order depends on mode — see §3)
@@ -1129,24 +1129,24 @@ naming implementation is in doc 01 (`setThreadName`). Here are the conventions:
 
 | Thread | Name | Max Length (Linux) |
 |---|---|---|
-| Broker control loop | `brz-control` | 12 chars ✓ |
-| Broker sender | `brz-sender` | 10 chars ✓ |
-| Broker receiver | `brz-receiver` | 12 chars ✓ |
-| Broker combined network | `brz-network` | 11 chars ✓ |
-| Broker shared (single thread) | `brz-broker` | 10 chars ✓ |
-| Service control agent | `brz-svc-ctrl` | 13 chars ✓ |
-| Service message consumer | `brz-svc-msg` | 11 chars ✓ |
+| Broker control loop | `ringloom-control` | 12 chars ✓ |
+| Broker sender | `ringloom-sender` | 10 chars ✓ |
+| Broker receiver | `ringloom-receiver` | 12 chars ✓ |
+| Broker combined network | `ringloom-network` | 11 chars ✓ |
+| Broker shared (single thread) | `ringloom-broker` | 10 chars ✓ |
+| Service control agent | `ringloom-svc-ctrl` | 13 chars ✓ |
+| Service message consumer | `ringloom-svc-msg` | 11 chars ✓ |
 
 All names are ≤15 characters to fit within the Linux `pthread_setname_np` limit.
 
 Verification in `htop` or `ps`:
 
 ```
-$ ps -eo pid,lwp,comm | grep brz
-  1234  1234 brz-broker       # main thread (blocked in awaitShutdown)
-  1234  1235 brz-control
-  1234  1236 brz-sender
-  1234  1237 brz-receiver
+$ ps -eo pid,lwp,comm | grep ringloom
+  1234  1234 ringloom-broker       # main thread (blocked in awaitShutdown)
+  1234  1235 ringloom-control
+  1234  1236 ringloom-sender
+  1234  1237 ringloom-receiver
 ```
 
 ---
@@ -1226,26 +1226,26 @@ pub const ThreadRunner = struct {
 
 ## 10. Service-Side Threading
 
-Each service (`BrzEngine`) runs its own pair of threads. These use the same `EventLoop` +
+Each service (`RingLoomEngine`) runs its own pair of threads. These use the same `EventLoop` +
 `ThreadRunner` infrastructure as the broker.
 
 ```zig
 // src/engine.zig (simplified)
 
-pub const BrzEngine = struct {
+pub const RingLoomEngine = struct {
     control_agent: ControlAgent,
     message_consumer: MessageConsumerAgent,
     control_runner: ThreadRunner,
     message_runner: ThreadRunner,
 
-    pub fn start(self: *BrzEngine) !void {
+    pub fn start(self: *RingLoomEngine) !void {
         self.control_runner = ThreadRunner.init(
-            "brz-svc-ctrl",
+            "ringloom-svc-ctrl",
             self.control_agent.eventLoop(),
             self.config.control_idle_strategy,
         );
         self.message_runner = ThreadRunner.init(
-            "brz-svc-msg",
+            "ringloom-svc-msg",
             self.message_consumer.eventLoop(),
             self.config.message_idle_strategy,
         );
@@ -1254,7 +1254,7 @@ pub const BrzEngine = struct {
         try self.message_runner.start();
     }
 
-    pub fn stop(self: *BrzEngine) void {
+    pub fn stop(self: *RingLoomEngine) void {
         // Stop message consumer first (no new messages dispatched to app).
         self.message_runner.stopAndJoin();
         // Stop control agent (flushes final heartbeat).
@@ -1431,12 +1431,12 @@ pub const Broker = struct {
                     .second = self.receiver_loop.eventLoop(),
                 };
                 self.threads.control_runner = platform.ThreadRunner.init(
-                    "brz-control",
+                    "ringloom-control",
                     self.control_loop.eventLoop(),
                     self.config.control_idle_strategy,
                 );
                 self.network_runner = platform.ThreadRunner.init(
-                    "brz-network",
+                    "ringloom-network",
                     self.network_composite.eventLoop(),
                     self.config.sender_idle_strategy,
                 );
@@ -1453,7 +1453,7 @@ pub const Broker = struct {
                     .second = self.inner_composite.eventLoop(),
                 };
                 self.shared_runner = platform.ThreadRunner.init(
-                    "brz-broker",
+                    "ringloom-broker",
                     self.outer_composite.eventLoop(),
                     self.config.shared_idle_strategy,
                 );

@@ -1,5 +1,5 @@
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 
 test "cross-broker routing works" {
@@ -28,14 +28,14 @@ test "cross-broker routing works" {
 
     // When — echo on broker B, ping on broker A (forces cross-broker routing)
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
         .broker_node_id = 2,
     });
     try harness.waitForServiceReady(echo, 5000);
 
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .broker_node_id = 1,
         .extra_args = &.{ "--target-service", "echo", "--message-count", "5" },
@@ -68,7 +68,7 @@ test "cross-broker routing with late broker join" {
 
     // Echo registers on broker A
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
         .broker_node_id = 1,
     });
@@ -87,7 +87,7 @@ test "cross-broker routing with late broker join" {
 
     // Ping on broker B should discover echo on broker A
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .broker_node_id = 2,
         .extra_args = &.{ "--target-service", "echo", "--message-count", "5" },
@@ -146,14 +146,14 @@ test "cross-broker routing with three brokers" {
 
     // When — echo on broker C, ping on broker A (two hops possible)
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
         .broker_node_id = 3,
     });
     try harness.waitForServiceReady(echo, 5000);
 
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .broker_node_id = 1,
         .extra_args = &.{ "--target-service", "echo", "--message-count", "5" },

@@ -1,4 +1,4 @@
-//! Monitoring subsystem for the BRZ common library.
+//! Monitoring subsystem for the RingLoom common library.
 //!
 //! This is the single import point for all monitoring-related functionality.
 //! It re-exports counters, cycle time tracking, snapshots, and periodic dump types.

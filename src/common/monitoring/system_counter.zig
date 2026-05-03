@@ -1,4 +1,4 @@
-//! Well-known system counter IDs for the BRZ broker.
+//! Well-known system counter IDs for the RingLoom broker.
 //!
 //! Every counter has a fixed, well-known integer ID. This enum is the
 //! single source of truth for counter identities.

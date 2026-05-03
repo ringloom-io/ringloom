@@ -20,7 +20,7 @@
 #   --latency-mode      "transit" (paced, unloaded latency) or
 #                       "saturated" (queueing latency under load). Default: transit.
 #   --send-interval-ns  Override pacing interval for transit mode (default: 10000 ns).
-#   --output-dir        Directory for best-of-N result JSON files (default: /tmp/brz-bench-best).
+#   --output-dir        Directory for best-of-N result JSON files (default: /tmp/ringloom-bench-best).
 #
 # Prerequisites:
 #   zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=ReleaseFast
@@ -52,7 +52,7 @@ fi
 SIZE=$1; shift
 RUNS=5
 MODE="remote"
-BEST_DIR="/tmp/brz-bench-best"
+BEST_DIR="/tmp/ringloom-bench-best"
 LATENCY_MODE="transit"
 SEND_INTERVAL_NS=""
 
@@ -86,7 +86,7 @@ BIN="$PROJECT_ROOT/zig-out/bin"
 
 # ── Verify binaries exist ────────────────────────────────────────────
 
-for bin in brz-broker brz-test-echo-service brz-test-ping-service; do
+for bin in ringloom-broker ringloom-test-echo-service ringloom-test-ping-service; do
     if [[ ! -x "$BIN/$bin" ]]; then
         echo "ERROR: $BIN/$bin not found."
         echo "Run:  zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=ReleaseFast"
@@ -96,12 +96,12 @@ done
 
 # ── Workspace setup ──────────────────────────────────────────────────
 
-WORK_DIR=$(mktemp -d /tmp/brz-bench-single-XXXXXX)
+WORK_DIR=$(mktemp -d /tmp/ringloom-bench-single-XXXXXX)
 STORAGE="$WORK_DIR/storage"
 CONFIGS="$WORK_DIR/config"
 LOGS="$WORK_DIR/logs"
 RESULTS="$WORK_DIR/results"
-mkdir -p "$STORAGE/brz-test/services" "$CONFIGS" "$LOGS" "$RESULTS" "$BEST_DIR"
+mkdir -p "$STORAGE/ringloom-test/services" "$CONFIGS" "$LOGS" "$RESULTS" "$BEST_DIR"
 
 PIDS=()
 TOTAL_CPUS=$(nproc)
@@ -221,7 +221,7 @@ else
     PREFIX="$MODE-saturated-latency"
 fi
 
-echo "BRZ Single-Size Benchmark"
+echo "RingLoom Single-Size Benchmark"
 echo "========================="
 echo "Mode:     $MODE"
 echo "Size:     $TAG"
@@ -240,8 +240,8 @@ best_latency=0
 
 for i in $(seq 1 "$RUNS"); do
     # Clean shared memory from previous iteration.
-    rm -rf "$STORAGE/brz-test"
-    mkdir -p "$STORAGE/brz-test/services"
+    rm -rf "$STORAGE/ringloom-test"
+    mkdir -p "$STORAGE/ringloom-test/services"
 
     if [[ "$MODE" == "remote" ]]; then
         # ── Two-broker setup ─────────────────────────────────────────
@@ -249,7 +249,7 @@ for i in $(seq 1 "$RUNS"); do
 broker.node.id=1
 broker.local.host.port=127.0.0.1:19001
 broker.member.host.ports=2@127.0.0.1:19002
-broker.group.name=brz-test
+broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
@@ -265,7 +265,7 @@ EOF
 broker.node.id=2
 broker.local.host.port=127.0.0.1:19002
 broker.member.host.ports=1@127.0.0.1:19001
-broker.group.name=brz-test
+broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
@@ -278,11 +278,11 @@ broker.benchmark.latency.tracing.enabled=true
 EOF
 
         start_bg_process "$LOGS/broker_a.log" "" \
-            "$BIN/brz-broker" --config "$CONFIGS/broker_1.properties"
+            "$BIN/ringloom-broker" --config "$CONFIGS/broker_1.properties"
         local_BA_PID=${PIDS[-1]}
 
         start_bg_process "$LOGS/broker_b.log" "" \
-            "$BIN/brz-broker" --config "$CONFIGS/broker_2.properties"
+            "$BIN/ringloom-broker" --config "$CONFIGS/broker_2.properties"
         local_BB_PID=${PIDS[-1]}
 
         wait_for_ready "$LOGS/broker_a.log" 5
@@ -295,7 +295,7 @@ EOF
         cat > "$CONFIGS/broker_local.properties" << EOF
 broker.node.id=1
 broker.local.host.port=127.0.0.1:19010
-broker.group.name=brz-test
+broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
@@ -307,7 +307,7 @@ broker.io.uring.sqpoll=true
 EOF
 
         start_bg_process "$LOGS/broker_local.log" "" \
-            "$BIN/brz-broker" --config "$CONFIGS/broker_local.properties"
+            "$BIN/ringloom-broker" --config "$CONFIGS/broker_local.properties"
         local_BA_PID=${PIDS[-1]}
         local_BB_PID=""
 
@@ -321,9 +321,9 @@ EOF
 
     # Echo service.
     start_bg_process "$LOGS/echo.log" "$ECHO_CORE" \
-        "$BIN/brz-test-echo-service" \
+        "$BIN/ringloom-test-echo-service" \
         --storage-path "$STORAGE" \
-        --group brz-test \
+        --group ringloom-test \
         --service-name echo \
         --broker-node-id "$ECHO_NODE" \
         --quiet \
@@ -334,9 +334,9 @@ EOF
 
     # Ping service (foreground — blocks until done).
     run_fg_process "$LOGS/ping.log" "$PING_CORE" \
-        "$BIN/brz-test-ping-service" \
+        "$BIN/ringloom-test-ping-service" \
         --storage-path "$STORAGE" \
-        --group brz-test \
+        --group ringloom-test \
         --service-name ping \
         --broker-node-id 1 \
         --target-service echo \

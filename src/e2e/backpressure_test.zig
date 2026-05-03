@@ -1,5 +1,5 @@
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 
 const TestHarness = testing_mod.TestHarness;
 const readiness = testing_mod.readiness;
@@ -24,7 +24,7 @@ test "system remains stable under backpressure with slow consumer" {
     // Start a slow consumer service — it intentionally delays processing
     // each message, causing the ring buffer to fill up.
     const slow = try harness.startService(.{
-        .executable_name = "brz-test-slow-consumer-service",
+        .executable_name = "ringloom-test-slow-consumer-service",
         .service_name = "slow-echo",
     });
     try harness.waitForServiceReady(slow, 5000);
@@ -33,7 +33,7 @@ test "system remains stable under backpressure with slow consumer" {
     // slow consumer. We use a large message count with zero delay between
     // sends so the ring buffer will back up.
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
             "--target-service",  "slow-echo",
@@ -70,14 +70,14 @@ test "broker stays healthy when multiple producers overwhelm a single consumer" 
     try harness.waitForBrokerReady(broker, 5000);
 
     const slow = try harness.startService(.{
-        .executable_name = "brz-test-slow-consumer-service",
+        .executable_name = "ringloom-test-slow-consumer-service",
         .service_name = "slow-echo",
     });
     try harness.waitForServiceReady(slow, 5000);
 
     // When — start three ping services all targeting the same slow consumer
     const ping_a = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping-a",
         .extra_args = &.{
             "--target-service",  "slow-echo",
@@ -89,7 +89,7 @@ test "broker stays healthy when multiple producers overwhelm a single consumer" 
     try harness.waitForServiceReady(ping_a, 5000);
 
     const ping_b = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping-b",
         .extra_args = &.{
             "--target-service",  "slow-echo",
@@ -101,7 +101,7 @@ test "broker stays healthy when multiple producers overwhelm a single consumer" 
     try harness.waitForServiceReady(ping_b, 5000);
 
     const ping_c = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping-c",
         .extra_args = &.{
             "--target-service",  "slow-echo",

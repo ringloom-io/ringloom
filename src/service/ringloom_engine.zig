@@ -1,15 +1,15 @@
-//! BrzEngine — the service's main entry point.
+//! RingLoomEngine — the service's main entry point.
 //!
 //! Orchestrates the startup sequence, owns the metadata files and agent threads,
 //! and provides the application-facing API for creating clients and registering
 //! message handlers.
 
 const std = @import("std");
-const brz_common = @import("brz_common");
-const platform = brz_common.platform;
-const memory = brz_common.memory;
-const ring_buffer = brz_common.concurrent.ring_buffer;
-const constants = brz_common.memory.constants;
+const ringloom_common = @import("ringloom_common");
+const platform = ringloom_common.platform;
+const memory = ringloom_common.memory;
+const ring_buffer = ringloom_common.concurrent.ring_buffer;
+const constants = ringloom_common.memory.constants;
 const MessageConsumer = @import("message_consumer.zig").MessageConsumer;
 const control_agent_mod = @import("control_agent.zig");
 const ControlAgent = control_agent_mod.ControlAgent;
@@ -37,7 +37,7 @@ pub const ServiceConfig = struct {
     idle_strategy: platform.IdleStrategy = .{ .backoff = .{} },
 };
 
-pub const BrzEngine = struct {
+pub const RingLoomEngine = struct {
     config: ServiceConfig,
     allocator: std.mem.Allocator,
 
@@ -63,7 +63,7 @@ pub const BrzEngine = struct {
 
     const Self = @This();
 
-    /// Start the BrzEngine: create metadata, register with broker,
+    /// Start the RingLoomEngine: create metadata, register with broker,
     /// start heartbeat, launch agent threads.
     pub fn start(allocator: std.mem.Allocator, config: ServiceConfig) !*Self {
         var engine = try allocator.create(Self);

@@ -22,7 +22,7 @@ pub const PeriodicMonitoringDump = struct {
         counters: *const SystemCounters,
         error_log: *const ErrorLog,
     ) PeriodicMonitoringDump {
-        const enabled = std.c.getenv("BRZ_MONITORING_DUMP") != null;
+        const enabled = std.c.getenv("RINGLOOM_MONITORING_DUMP") != null;
         return .{
             .enabled = enabled,
             .interval_ns = default_interval_ns,

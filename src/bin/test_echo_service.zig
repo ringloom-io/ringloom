@@ -11,17 +11,17 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const brz_service = @import("brz_service");
-const brz_common = @import("brz_common");
-const brz_testing = @import("brz_testing");
+const ringloom_service = @import("ringloom_service");
+const ringloom_common = @import("ringloom_common");
+const ringloom_testing = @import("ringloom_testing");
 
-const BrzEngine = brz_service.BrzEngine;
-const ServiceConfig = brz_service.ServiceConfig;
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
-const Clock = brz_common.Clock;
-const platform = brz_common.platform;
-const latency_trace = brz_common.message.latency_trace;
-const Histogram = brz_testing.Histogram;
+const RingLoomEngine = ringloom_service.RingLoomEngine;
+const ServiceConfig = ringloom_service.ServiceConfig;
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
+const Clock = ringloom_common.Clock;
+const platform = ringloom_common.platform;
+const latency_trace = ringloom_common.message.latency_trace;
+const Histogram = ringloom_testing.Histogram;
 
 // ── Mutable file-level state (fine for a single-threaded test binary) ─
 
@@ -174,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
     else
         .{ .backoff = .{} };
 
-    const engine = BrzEngine.start(allocator, ServiceConfig{
+    const engine = RingLoomEngine.start(allocator, ServiceConfig{
         .storage_path = storage_path,
         .group = group,
         .service_name = service_name,

@@ -1,8 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const brz_broker = @import("brz_broker");
+const ringloom_broker = @import("ringloom_broker");
 
-const BrokerApplicationFactory = brz_broker.BrokerApplicationFactory;
+const BrokerApplicationFactory = ringloom_broker.BrokerApplicationFactory;
 const ExitCode = enum(u8) {
     success = 0,
     usage_error = 1,
@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer bootstrap.deinit();
 
-    var app = brz_broker.BrokerApplication.init(allocator, bootstrap.config, io) catch |err| {
+    var app = ringloom_broker.BrokerApplication.init(allocator, bootstrap.config, io) catch |err| {
         std.log.err("failed to initialize broker application: {}", .{err});
         std.process.exit(@intFromEnum(ExitCode.startup_error));
     };
@@ -87,10 +87,10 @@ fn printHelp(io: std.Io) !void {
     var stdout_w = std.Io.File.stdout().writer(io, &buf);
     const stdout = &stdout_w.interface;
     try stdout.writeAll(
-        \\BRZ Broker — high-performance IPC framework
+        \\RingLoom Broker — high-performance IPC framework
         \\
         \\Usage:
-        \\  brz-broker [--config <path>] [--help] [--version]
+        \\  ringloom-broker [--config <path>] [--help] [--version]
         \\
         \\Options:
         \\  --config <path>   Path to broker properties file
@@ -105,10 +105,10 @@ fn printVersion(io: std.Io) !void {
     var buf: [4096]u8 = undefined;
     var stdout_w = std.Io.File.stdout().writer(io, &buf);
     const stdout = &stdout_w.interface;
-    try stdout.writeAll("BRZ Broker v0.0.0\n");
+    try stdout.writeAll("RingLoom Broker v0.0.0\n");
     try stdout.flush();
 }
 
 test "main module compiles" {
-    _ = @import("brz_broker");
+    _ = @import("ringloom_broker");
 }

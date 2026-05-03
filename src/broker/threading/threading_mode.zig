@@ -1,4 +1,4 @@
-//! Threading mode configuration for the BRZ broker.
+//! Threading mode configuration for the RingLoom broker.
 //!
 //! Controls how many OS threads the broker uses to run its event loops.
 

@@ -1,4 +1,4 @@
-//! Memory layout constants for the BRZ broker.
+//! Memory layout constants for the RingLoom broker.
 //!
 //! Defines byte-level layout constants for metadata files, ring buffers,
 //! and receive log buffers. These are used by the memory subsystem to

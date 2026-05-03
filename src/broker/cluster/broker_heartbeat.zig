@@ -9,7 +9,7 @@
 //!    its priority for VRRP-style leader election (lowest nodeId wins).
 
 const std = @import("std");
-const Clock = @import("brz_common").platform.clock.Clock;
+const Clock = @import("ringloom_common").platform.clock.Clock;
 const admin = @import("admin_messages.zig");
 
 pub const BrokerHeartbeatSender = struct {

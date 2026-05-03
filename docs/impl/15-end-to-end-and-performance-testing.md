@@ -16,7 +16,7 @@
 >
 > This document defines the **test architecture**, **test harness**, **end-to-end
 > scenarios**, **performance benchmarks**, and **CI execution model** needed to
-> validate the BRZ Zig implementation as a real multi-process system rather than
+> validate the RingLoom Zig implementation as a real multi-process system rather than
 > as a single in-process library.
 
 ---
@@ -26,7 +26,7 @@
 1. [Overview](#1-overview)
 2. [Goals and Non-Goals](#2-goals-and-non-goals)
 3. [Testing Philosophy](#3-testing-philosophy)
-4. [Test Pyramid for BRZ](#4-test-pyramid-for-brz)
+4. [Test Pyramid for RingLoom](#4-test-pyramid-for-ringloom)
 5. [Required Build Outputs](#5-required-build-outputs)
 6. [Test Workspace Layout](#6-test-workspace-layout)
 7. [Test Harness Architecture](#7-test-harness-architecture)
@@ -80,7 +80,7 @@ The current implementation already contains unit and integration-style tests ins
 individual documents and modules. Those are necessary, but they are not sufficient for
 the system you actually want to ship.
 
-BRZ is fundamentally a **multi-process distributed IPC system**:
+RingLoom is fundamentally a **multi-process distributed IPC system**:
 
 - the broker is a standalone process
 - each service is a standalone process
@@ -106,7 +106,7 @@ This document introduces a dedicated testing layer with two major purposes:
 
 The result should be a testing system that answers questions like:
 
-- Does `brz-broker` actually start the broker event loops?
+- Does `ringloom-broker` actually start the broker event loops?
 - Can two services on the same host communicate without broker hot-path involvement?
 - Can two brokers route messages across TCP correctly?
 - Does a dead service get removed after heartbeat timeout?
@@ -171,7 +171,7 @@ The result should be a testing system that answers questions like:
 
 The most important change is this:
 
-> **Tests must validate BRZ as a system of binaries, not just as a collection of modules.**
+> **Tests must validate RingLoom as a system of binaries, not just as a collection of modules.**
 
 That means:
 
@@ -204,7 +204,7 @@ new layer is meant to catch.
 
 ---
 
-## 4. Test Pyramid for BRZ
+## 4. Test Pyramid for RingLoom
 
 The recommended test pyramid is:
 
@@ -233,49 +233,49 @@ To support this test strategy, the build must produce distinct artifacts.
 
 ### Required executables
 
-1. `brz-broker`
+1. `ringloom-broker`
    - the real broker process
    - must start broker lifecycle, event loops, sockets, and metadata
 
-2. `brz-test-echo-service`
+2. `ringloom-test-echo-service`
    - registers with broker
    - receives messages
    - optionally replies
 
-3. `brz-test-ping-service`
+3. `ringloom-test-ping-service`
    - sends requests to another service
    - records latency and success/failure counts
 
-4. `brz-test-forwarder-service`
+4. `ringloom-test-forwarder-service`
    - receives a message and forwards it to another service
 
-5. `brz-test-leader-service`
+5. `ringloom-test-leader-service`
    - participates in leader election
    - reports leader changes
 
-6. `brz-test-slow-consumer-service`
+6. `ringloom-test-slow-consumer-service`
    - intentionally consumes slowly to trigger backpressure
 
-7. `brz-test-crashy-service`
+7. `ringloom-test-crashy-service`
    - registers, optionally sends/receives some messages, then exits abruptly
 
-8. `brz-test-harness`
+8. `ringloom-test-harness`
    - optional standalone executable for orchestrating scenarios
    - alternatively, scenarios can be implemented as Zig tests that spawn processes
 
 ### Required libraries
 
-1. `brz-common`
+1. `ringloom-common`
    - shared protocol, memory layout, ring buffer, config parsing, platform abstractions
 
-2. `brz-broker-lib`
+2. `ringloom-broker-lib`
    - broker runtime and lifecycle API
 
-3. `brz-service-lib`
+3. `ringloom-service-lib`
    - service runtime and client API
 
 This split matters because the tests should link only what they need:
-test services should depend on `brz-service-lib` and `brz-common`, not on broker-only
+test services should depend on `ringloom-service-lib` and `ringloom-common`, not on broker-only
 implementation internals.
 
 ---
@@ -648,12 +648,12 @@ Each scenario below should be implemented as a separate test case with its own w
 
 ### Purpose
 
-Verify that the `brz-broker` binary actually starts the broker runtime.
+Verify that the `ringloom-broker` binary actually starts the broker runtime.
 
 ### Steps
 
 1. Generate broker config
-2. Spawn `brz-broker`
+2. Spawn `ringloom-broker`
 3. Wait for broker readiness marker
 4. Verify broker metadata file exists
 5. Verify process remains alive for a short steady-state window
@@ -670,7 +670,7 @@ Verify that the `brz-broker` binary actually starts the broker runtime.
 
 ### This scenario directly addresses
 
-> “The main binary, `brz-broker`, does not start the broker.”
+> “The main binary, `ringloom-broker`, does not start the broker.”
 
 If this test fails, the binary wiring is still wrong.
 
@@ -1099,7 +1099,7 @@ JSON per benchmark run:
 
 ```json
 {
-  "suite": "brz-perf",
+  "suite": "ringloom-perf",
   "scenario": "local-roundtrip-latency",
   "timestamp_utc": "2026-01-01T12:00:00Z",
   "build_mode": "ReleaseFast",
@@ -1231,7 +1231,7 @@ Implement this in phases.
 
 ### Phase 1 — smoke coverage
 
-1. Make `brz-broker` start the real broker runtime
+1. Make `ringloom-broker` start the real broker runtime
 2. Add readiness log markers
 3. Build one test service: echo
 4. Build one harness
@@ -1285,7 +1285,7 @@ Suggested additions under `src/` and `test/`:
 ```text
 src/
   apps/
-    brz_broker_main.zig
+    ringloom_broker_main.zig
     test_echo_service_main.zig
     test_ping_service_main.zig
     test_forwarder_service_main.zig
@@ -1377,7 +1377,7 @@ pub const ServiceSpec = struct {
     executable_name: []const u8,
     service_name: []const u8,
     broker_node_id: u8,
-    group_name: []const u8 = "brz-test",
+    group_name: []const u8 = "ringloom-test",
     leader_election_enabled: bool = false,
     extra_args: []const []const u8 = &.{},
 };
@@ -1429,7 +1429,7 @@ They are too environment-sensitive and too slow for normal edit-compile-test loo
 
 ## Summary
 
-This document adds the missing testing layer needed for BRZ to behave like a real
+This document adds the missing testing layer needed for RingLoom to behave like a real
 multi-process IPC system.
 
 The key decisions are:
@@ -1522,7 +1522,7 @@ per-message latency histograms are fully wired and operational.
   solving the late-join problem.
 - **Per-message latency histograms** — the ping service now records
   individual send latency for each message using the Histogram from
-  `brz_testing`. The measurement loop captures `nanoTimestamp()` before
+  `ringloom_testing`. The measurement loop captures `nanoTimestamp()` before
   and after each `client.send()` call, recording the delta. The JSON
   results file includes `send_latency_p50_ns`, `send_latency_p95_ns`,
   `send_latency_p99_ns`, and `send_latency_max_ns` fields. Console

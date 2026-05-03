@@ -1,4 +1,4 @@
-//! Temporary environment manager for BRZ end-to-end tests.
+//! Temporary environment manager for RingLoom end-to-end tests.
 //!
 //! `TempEnv` creates an isolated directory tree under `/tmp` for each test
 //! scenario, ensuring that broker metadata files, log output, generated
@@ -7,7 +7,7 @@
 //!
 //! Directory layout created by `init`:
 //! ```
-//! /tmp/brz-e2e-<test_name>-<pid>/
+//! /tmp/ringloom-e2e-<test_name>-<pid>/
 //! ├── storage/          # shared-memory metadata (replaces /dev/shm)
 //! │   └── <group>/
 //! │       └── services/
@@ -46,7 +46,7 @@ pub const TempEnv = struct {
     preserved: bool,
 
     /// Creates a new temporary environment rooted at
-    /// `/tmp/brz-e2e-<test_name>-<pid>/` with all standard subdirectories.
+    /// `/tmp/ringloom-e2e-<test_name>-<pid>/` with all standard subdirectories.
     ///
     /// The `test_name` is sanitised (slashes replaced with underscores) so
     /// that it is safe for use as a directory component.
@@ -60,7 +60,7 @@ pub const TempEnv = struct {
             safe_name[i] = if (c == '/' or c == '\\' or c == ' ') '_' else c;
         }
 
-        const base_path = try std.fmt.allocPrint(allocator, "/tmp/brz-e2e-{s}-{d}", .{ safe_name, pid });
+        const base_path = try std.fmt.allocPrint(allocator, "/tmp/ringloom-e2e-{s}-{d}", .{ safe_name, pid });
         errdefer allocator.free(base_path);
 
         const storage_path = try std.fmt.allocPrint(allocator, "{s}/storage", .{base_path});
@@ -81,7 +81,7 @@ pub const TempEnv = struct {
         // Create the full directory tree.  `makePath` creates intermediate
         // directories, so we can jump straight to the deepest leaves.
         // Create the default group services directory under storage.
-        const default_services = try std.fmt.allocPrint(allocator, "{s}/brz-test/services", .{storage_path});
+        const default_services = try std.fmt.allocPrint(allocator, "{s}/ringloom-test/services", .{storage_path});
         defer allocator.free(default_services);
 
         try test_io.createDirPath(default_services);
@@ -182,7 +182,7 @@ test "init creates expected directory structure" {
     artifacts_dir.close(test_io.io());
 
     // The default group services directory must also exist.
-    const services = try std.fmt.allocPrint(allocator, "{s}/brz-test/services", .{env.storage_path});
+    const services = try std.fmt.allocPrint(allocator, "{s}/ringloom-test/services", .{env.storage_path});
     var services_dir = try test_io.openDir(services, .{});
     services_dir.close(test_io.io());
 }
@@ -254,6 +254,6 @@ test "test name with slashes is sanitised" {
     defer env.deinit();
 
     // Then — base_path should not contain slashes within the test name part.
-    // (The only slashes should be the path separators for /tmp/brz-e2e-…)
+    // (The only slashes should be the path separators for /tmp/ringloom-e2e-…)
     try std.testing.expect(std.mem.indexOf(u8, env.base_path, "some_nested_test_name") != null);
 }

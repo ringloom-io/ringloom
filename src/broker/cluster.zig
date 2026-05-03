@@ -1,4 +1,4 @@
-//! Cluster management module for the BRZ broker.
+//! Cluster management module for the RingLoom broker.
 //!
 //! This is the single import point for cluster-related functionality.
 //! It re-exports all cluster subsystem modules: leader election, node

@@ -1,13 +1,13 @@
 //! TCP frame parser — encoding and validation helpers for the TCP wire protocol.
 //!
 //! The TCP framing layer uses a 24-byte length-prefixed header (defined in
-//! brz_tcp). This module provides broker-level helpers for encoding outbound
+//! ringloom_tcp). This module provides broker-level helpers for encoding outbound
 //! data frames and parsing/validating inbound frame headers.
 
 const std = @import("std");
 const constants = @import("../platform/constants.zig");
 
-/// 24-byte TCP frame header (matches brz_tcp FrameHeader layout).
+/// 24-byte TCP frame header (matches ringloom_tcp FrameHeader layout).
 pub const TcpFrameHeader = extern struct {
     frame_length: u32 = 0,
     flags: u8 = 0,

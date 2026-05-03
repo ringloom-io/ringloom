@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const constants = @import("brz_common").platform.constants;
+const constants = @import("ringloom_common").platform.constants;
 
 /// macOS kqueue-based network I/O backend.
 ///

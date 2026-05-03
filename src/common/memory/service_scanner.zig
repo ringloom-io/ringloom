@@ -1,4 +1,4 @@
-//! Service file discovery scanner for the BRZ broker.
+//! Service file discovery scanner for the RingLoom broker.
 //!
 //! On broker startup, scans for existing service metadata files to recover
 //! state after a broker restart. Live services that were registered before

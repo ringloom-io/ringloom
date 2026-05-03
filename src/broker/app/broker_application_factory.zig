@@ -1,9 +1,9 @@
 const std = @import("std");
-const brz_common = @import("brz_common");
+const ringloom_common = @import("ringloom_common");
 
-const BrokerConfig = brz_common.config.broker_config.BrokerConfig;
-const PeerEndpoint = brz_common.config.broker_config.PeerEndpoint;
-const config_loader_mod = brz_common.config.config_loader;
+const BrokerConfig = ringloom_common.config.broker_config.BrokerConfig;
+const PeerEndpoint = ringloom_common.config.broker_config.PeerEndpoint;
+const config_loader_mod = ringloom_common.config.config_loader;
 const ConfigLoader = config_loader_mod.ConfigLoader;
 const ConfigError = config_loader_mod.ConfigError;
 
@@ -97,7 +97,7 @@ pub fn freeBrokerConfig(allocator: std.mem.Allocator, config: *BrokerConfig) voi
         allocator.free(config.local_host);
     }
 
-    if (config.group_name.len > 0 and !std.mem.eql(u8, config.group_name, "brz")) {
+    if (config.group_name.len > 0 and !std.mem.eql(u8, config.group_name, "ringloom")) {
         allocator.free(config.group_name);
     }
 
@@ -127,7 +127,7 @@ test "factory loads config from explicit path" {
         \\broker.node.id=1
         \\broker.local.host.port=127.0.0.1:19001
         \\broker.group.name=test-group
-        \\broker.storage.path=/tmp/brz-test
+        \\broker.storage.path=/tmp/ringloom-test
     ;
 
     try tmp.dir.writeFile(testing.io, .{
@@ -156,7 +156,7 @@ test "factory loads config from explicit path" {
     try testing.expectEqualStrings("127.0.0.1", bootstrap.config.local_host);
     try testing.expectEqual(@as(u16, 19001), bootstrap.config.local_port);
     try testing.expectEqualStrings("test-group", bootstrap.config.group_name);
-    try testing.expectEqualStrings("/tmp/brz-test", bootstrap.config.storage_path);
+    try testing.expectEqualStrings("/tmp/ringloom-test", bootstrap.config.storage_path);
 }
 
 test "freeBrokerConfig releases owned fields" {

@@ -5,7 +5,7 @@
 //!
 //!   0..7   send timestamp set by ping service
 //!   8      phase flag (0=warmup, 1=measured)
-//!   9..12  magic marker ("BRZL")
+//!   9..12  magic marker ("RING")
 //!   13..20 broker A sender dequeue timestamp
 //!   21..28 broker B receiver ingress timestamp
 
@@ -22,7 +22,7 @@ const phase_offset = 8;
 const magic_offset = 9;
 const sender_dequeue_offset = 13;
 const receiver_ingress_offset = 21;
-const magic: u32 = 0x4C5A5242; // "BRZL" when written little-endian
+const magic: u32 = 0x474E4952; // "RING" when written little-endian
 
 pub const StageTrace = struct {
     send_ts_ns: u64,

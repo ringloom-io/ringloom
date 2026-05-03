@@ -11,25 +11,25 @@
 //! pre-allocated at startup. Message encoding uses a pre-allocated scratch buffer.
 
 const std = @import("std");
-const brz_common = @import("brz_common");
-const platform = brz_common.platform;
+const ringloom_common = @import("ringloom_common");
+const platform = ringloom_common.platform;
 const constants = platform.constants;
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const ServiceRegistry = @import("service_registry.zig").ServiceRegistry;
 const ServiceHeartbeatChecker = @import("service_heartbeat_checker.zig").ServiceHeartbeatChecker;
 const ServiceLeaderElection = @import("service_leader_election.zig").ServiceLeaderElection;
-const BuffersProvider = brz_common.memory.buffers_provider.BuffersProvider;
-const CommandQueue = brz_common.concurrent.command_queue.CommandQueue;
-const Command = brz_common.concurrent.command_queue.Command;
+const BuffersProvider = ringloom_common.memory.buffers_provider.BuffersProvider;
+const CommandQueue = ringloom_common.concurrent.command_queue.CommandQueue;
+const Command = ringloom_common.concurrent.command_queue.Command;
 const ServiceInstance = @import("service_registry.zig").ServiceInstance;
 const ClusterManager = @import("../cluster/cluster_manager.zig").ClusterManager;
-const CountersManager = brz_common.concurrent.counters.CountersManager;
-const encoding = brz_common.message.control_encoding;
+const CountersManager = ringloom_common.concurrent.counters.CountersManager;
+const encoding = ringloom_common.message.control_encoding;
 const admin = @import("../cluster/admin_messages.zig");
 const admin_dispatch = @import("../cluster/admin_dispatch.zig");
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
 const AdminCommand = admin_dispatch.AdminCommand;
-const TcpFrameHeader = brz_common.protocol.frame_parser.TcpFrameHeader;
+const TcpFrameHeader = ringloom_common.protocol.frame_parser.TcpFrameHeader;
 const RoutingRegistry = @import("../receiver/message_router.zig").ServiceRegistry;
 const log = std.log.scoped(.control_loop);
 
@@ -73,7 +73,7 @@ pub const ControlLoop = struct {
     /// Storage path for metadata files (e.g. "/dev/shm").
     storage_path: []const u8,
 
-    /// Group name (e.g. "brz-default").
+    /// Group name (e.g. "ringloom-default").
     group: []const u8,
 
     // ── Timing ───────────────────────────────────────────────────
@@ -910,7 +910,7 @@ const TestFixture = struct {
     cluster_mgr: ClusterManager,
     cmd_buf: [4]Command,
     cmd_queue: CommandQueue,
-    rb_buf: [1024 + @import("brz_common").concurrent.ring_buffer.trailer_length]u8 align(8),
+    rb_buf: [1024 + @import("ringloom_common").concurrent.ring_buffer.trailer_length]u8 align(8),
     rb: RingBuffer,
 
     fn create() TestFixture {

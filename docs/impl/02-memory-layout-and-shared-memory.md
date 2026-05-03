@@ -4,7 +4,7 @@
 >
 > **Depended on by:** [03 — Concurrent Data Structures](03-concurrent-data-structures.md) (ring buffers overlay the regions defined here)
 
-This document specifies every byte of the memory-mapped files that BRZ uses for
+This document specifies every byte of the memory-mapped files that RingLoom uses for
 same-host IPC. It covers the three region types — broker metadata, service metadata,
 and receive log buffers — along with the file discovery, singleton management, and
 per-service caching layers that sit on top.
@@ -29,7 +29,7 @@ All code targets **Zig 0.15.x** stable.
 
 ## 1. Overview
 
-BRZ uses memory-mapped files on `tmpfs` (`/dev/shm` on Linux) for zero-copy IPC.
+RingLoom uses memory-mapped files on `tmpfs` (`/dev/shm` on Linux) for zero-copy IPC.
 Every service on a host maps the broker's file to send control and cross-host messages.
 The broker maps every service's file to send control responses and route inbound
 cross-host messages. No data is copied between userspace and kernel on the hot path —
@@ -873,7 +873,7 @@ does not require filesystem access.
 > assembling inbound packets and detecting gaps. With the TCP transport, TCP handles
 > reliability and ordering natively. The receive log buffer is **no longer part of the
 > active architecture**. This section is retained for historical reference only. Inbound
-> TCP data is now read through `brz_tcp`'s framing layer (doc 04) and routed directly
+> TCP data is now read through `ringloom_tcp`'s framing layer (doc 04) and routed directly
 > to service ring buffers by the receiver event loop (doc 06).
 
 ### 5.1 Binary Layout
@@ -1079,7 +1079,7 @@ The receive log buffer uses a **circular overwrite model**:
    the receiver advertises its available window to the sender, which throttles
    accordingly.
 
-Unlike Aeron's 3-partition log buffer with term rotation, BRZ uses a single partition
+Unlike Aeron's 3-partition log buffer with term rotation, RingLoom uses a single partition
 because there is exactly one stream per peer link. This simplifies the design at the
 cost of requiring careful flow control to avoid overwrite.
 

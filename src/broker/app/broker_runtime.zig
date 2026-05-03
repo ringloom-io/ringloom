@@ -1,15 +1,15 @@
 const std = @import("std");
 
-const brz_common = @import("brz_common");
-const platform = brz_common.platform;
-const memory = brz_common.memory;
-const concurrent = brz_common.concurrent;
+const ringloom_common = @import("ringloom_common");
+const platform = ringloom_common.platform;
+const memory = ringloom_common.memory;
+const concurrent = ringloom_common.concurrent;
 const control = @import("../control.zig");
 const sender = @import("../sender.zig");
 const receiver = @import("../receiver.zig");
 const cluster = @import("../cluster.zig");
 const threading = @import("../threading.zig");
-const config_mod = brz_common.config.broker_config;
+const config_mod = ringloom_common.config.broker_config;
 
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const CountersManager = concurrent.CountersManager;
@@ -331,7 +331,7 @@ test "BrokerRuntime init and deinit without start" {
         .local_host = "127.0.0.1",
         .local_port = 19001,
         .peer_endpoints = peers[0..],
-        .group_name = "brz-test-runtime-init",
+        .group_name = "ringloom-test-runtime-init",
         .storage_path = "/tmp",
         .counter_metadata_buffer_size = 4096,
     };
@@ -357,7 +357,7 @@ test "BrokerRuntime start and shutdown" {
         .local_host = "127.0.0.1",
         .local_port = 19002,
         .peer_endpoints = peers[0..],
-        .group_name = "brz-test-runtime-start",
+        .group_name = "ringloom-test-runtime-start",
         .storage_path = "/tmp",
         .counter_metadata_buffer_size = 4096,
     };

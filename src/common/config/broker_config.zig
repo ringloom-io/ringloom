@@ -55,7 +55,7 @@ pub const BrokerConfig = struct {
     peer_endpoints: []const PeerEndpoint,
 
     // ── Naming & storage ────────────────────────────────────────
-    group_name: []const u8 = "brz",
+    group_name: []const u8 = "ringloom",
     storage_path: []const u8 = "/dev/shm",
 
     // ── Buffer sizes (bytes — all must be power of 2 unless noted) ──

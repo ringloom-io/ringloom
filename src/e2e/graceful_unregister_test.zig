@@ -1,6 +1,6 @@
 const std = @import("std");
-const Clock = @import("brz_common").platform.Clock;
-const testing_mod = @import("brz_testing");
+const Clock = @import("ringloom_common").platform.Clock;
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 const readiness = testing_mod.readiness;
 
@@ -15,7 +15,7 @@ test "graceful unregister is processed faster than heartbeat timeout" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
@@ -50,13 +50,13 @@ test "graceful unregister triggers discovery removal for subscribers" {
 
     // Start echo first, then ping which subscribes to echo
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
 
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{ "--target-service", "echo", "--message-count", "0", "--warmup-count", "0" },
     });
@@ -88,19 +88,19 @@ test "graceful unregister of multiple services in sequence" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const echo1 = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo-1",
     });
     try harness.waitForServiceReady(echo1, 5000);
 
     const echo2 = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo-2",
     });
     try harness.waitForServiceReady(echo2, 5000);
 
     const echo3 = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo-3",
     });
     try harness.waitForServiceReady(echo3, 5000);

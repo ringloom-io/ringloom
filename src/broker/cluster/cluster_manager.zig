@@ -45,7 +45,7 @@ pub const ClusterManager = struct {
     /// the control loop's existing init(local_node_id) call pattern).
     pub fn initSingleNode(local_node_id: u8) Self {
         return .{
-            .cluster_name = "brz-default",
+            .cluster_name = "ringloom-default",
             .node_membership = undefined,
             .single_node_cluster = true,
             .local_node_id = local_node_id,

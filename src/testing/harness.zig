@@ -1,4 +1,4 @@
-//! Top-level test harness for BRZ end-to-end tests and benchmarks.
+//! Top-level test harness for RingLoom end-to-end tests and benchmarks.
 //!
 //! `TestHarness` ties together the temporary environment, configuration
 //! generator, process runner, and readiness detection modules into a
@@ -63,7 +63,7 @@ pub const BrokerSpec = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 19001,
     peers: []const PeerSpec = &.{},
-    group_name: []const u8 = "brz-test",
+    group_name: []const u8 = "ringloom-test",
     threading_mode: []const u8 = "dedicated",
     idle_strategy: []const u8 = "backoff",
     control_buffer_size: u32 = 65_536,
@@ -79,14 +79,14 @@ pub const ServiceSpec = struct {
     executable_name: []const u8,
     service_name: []const u8,
     broker_node_id: u8 = 1,
-    group_name: []const u8 = "brz-test",
+    group_name: []const u8 = "ringloom-test",
     leader_election_enabled: bool = false,
     extra_args: []const []const u8 = &.{},
 };
 
 // ── TestHarness ──────────────────────────────────────────────────────
 
-/// Orchestrates multi-process BRZ test scenarios.
+/// Orchestrates multi-process RingLoom test scenarios.
 ///
 /// Manages a temporary environment, generates configuration files,
 /// spawns broker and service processes, waits for readiness, and
@@ -154,7 +154,7 @@ pub const TestHarness = struct {
         errdefer self.allocator.free(config_path);
 
         // 2. Build the executable path.
-        const exe_path = try std.fmt.allocPrint(self.allocator, "{s}/brz-broker", .{self.bin_dir});
+        const exe_path = try std.fmt.allocPrint(self.allocator, "{s}/ringloom-broker", .{self.bin_dir});
         defer self.allocator.free(exe_path);
 
         // 3. Build the process name.
@@ -360,7 +360,7 @@ test "BrokerSpec has sensible defaults" {
     try std.testing.expectEqualStrings("127.0.0.1", spec.host);
     try std.testing.expectEqual(@as(u16, 19001), spec.port);
     try std.testing.expectEqual(@as(usize, 0), spec.peers.len);
-    try std.testing.expectEqualStrings("brz-test", spec.group_name);
+    try std.testing.expectEqualStrings("ringloom-test", spec.group_name);
     try std.testing.expectEqualStrings("dedicated", spec.threading_mode);
     try std.testing.expectEqualStrings("backoff", spec.idle_strategy);
     try std.testing.expectEqual(@as(u32, 65_536), spec.control_buffer_size);
@@ -378,7 +378,7 @@ test "ServiceSpec has sensible defaults" {
     try std.testing.expectEqualStrings("my-svc", spec.executable_name);
     try std.testing.expectEqualStrings("my-service", spec.service_name);
     try std.testing.expectEqual(@as(u8, 1), spec.broker_node_id);
-    try std.testing.expectEqualStrings("brz-test", spec.group_name);
+    try std.testing.expectEqualStrings("ringloom-test", spec.group_name);
     try std.testing.expect(!spec.leader_election_enabled);
     try std.testing.expectEqual(@as(usize, 0), spec.extra_args.len);
 }

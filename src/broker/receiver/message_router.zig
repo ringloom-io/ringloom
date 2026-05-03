@@ -1,4 +1,4 @@
-//! Message routing for the BRZ broker TCP receive path.
+//! Message routing for the RingLoom broker TCP receive path.
 //!
 //! Routes application payloads (TcpFrameHeader stripped) to target service ring
 //! buffers. Also provides the ServiceRegistry for service lookup.
@@ -7,9 +7,9 @@
 //! no consumption position tracking, and no frame consumed marking.
 
 const std = @import("std");
-const brz_common = @import("brz_common");
-const constants = brz_common.platform.constants;
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
+const ringloom_common = @import("ringloom_common");
+const constants = ringloom_common.platform.constants;
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 
 /// Result of a route attempt.
 pub const RouteResult = enum {

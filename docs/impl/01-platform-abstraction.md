@@ -1,6 +1,6 @@
 # Step 1: Platform Abstraction Layer
 
-> Implementation guide for `src/platform/` — the OS abstraction foundation of the BRZ broker.
+> Implementation guide for `src/platform/` — the OS abstraction foundation of the RingLoom broker.
 
 This is the first module to build. Everything else (ring buffers, metadata files, networking, threading) depends on these primitives. The goal is a clean, platform-agnostic API surface that the rest of the broker can use without `#ifdef`-style branching.
 
@@ -97,8 +97,8 @@ pub const frame_header_length: usize = 24;
 /// TCP wire protocol version.
 pub const protocol_version: u8 = 1;
 
-/// TCP handshake magic bytes: "BRZ\0".
-pub const handshake_magic: u32 = 0x42525A00;
+/// TCP handshake magic bytes: "RING".
+pub const handshake_magic: u32 = 0x474E4952;
 
 /// TCP handshake frame length.
 pub const handshake_length: usize = 24;
@@ -262,7 +262,7 @@ Zig's atomic builtins compile directly to hardware instructions. On x86-64, acqu
 
 ### 2.1 How Zig Builtins Map to Hardware
 
-| Operation | Zig Builtin | x86-64 Instruction | ARM64 Instruction | Use in BRZ |
+| Operation | Zig Builtin | x86-64 Instruction | ARM64 Instruction | Use in RingLoom |
 |---|---|---|---|---|
 | Acquire load | `@atomicLoad(.acquire)` | `mov` + compiler fence | `ldapr` / `ldar` | Reading committed ring buffer record length |
 | Release store | `@atomicStore(.release)` | Compiler fence + `mov` | `stlr` | Committing ring buffer writes, heartbeat updates |
@@ -291,7 +291,7 @@ const constants = @import("constants.zig");
 
 /// A 64-bit atomic integer.
 ///
-/// Wraps Zig's `std.atomic.Value(i64)` with methods named to match BRZ conventions.
+/// Wraps Zig's `std.atomic.Value(i64)` with methods named to match RingLoom conventions.
 /// This is a thin wrapper — all methods inline to a single instruction on x86-64.
 pub const AtomicI64 = struct {
     value: std.atomic.Value(i64),
@@ -438,7 +438,7 @@ pub const AtomicBool = struct {
 
 False sharing occurs when two threads write to different variables that happen to live on the same cache line. The CPU's cache coherence protocol (MESI/MOESI) bounces the entire 64-byte line between cores, destroying performance.
 
-BRZ's ring buffer trailer uses 128-byte padding (two cache lines) between each field. This accounts for Intel's adjacent-line prefetch, where the hardware may speculatively load the next cache line alongside the requested one.
+RingLoom's ring buffer trailer uses 128-byte padding (two cache lines) between each field. This accounts for Intel's adjacent-line prefetch, where the hardware may speculatively load the next cache line alongside the requested one.
 
 ```zig
 /// A 64-bit atomic integer padded to 128 bytes (2 cache lines) to prevent
@@ -621,7 +621,7 @@ test "adjacent CacheLinePaddedAtomicI64 fields do not share cache lines" {
 
 **File: `src/platform/mapped_file.zig`**
 
-The metadata files are the backbone of BRZ's shared-memory IPC. Each service and the broker itself gets a `.dat` file under `<storage_path>/<group>/services/`. These files are memory-mapped so that multiple processes can read and write the ring buffers without any system call overhead on the data path.
+The metadata files are the backbone of RingLoom's shared-memory IPC. Each service and the broker itself gets a `.dat` file under `<storage_path>/<group>/services/`. These files are memory-mapped so that multiple processes can read and write the ring buffers without any system call overhead on the data path.
 
 ### 3.1 Design Constraints
 
@@ -916,7 +916,7 @@ pub fn ptrAt(self: *Self, comptime T: type, offset: usize) *T {
 ///   - Returns false if ESRCH (no such process).
 ///
 /// This mirrors the Java `ProcessHandle.of(pid).isPresent()` check used in
-/// BrzMetadataFileDescriptor.findExistingMetadataFile().
+/// RingLoomMetadataFileDescriptor.findExistingMetadataFile().
 fn isProcessAlive(pid: i64) bool {
     if (pid <= 0) return false;
 
@@ -1025,7 +1025,7 @@ pub fn ensureServicesDirectory(
 ```zig
 /// Scan the services directory for existing .dat files.
 /// Returns a list of file paths for metadata files whose owning PID is dead.
-/// This mirrors Java's ServiceScanner and BrzMetadataFileDescriptor.findExistingMetadataFile().
+/// This mirrors Java's ServiceScanner and RingLoomMetadataFileDescriptor.findExistingMetadataFile().
 pub fn scanForReusableFiles(
     allocator: std.mem.Allocator,
     services_dir: []const u8,
@@ -1100,7 +1100,7 @@ const testing = std.testing;
 test "MappedFile create and close on tmpfs" {
     // Use /tmp for tests (tmpfs on most Linux systems).
     const allocator = testing.allocator;
-    const dir = "/tmp/brz-test-mapped-file";
+    const dir = "/tmp/ringloom-test-mapped-file";
 
     // Cleanup from previous runs.
     std.fs.deleteTreeAbsolute(dir) catch {};
@@ -1121,7 +1121,7 @@ test "MappedFile create and close on tmpfs" {
 
 test "MappedFile create with sub-page size rounds up" {
     const allocator = testing.allocator;
-    const dir = "/tmp/brz-test-mapped-file-roundup";
+    const dir = "/tmp/ringloom-test-mapped-file-roundup";
     std.fs.deleteTreeAbsolute(dir) catch {};
     defer std.fs.deleteTreeAbsolute(dir) catch {};
 
@@ -1133,7 +1133,7 @@ test "MappedFile create with sub-page size rounds up" {
 
 test "MappedFile rejects live PID" {
     const allocator = testing.allocator;
-    const dir = "/tmp/brz-test-mapped-file-pid";
+    const dir = "/tmp/ringloom-test-mapped-file-pid";
     std.fs.deleteTreeAbsolute(dir) catch {};
     defer std.fs.deleteTreeAbsolute(dir) catch {};
 
@@ -1150,7 +1150,7 @@ test "MappedFile rejects live PID" {
 
 test "MappedFile allows reuse of dead PID" {
     const allocator = testing.allocator;
-    const dir = "/tmp/brz-test-mapped-file-dead";
+    const dir = "/tmp/ringloom-test-mapped-file-dead";
     std.fs.deleteTreeAbsolute(dir) catch {};
     defer std.fs.deleteTreeAbsolute(dir) catch {};
 
@@ -1167,7 +1167,7 @@ test "MappedFile allows reuse of dead PID" {
 
 test "MappedFile ptrAt" {
     const allocator = testing.allocator;
-    const dir = "/tmp/brz-test-mapped-file-ptrat";
+    const dir = "/tmp/ringloom-test-mapped-file-ptrat";
     std.fs.deleteTreeAbsolute(dir) catch {};
     defer std.fs.deleteTreeAbsolute(dir) catch {};
 
@@ -1705,7 +1705,7 @@ The synchronization word is an `i32` at a known offset in the ring buffer's bloc
 2. **Sleep**: `wait(ptr, expected=1, timeout)` — the kernel atomically checks `*ptr == 1` and sleeps if so.
 3. **Wake**: The producer sets the word to `0` (via CAS: `1 → 0`) and calls `wake(ptr)`.
 
-This matches the Java `ProcessSynchronizer` interface in `brz/core/src/main/java/io/brz/core/libnative/`.
+This matches the Java `ProcessSynchronizer` interface in `ringloom/core/src/main/java/io/ringloom/core/libnative/`.
 
 ### 6.1 Interface
 
@@ -2180,7 +2180,7 @@ sync.wake(&wait_word);
 
 ## Build Integration
 
-Update `build.zig` to recognize the new source tree. The platform module is part of the main `brz_broker` module, so no additional build configuration is needed — Zig's module system automatically resolves `@import("platform/foo.zig")` relative to the root source file.
+Update `build.zig` to recognize the new source tree. The platform module is part of the main `ringloom_broker` module, so no additional build configuration is needed — Zig's module system automatically resolves `@import("platform/foo.zig")` relative to the root source file.
 
 Ensure the test step discovers all platform tests:
 

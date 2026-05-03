@@ -2,7 +2,7 @@
 
 > **Depends on:** [02 — Memory Layout & Shared Memory](02-memory-layout-and-shared-memory.md) (service metadata files, ring buffer layout),
 > [03 — Concurrent Data Structures](03-concurrent-data-structures.md) (MPSC ring buffer for routing to services),
-> [04 — TCP Transport Library](04-tcp-transport-library.md) (`FrameHeader`, handshake frame, `TcpIo`, `brz_tcp` library)
+> [04 — TCP Transport Library](04-tcp-transport-library.md) (`FrameHeader`, handshake frame, `TcpIo`, `ringloom_tcp` library)
 >
 > **Depended on by:** [08 — Service IPC](08-service-ipc.md) (cross-host messages land in service ring buffers via the routing described here)
 
@@ -78,7 +78,7 @@ TCP Listener ──► Accept ──► Handshake Validation
 The receiver event loop is a **single thread** that owns all incoming TCP connections
 from peer brokers and the TCP listener socket. It runs as a duty-cycle event loop
 (spin on work count, idle strategy when no work), following the same pattern as every
-other event loop in BRZ (see doc 01, §5).
+other event loop in RingLoom (see doc 01, §5).
 
 ### What the TCP receive path does NOT do
 
@@ -123,7 +123,7 @@ zero-overhead parsing.
 
 ```zig
 const HandshakeFrame = packed struct {
-    /// Magic bytes: 0x42525A00 ("BRZ\0" in little-endian).
+    /// Magic bytes: 0x474E4952 ("RING" in little-endian).
     magic: u32,
 
     /// Protocol version. Must match PROTOCOL_VERSION for compatibility.
@@ -157,7 +157,7 @@ const HandshakeFrame = packed struct {
     }
 };
 
-const HANDSHAKE_MAGIC: u32 = 0x42525A00;
+const HANDSHAKE_MAGIC: u32 = 0x474E4952;
 const PROTOCOL_VERSION: u8 = 1;
 const DIRECTION_SEND: u8 = 0x01;
 ```
@@ -1082,7 +1082,7 @@ Scenario: Service A's ring buffer is full.
     ALL messages from that peer are blocked — including messages
     for Service B, Service C, etc. (head-of-line blocking).
 
-  ✓ Always-read model (BRZ approach):
+  ✓ Always-read model (RingLoom approach):
     Keep reading from the TCP socket.
     Messages for Service A are dropped (counter incremented).
     Messages for Service B, Service C flow normally.
@@ -1090,7 +1090,7 @@ Scenario: Service A's ring buffer is full.
 ```
 
 The tradeoff is clear: dropped messages for a slow service vs. head-of-line
-blocking that affects all services on that connection. BRZ chooses drops.
+blocking that affects all services on that connection. RingLoom chooses drops.
 
 ### 6.3 Ring Buffer Write Details
 
@@ -1106,7 +1106,7 @@ Ring buffer record layout:
 ┌──────────────────────────────────────────────────────────────┐
 │  Record Header (8 bytes)                                     │
 │  +0: length (i32) — total record length including header     │
-│  +4: msg_type_id (i32) — BRZ message type / template_id     │
+│  +4: msg_type_id (i32) — RingLoom message type / template_id     │
 ├──────────────────────────────────────────────────────────────┤
 │  Frame Header (24 bytes)                                     │
 │  (copied verbatim from the TCP frame)                        │
@@ -1611,7 +1611,7 @@ fn registerBuffersWithIoUring(self: *ReceiverEventLoop) !void {
 ## 11. Fairness and Budgets
 
 Without fairness controls, a single peer sending at high rate could monopolize the
-receiver's CPU time, starving reads from other peers. BRZ uses per-peer budgets to
+receiver's CPU time, starving reads from other peers. RingLoom uses per-peer budgets to
 prevent this.
 
 ### 11.1 Per-Peer Read Budget

@@ -1,4 +1,4 @@
-//! Thread management for the BRZ broker.
+//! Thread management for the RingLoom broker.
 //!
 //! Provides EventLoop interface, IdleStrategy, and ThreadRunner for
 //! running named event loops on dedicated threads.

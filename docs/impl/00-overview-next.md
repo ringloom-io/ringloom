@@ -1,6 +1,6 @@
-# BRZ Follow-Up Implementation Guide — Modularization, Executables, and End-to-End Validation
+# RingLoom Follow-Up Implementation Guide — Modularization, Executables, and End-to-End Validation
 
-This document series extends the existing BRZ Zig implementation plan with a second phase
+This document series extends the existing RingLoom Zig implementation plan with a second phase
 focused on three shortcomings in the current codebase:
 
 1. **Everything is currently bundled into one library**
@@ -10,7 +10,7 @@ focused on three shortcomings in the current codebase:
    - CLI entrypoints
    - test support
 2. **The main binary does not actually start the broker**
-   - `brz-broker` should boot the broker runtime and block until shutdown
+   - `ringloom-broker` should boot the broker runtime and block until shutdown
 3. **There is no proper end-to-end and performance validation plan**
    - multi-process broker/service tests
    - same-host and cross-host scenarios
@@ -25,7 +25,7 @@ the implementation work already captured in `docs/architecture.md` and `docs/imp
 
 ## Relationship to Existing Documents
 
-The original implementation documents in `docs/impl` describe how to build the BRZ system
+The original implementation documents in `docs/impl` describe how to build the RingLoom system
 functionally. They are still valid for:
 
 - shared-memory layout
@@ -44,11 +44,11 @@ This new document set fills that gap.
 
 Think of the original `docs/impl` set as:
 
-- **how BRZ works**
+- **how RingLoom works**
 
 And this new `docs/impl-next` set as:
 
-- **how BRZ should be packaged, launched, tested, and evolved**
+- **how RingLoom should be packaged, launched, tested, and evolved**
 
 ---
 
@@ -81,16 +81,16 @@ The implementation should be reorganized into separate libraries with explicit o
   - polling/assertion helpers
   - fixture builders
 - **executables**
-  - `brz-broker`
+  - `ringloom-broker`
   - optional sample/demo services
   - optional admin/stat tools
 
 The key requirement is that **broker and services are separate processes**, even though
 they share common libraries.
 
-### 2. Make `brz-broker` actually run the broker
+### 2. Make `ringloom-broker` actually run the broker
 
-The `brz-broker` executable must:
+The `ringloom-broker` executable must:
 
 - load broker configuration
 - initialize broker runtime
@@ -121,7 +121,7 @@ tests.
 
 ## Non-Goals
 
-This document set does **not** redefine the BRZ architecture itself. It does not replace:
+This document set does **not** redefine the RingLoom architecture itself. It does not replace:
 
 - the shared-memory file layouts
 - the TCP wire protocol
@@ -194,7 +194,7 @@ This follow-up series is organized around the missing concerns.
 |:-----:|----------|-------------|
 | 0 | `00-overview.md` | Overview, goals, target package map, migration order |
 | 1 | `01-package-and-module-split.md` | How to split common, broker, service, tools, and test support into separate Zig modules/libraries |
-| 2 | `02-broker-runtime-and-main-binary.md` | How the broker runtime should be exposed and how `brz-broker` should start and manage it |
+| 2 | `02-broker-runtime-and-main-binary.md` | How the broker runtime should be exposed and how `ringloom-broker` should start and manage it |
 | 3 | `03-service-runtime-and-process-model.md` | Service-side runtime boundaries, service executable patterns, and process lifecycle |
 | 4 | `04-build-graph-and-artifact-layout.md` | `build.zig` restructuring for multiple libraries, executables, tests, and installable artifacts |
 | 5 | `05-end-to-end-test-harness.md` | Multi-process test harness design, fixtures, temp storage isolation, and orchestration |
@@ -210,7 +210,7 @@ The exact final directory names can vary, but the architecture should converge o
 like this:
 
 ```text
-brz-broker/
+ringloom-broker/
 ├── build.zig
 ├── build.zig.zon
 ├── src/
@@ -219,7 +219,7 @@ brz-broker/
 │   ├── service/              # service-only runtime code
 │   ├── tools/                # CLI tools and support binaries
 │   ├── apps/                 # executable entrypoints
-│   │   ├── brz_broker_main.zig
+│   │   ├── ringloom_broker_main.zig
 │   │   ├── sample_service_a.zig
 │   │   └── sample_service_b.zig
 │   ├── testing/              # reusable test harness support
@@ -237,15 +237,15 @@ brz-broker/
 
 At the build graph level, the project should expose at least these logical modules:
 
-- `brz_core`
-- `brz_broker`
-- `brz_service`
-- `brz_test_support`
+- `ringloom_core`
+- `ringloom_broker`
+- `ringloom_service`
+- `ringloom_test_support`
 
 Optional:
 
-- `brz_tools`
-- `brz_samples`
+- `ringloom_tools`
+- `ringloom_samples`
 
 ### Why this split matters
 
@@ -260,7 +260,7 @@ This separation solves the current ambiguity where:
 
 ## Recommended Ownership Boundaries
 
-### `brz_core`
+### `ringloom_core`
 
 Contains code shared by broker and services:
 
@@ -274,7 +274,7 @@ Contains code shared by broker and services:
 
 This library must not depend on broker-only or service-only runtime code.
 
-### `brz_broker`
+### `ringloom_broker`
 
 Contains broker-only behavior:
 
@@ -286,9 +286,9 @@ Contains broker-only behavior:
 - broker-specific config loading
 - broker lifecycle API
 
-This library may depend on `brz_core`, but not on `brz_service`.
+This library may depend on `ringloom_core`, but not on `ringloom_service`.
 
-### `brz_service`
+### `ringloom_service`
 
 Contains service-only behavior:
 
@@ -299,9 +299,9 @@ Contains service-only behavior:
 - service client registry
 - service lifecycle API
 
-This library may depend on `brz_core`, but not on `brz_broker`.
+This library may depend on `ringloom_core`, but not on `ringloom_broker`.
 
-### `brz_test_support`
+### `ringloom_test_support`
 
 Contains reusable testing helpers:
 
@@ -313,14 +313,14 @@ Contains reusable testing helpers:
 - fixture config generation
 - benchmark result formatting helpers
 
-This library may depend on `brz_core`, and optionally on public APIs of
-`brz_broker`/`brz_service`, but should avoid depending on private internals.
+This library may depend on `ringloom_core`, and optionally on public APIs of
+`ringloom_broker`/`ringloom_service`, but should avoid depending on private internals.
 
 ---
 
 ## Executable Model
 
-### `brz-broker`
+### `ringloom-broker`
 
 This is the production broker process.
 
@@ -344,7 +344,7 @@ patterns:
 
 1. **Application-owned service binaries**
    - each service has its own `main`
-   - imports `brz_service`
+   - imports `ringloom_service`
    - registers handlers
    - starts service runtime
 2. **Sample/demo binaries**
@@ -493,8 +493,8 @@ workflow:
 ### Broker
 
 ```text
-zig build brz-broker
-zig-out/bin/brz-broker --config path/to/broker.properties
+zig build ringloom-broker
+zig-out/bin/ringloom-broker --config path/to/broker.properties
 ```
 
 Expected behavior:
@@ -556,7 +556,7 @@ The recommended order for this follow-up phase is:
    - isolate service runtime API
 2. **Fix broker executable**
    - create a real broker lifecycle API
-   - wire `brz-broker` to it
+   - wire `ringloom-broker` to it
 3. **Restructure build graph**
    - multiple modules
    - multiple executables
@@ -628,7 +628,7 @@ They assume familiarity with:
 - `docs/architecture.md`
 - the existing `docs/impl` series
 - Zig build graph concepts
-- BRZ shared-memory and TCP architecture
+- RingLoom shared-memory and TCP architecture
 
 They are intentionally implementation-oriented and should be used as a direct guide for
 code and build-system changes.
@@ -653,7 +653,7 @@ Read these documents in order:
 
 ## Summary
 
-The original BRZ implementation documents explain the internals of the system well, but
+The original RingLoom implementation documents explain the internals of the system well, but
 the project now needs a second layer of specification focused on:
 
 - **modular packaging**

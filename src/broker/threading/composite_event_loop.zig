@@ -6,7 +6,7 @@
 //! doWork() calls both inner loops and sums their work counts.
 //! onClose() calls both inner loops' onClose in order.
 
-const platform = @import("brz_common").platform;
+const platform = @import("ringloom_common").platform;
 const EventLoop = platform.EventLoop;
 
 /// Combines two event loops into one. doWork() calls both, summing work counts.

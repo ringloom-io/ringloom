@@ -1,4 +1,4 @@
-//! Per-peer sender connection state for the BRZ broker TCP send path.
+//! Per-peer sender connection state for the RingLoom broker TCP send path.
 //!
 //! Each connected peer broker is represented by a PeerSender. This struct
 //! holds the TCP connection state, bounded write queue, heartbeat timing,
@@ -6,10 +6,10 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const net = @import("brz_tcp").socket;
+const net = @import("ringloom_tcp").socket;
 const WriteQueue = @import("write_queue.zig").WriteQueue;
-const constants = @import("brz_common").platform.constants;
-const platform = @import("brz_common").platform;
+const constants = @import("ringloom_common").platform.constants;
+const platform = @import("ringloom_common").platform;
 
 pub const ConnectionState = enum {
     /// Not yet connected. Waiting for reconnect timer.

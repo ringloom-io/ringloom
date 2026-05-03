@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const constants = @import("brz_common").platform.constants;
+const constants = @import("ringloom_common").platform.constants;
 const Allocator = std.mem.Allocator;
 
 /// A buffer slot returned by `acquire`. Contains the buffer index (for

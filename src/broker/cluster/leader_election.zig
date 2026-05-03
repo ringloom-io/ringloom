@@ -10,7 +10,7 @@
 //! "which node with the lowest ID am I hearing from?"
 
 const std = @import("std");
-const Clock = @import("brz_common").platform.clock.Clock;
+const Clock = @import("ringloom_common").platform.clock.Clock;
 
 pub const LeaderElection = struct {
     /// Result returned by methods that may change leadership state.

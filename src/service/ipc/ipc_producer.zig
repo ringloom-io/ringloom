@@ -1,12 +1,12 @@
 //! IPC Producer — writes messages to a target service's messages ring buffer.
 //!
-//! This is the `BrzProducer` implementation for same-host IPC. Each producer
+//! This is the `RingLoomProducer` implementation for same-host IPC. Each producer
 //! wraps a ring buffer backed by a target service's messages buffer region.
 
 const std = @import("std");
-const brz_common = @import("brz_common");
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
-const constants = brz_common.memory.constants;
+const ringloom_common = @import("ringloom_common");
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
+const constants = ringloom_common.memory.constants;
 
 pub const IpcProducer = struct {
     ring_buffer: RingBuffer,

@@ -4,7 +4,7 @@
 >
 > **Depended on by:** [10 — Threading Model](10-threading-model.md) (control loop is Thread 1), [11 — Cluster Management](11-cluster-management.md) (leader election, state sync build on the service registry and subscriber notification mechanisms defined here)
 
-The broker control plane is the nerve center of the BRZ broker. It handles service
+The broker control plane is the nerve center of the RingLoom broker. It handles service
 registration, deregistration, discovery (subscriptions), heartbeat-based health
 checking, service leader election, and inter-event-loop command dispatch. All of this
 runs on a single dedicated thread (Thread 1 in the threading model) in a tight
@@ -500,7 +500,7 @@ pub const ControlLoop = struct {
     /// Storage path for metadata files (e.g. "/dev/shm").
     storage_path: []const u8,
 
-    /// Group name (e.g. "brz-default").
+    /// Group name (e.g. "ringloom-default").
     group: []const u8,
 
     // ── Timing ───────────────────────────────────────────────────
@@ -704,7 +704,7 @@ const event_loop = platform.EventLoop{
 };
 
 var runner = platform.ThreadRunner.init(
-    "brz-control-loop",
+    "ringloom-control-loop",
     event_loop,
     platform.IdleStrategy{ .backoff = .{} },
 );

@@ -1,6 +1,6 @@
-//! BRZ Common — shared substrate used by both broker and service runtimes.
+//! RingLoom Common — shared substrate used by both broker and service runtimes.
 //!
-//! This is the root source file for the `brz_common` library module.
+//! This is the root source file for the `ringloom_common` library module.
 //! It re-exports all stable public APIs: platform abstractions, concurrent
 //! utilities, memory layout, message codecs, protocol definitions,
 //! monitoring primitives, and shared configuration helpers.

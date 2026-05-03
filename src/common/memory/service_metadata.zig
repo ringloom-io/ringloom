@@ -1,4 +1,4 @@
-//! Service metadata file layout for the BRZ broker.
+//! Service metadata file layout for the RingLoom broker.
 //!
 //! Each service on a host has a metadata file on /dev/shm containing:
 //! - A header with service identity and configuration

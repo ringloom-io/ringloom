@@ -1,18 +1,18 @@
-//! Broker module root for BRZ.
+//! Broker module root for RingLoom.
 //!
-//! This is the root source file for the `brz_broker` library module.
+//! This is the root source file for the `ringloom_broker` library module.
 //! It re-exports broker-specific APIs: configuration, control loop,
 //! cluster management, sender/receiver event loops, transport,
 //! flow control, threading, and the application bootstrap layer.
 //!
 //! Consumers should import this root rather than deep internal files.
 
-const brz_common = @import("brz_common");
+const ringloom_common = @import("ringloom_common");
 
 // ── Broker configuration ─────────────────────────────────────────────
 
 pub const config = struct {
-    pub const broker_config = @import("brz_common").config.broker_config;
+    pub const broker_config = @import("ringloom_common").config.broker_config;
     pub const BrokerConfig = broker_config.BrokerConfig;
     pub const ThreadingMode = broker_config.ThreadingMode;
     pub const IdleStrategyName = broker_config.IdleStrategyName;
@@ -30,7 +30,7 @@ pub const threading = @import("threading.zig");
 
 // ── Monitoring (re-exported from common for broker convenience) ──────
 
-pub const monitoring = brz_common.monitoring;
+pub const monitoring = ringloom_common.monitoring;
 
 // ── Application bootstrap layer ──────────────────────────────────────
 
@@ -58,7 +58,7 @@ pub const ExitCode = app.ExitCode;
 pub const freeBrokerConfig = app.freeBrokerConfig;
 
 pub const BrokerConfig = config.BrokerConfig;
-pub const ConfigLoader = brz_common.config.ConfigLoader;
+pub const ConfigLoader = ringloom_common.config.ConfigLoader;
 
 pub const ControlLoop = control.ControlLoop;
 pub const ServiceRegistry = control.ServiceRegistry;
@@ -122,7 +122,7 @@ comptime {
     _ = @import("threading/broker_threads.zig");
 
     // Monitoring (via common)
-    _ = brz_common.monitoring;
+    _ = ringloom_common.monitoring;
 }
 
 test "broker module exports canonical broker APIs" {

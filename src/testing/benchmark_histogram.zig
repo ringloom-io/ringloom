@@ -1,4 +1,4 @@
-//! Lightweight latency histogram for BRZ performance benchmarks.
+//! Lightweight latency histogram for RingLoom performance benchmarks.
 //!
 //! `Histogram` collects raw nanosecond samples in a growable array and
 //! provides order-statistic queries (percentiles), min/max/mean, and

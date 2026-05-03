@@ -1,8 +1,8 @@
-# BRZ Broker Architecture
+# RingLoom Broker Architecture
 
 **For Implementation in Zig**
 
-This document describes the complete architecture of the BRZ broker, a high-performance IPC and cross-host message routing system. The design uses shared-memory ring buffers for same-host IPC and TCP connections for cross-host communication, with `nodeId`/`serviceId` routing and minimal complexity for lowest latency. The TCP transport lives in a separate library (`brz_tcp`) that uses `io_uring` on Linux and `kqueue` on macOS, with planned future support for kernel-bypass technologies (TCPDirect, F-Stack).
+This document describes the complete architecture of the RingLoom broker, a high-performance IPC and cross-host message routing system. The design uses shared-memory ring buffers for same-host IPC and TCP connections for cross-host communication, with `nodeId`/`serviceId` routing and minimal complexity for lowest latency. The TCP transport lives in a separate library (`ringloom_tcp`) that uses `io_uring` on Linux and `kqueue` on macOS, with planned future support for kernel-bypass technologies (TCPDirect, F-Stack).
 
 ---
 
@@ -41,24 +41,24 @@ This document describes the complete architecture of the BRZ broker, a high-perf
 2. **Lock-free everywhere.** All shared data structures use atomic fetch-and-add or CAS. No mutexes on any data path.
 3. **Single-writer principle.** Every mutable shared location has exactly one writer. Readers never block writers.
 4. **Allocation-free hot path.** All buffers are pre-allocated. Message routing uses flyweight patterns over mapped memory.
-5. **Simplicity over generality.** Unlike Aeron, which is a general-purpose transport, this system has exactly one use case: BRZ broker message routing. Every abstraction that doesn't serve this use case is eliminated.
+5. **Simplicity over generality.** Unlike Aeron, which is a general-purpose transport, this system has exactly one use case: RingLoom broker message routing. Every abstraction that doesn't serve this use case is eliminated.
 6. **Position-based progress tracking.** All progress is tracked via monotonically increasing 64-bit positions, not sequence numbers.
 7. **Duty-cycle event loops.** All processing is done in tight loops returning work counts, driving idle strategies.
-8. **TCP for cross-host transport.** Reliability, ordering, and flow control are delegated to TCP. The broker does not implement a custom reliable transport protocol. A separate TCP library (`brz_tcp`) provides the I/O engine with platform-optimized backends.
+8. **TCP for cross-host transport.** Reliability, ordering, and flow control are delegated to TCP. The broker does not implement a custom reliable transport protocol. A separate TCP library (`ringloom_tcp`) provides the I/O engine with platform-optimized backends.
 
 ### Key Differences from Aeron
 
-| Aeron Concept | BRZ Broker Equivalent | Rationale |
+| Aeron Concept | RingLoom Broker Equivalent | Rationale |
 |---|---|---|
 | Custom reliable UDP protocol | TCP connections between brokers | TCP provides reliability, ordering, and flow control natively; eliminates NAK/retransmit/loss detection/flow control protocol |
-| `streamId` / `sessionId` multiplexing | `nodeId` / `serviceId` in message header | BRZ has one logical link per peer broker; routing is by service identity, not stream identity |
+| `streamId` / `sessionId` multiplexing | `nodeId` / `serviceId` in message header | RingLoom has one logical link per peer broker; routing is by service identity, not stream identity |
 | 3-partition rotating log buffers | No receive log buffer (TCP guarantees ordering) | TCP delivers bytes in order; no gap tracking or reassembly needed |
 | Per-publication log buffer files | Single MPSC send ring buffer per broker | All local services write to one outbound buffer; broker drains and routes |
 | CnC file + command/response protocol | Direct metadata file with embedded ring buffers | Services map the broker's file directly; no driver process needed |
 | Media Driver as separate process | Transport integrated into broker process | The broker IS the driver; no client↔driver split needed |
 | Broadcast buffer for responses | Direct writes to service control ring buffers | Broker writes responses directly to each service's mapped memory |
 | Generic URI-based channel configuration | Fixed per-peer TCP endpoints from config | No URI parsing needed; topology is known at startup |
-| `io_uring` / `epoll` for UDP | `io_uring` (Linux) / `kqueue` (macOS) for TCP | Async I/O engine in separate `brz_tcp` library with pluggable backends |
+| `io_uring` / `epoll` for UDP | `io_uring` (Linux) / `kqueue` (macOS) for TCP | Async I/O engine in separate `ringloom_tcp` library with pluggable backends |
 
 ---
 
@@ -121,11 +121,11 @@ This document describes the complete architecture of the BRZ broker, a high-perf
 
 ### 3.1 No Custom Reliable Transport Protocol
 
-Aeron implements a complete reliable transport over UDP: sequence numbers, NAKs, retransmit buffers, loss detection, Status Messages for flow control, receiver window tracking, and connection setup/teardown frames. BRZ replaces all of this with **TCP**:
+Aeron implements a complete reliable transport over UDP: sequence numbers, NAKs, retransmit buffers, loss detection, Status Messages for flow control, receiver window tracking, and connection setup/teardown frames. RingLoom replaces all of this with **TCP**:
 
 ```
 Aeron:   UDP + custom reliability (NAK, retransmit, flow control, setup)
-BRZ:     TCP connections (reliability, ordering, flow control handled by kernel)
+RingLoom:     TCP connections (reliability, ordering, flow control handled by kernel)
 ```
 
 This eliminates:
@@ -141,11 +141,11 @@ The broker-to-broker wire protocol is reduced to **length-prefixed message frami
 
 ### 3.2 No Stream/Session Multiplexing
 
-Aeron supports arbitrary numbers of streams and sessions per endpoint, requiring `streamId`/`sessionId` lookup on every packet. BRZ has exactly **one logical link per peer broker**, using a pair of TCP connections (one outgoing, one incoming). The `nodeId` field in the BRZ message header replaces stream/session routing:
+Aeron supports arbitrary numbers of streams and sessions per endpoint, requiring `streamId`/`sessionId` lookup on every packet. RingLoom has exactly **one logical link per peer broker**, using a pair of TCP connections (one outgoing, one incoming). The `nodeId` field in the RingLoom message header replaces stream/session routing:
 
 ```
 Aeron:   endpoint:port → streamId → sessionId → log buffer → poll
-BRZ:     TCP connection → read framed message → route by (targetNodeId, targetServiceId)
+RingLoom:     TCP connection → read framed message → route by (targetNodeId, targetServiceId)
 ```
 
 This eliminates:
@@ -158,11 +158,11 @@ This eliminates:
 
 Aeron uses a Command-and-Control shared memory file with an MPSC ring buffer (client→driver) and a broadcast buffer (driver→clients) because the media driver is a separate process that manages resources for multiple clients.
 
-In BRZ, the broker IS the transport. Services communicate with the broker through **direct shared memory ring buffers** embedded in metadata files:
+In RingLoom, the broker IS the transport. Services communicate with the broker through **direct shared memory ring buffers** embedded in metadata files:
 
 ```
 Aeron:   Client → CnC ring buffer → Driver Conductor → broadcast → Client
-BRZ:     Service → Broker control ring buffer (direct write)
+RingLoom:     Service → Broker control ring buffer (direct write)
          Broker → Service control ring buffer (direct write)
 ```
 
@@ -175,18 +175,18 @@ This eliminates:
 
 ### 3.4 No Log Buffer Rotation
 
-Aeron uses 3 term partitions per log buffer, rotating when one fills up. BRZ does not use log buffers at all for the receive path — TCP delivers data in order, and the broker routes each complete message immediately upon receipt. For the send path, an MPSC ring buffer is used, since multiple services write outbound messages and a single sender thread drains them.
+Aeron uses 3 term partitions per log buffer, rotating when one fills up. RingLoom does not use log buffers at all for the receive path — TCP delivers data in order, and the broker routes each complete message immediately upon receipt. For the send path, an MPSC ring buffer is used, since multiple services write outbound messages and a single sender thread drains them.
 
 ### 3.5 No Publication/Subscription Abstraction
 
-Aeron has a rich Publication/Subscription API with log buffer files per publication, subscriber position counters, and image lifecycle management. BRZ replaces all of this with:
+Aeron has a rich Publication/Subscription API with log buffer files per publication, subscriber position counters, and image lifecycle management. RingLoom replaces all of this with:
 
 - **Outbound:** Services write to the broker's MPSC send ring buffer (or directly to another service's message ring buffer for same-host IPC)
 - **Inbound:** The broker writes received messages directly to the target service's message ring buffer
 
 ### 3.6 Simplified Back-Pressure
 
-Aeron's flow control tracks per-subscriber positions and uses Status Messages to communicate receiver window back to senders. BRZ delegates transport-level flow control entirely to TCP and handles application-level back-pressure through message dropping:
+Aeron's flow control tracks per-subscriber positions and uses Status Messages to communicate receiver window back to senders. RingLoom delegates transport-level flow control entirely to TCP and handles application-level back-pressure through message dropping:
 
 - **Receiver always reads:** The receiver event loop always drains incoming TCP connections. It never pauses reads.
 - **Drop on full:** If a target service's ring buffer is full, the message is dropped and a counter is incremented. This matches the current behavior and prevents head-of-line blocking across services.
@@ -231,7 +231,7 @@ Located at `<storage_path>/<group>/services/broker_0.dat` (or `0.dat` with encry
 Total size = 512 + controlBufferLength + messagesBufferLength
 ```
 
-The **send ring buffer** serves as the single outbound buffer for all cross-host messages. Any local service that needs to send a message to a remote node writes to this buffer with the target `nodeId` and `serviceId` set in the BRZ message header.
+The **send ring buffer** serves as the single outbound buffer for all cross-host messages. Any local service that needs to send a message to a remote node writes to this buffer with the target `nodeId` and `serviceId` set in the RingLoom message header.
 
 ### 4.2 Service Metadata File
 
@@ -276,13 +276,13 @@ Located at `<storage_path>/<group>/services/<name>_<id>.dat`.
 
 Unlike the previous UDP-based design which required per-peer receive log buffers for packet reassembly and gap tracking, the TCP-based design requires no application-level receive buffers. TCP guarantees in-order, reliable delivery of bytes.
 
-The receiver event loop reads complete framed messages from each peer's incoming TCP connection using pre-allocated read buffers managed by the `brz_tcp` library. Once a complete message frame is read (determined by the length prefix), it is immediately routed to the target service's ring buffer.
+The receiver event loop reads complete framed messages from each peer's incoming TCP connection using pre-allocated read buffers managed by the `ringloom_tcp` library. Once a complete message frame is read (determined by the length prefix), it is immediately routed to the target service's ring buffer.
 
 Per-peer state is minimal:
 
 ```
 PeerRecvState:
-  connection: *TcpConnection       ← managed by brz_tcp
+  connection: *TcpConnection       ← managed by ringloom_tcp
   read_buffer: [max_frame_length]u8  ← pre-allocated, reused per message
   read_position: usize              ← bytes read into current frame so far
   expected_length: u32              ← frame_length from header (0 if reading header)
@@ -585,7 +585,7 @@ Connection Handshake (24 bytes):
 
 Offset  Size  Type      Field
 ──────────────────────────────────────
-0       4     u32       magic             (0x42525A00 = "BRZ\0")
+0       4     u32       magic             (0x474E4952 = "RING")
 4       1     u8        protocol_version  (1)
 5       1     u8        source_node_id    (connecting broker's node ID)
 6       1     u8        target_node_id    (expected peer's node ID)
@@ -735,7 +735,7 @@ Since the receiver always reads from TCP (never pauses), heartbeat messages are 
 
 **Aeron approach:** Each publication has its own log buffer file (3 term partitions). The sender event loop scans the active term for new data using the `term_tail_counter`. Multiple concurrent publications each have their own buffer.
 
-**BRZ approach:** A single MPSC ring buffer serves as the outbound queue for all local services. This is simpler and sufficient because:
+**RingLoom approach:** A single MPSC ring buffer serves as the outbound queue for all local services. This is simpler and sufficient because:
 
 1. **Single sender thread** drains the buffer. No concurrent readers.
 2. **Messages are small** relative to buffer size (typically < 16KB, often < 1KB).
@@ -817,7 +817,7 @@ fn on_outbound_message(msg_type_id: i32, payload: []const u8) void {
 
 ### 8.5 TCP Write Mechanics
 
-Writes use the platform I/O engine (`brz_tcp`):
+Writes use the platform I/O engine (`ringloom_tcp`):
 
 - **Linux (io_uring):** Writes are submitted as `IORING_OP_SEND` or `IORING_OP_WRITEV` operations. Multiple messages to the same peer can be coalesced into a single vectored write.
 - **macOS (kqueue):** Writes use `writev()` when the socket is ready (signaled by `EVFILT_WRITE`).
@@ -980,7 +980,7 @@ fn route_to_service(target_service_id: u16, header: FrameHeader, payload: []cons
 
 ### 10.1 Model
 
-BRZ delegates transport-level flow control to TCP and handles application-level back-pressure through **message dropping**:
+RingLoom delegates transport-level flow control to TCP and handles application-level back-pressure through **message dropping**:
 
 ```
 Service A → Send Ring Buffer → TCP (Broker 1 → Broker 2) → Route → Service B Ring Buffer
@@ -1030,15 +1030,15 @@ Back-pressure events are visible through counters:
 
 ---
 
-## 11. TCP Transport Library (`brz_tcp`)
+## 11. TCP Transport Library (`ringloom_tcp`)
 
-The TCP transport is implemented as a **separate library** (`brz_tcp`) that the broker links against. This library provides a platform-abstracted, high-performance TCP I/O layer.
+The TCP transport is implemented as a **separate library** (`ringloom_tcp`) that the broker links against. This library provides a platform-abstracted, high-performance TCP I/O layer.
 
 ### 11.1 Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  brz_tcp Library                                         │
+│  ringloom_tcp Library                                         │
 │                                                         │
 │  ┌───────────────────────────────────────────────────┐  │
 │  │  Layer 3: Message Framing                         │  │
@@ -1633,7 +1633,7 @@ Managed exclusively by the **broker cluster leader**:
 | `broker.node.id` | (required) | Unique node ID (0–255) |
 | `broker.local.host.port` | (required) | This broker's `host:port` for TCP listener |
 | `broker.member.host.ports` | (empty) | Comma-separated peer `host:port` list |
-| `broker.group.name` | `"brz"` | Broker group name (directory prefix) |
+| `broker.group.name` | `"ringloom"` | Broker group name (directory prefix) |
 | `broker.storage.path` | `/dev/shm` | Base path for metadata files |
 | `broker.control.buffer.size` | `65536` | Control ring buffer capacity (power of 2) |
 | `broker.messages.buffer.size` | `1048576` | Send ring buffer capacity (power of 2) |
@@ -1800,7 +1800,7 @@ No exceptions or allocations on the hot path. Errors are communicated via:
 
 | Constant | Value |
 |---|---|
-| `TCP_HANDSHAKE_MAGIC` | `0x42525A00` ("BRZ\0") |
+| `TCP_HANDSHAKE_MAGIC` | `0x474E4952` ("RING") |
 | `TCP_PROTOCOL_VERSION` | 1 |
 | `PADDING_MSG_TYPE_ID` | -1 |
 | `FLAG_ADMIN` | 0x01 |
@@ -1903,7 +1903,7 @@ On disconnection:
 
 ## Appendix B: Comparison with Full Aeron
 
-| Feature | Aeron | BRZ Broker | Impact |
+| Feature | Aeron | RingLoom Broker | Impact |
 |---|---|---|---|
 | Transport | Custom reliable UDP | TCP (kernel-managed) | No retransmit/NAK/flow-control code |
 | Streams per endpoint | Unlimited | 1 per peer (TCP conn) | No stream dispatch needed |
@@ -1920,7 +1920,7 @@ On disconnection:
 | Congestion control | Static, Cubic | TCP kernel (Cubic/BBR) | Kernel-managed |
 | Multicast | Full support | Not supported | Unicast only |
 | Name resolution | Pluggable | Static config | Simple |
-| IPC publications | Log buffer per pub | Direct shared memory ring buffers | Already part of BRZ |
+| IPC publications | Log buffer per pub | Direct shared memory ring buffers | Already part of RingLoom |
 | I/O model | `sendmsg`/`recvmmsg` | io_uring/kqueue | Completion-based, async |
 | Total code complexity | ~100K lines (C) | ~10-15K lines (Zig, estimated) | 10× reduction |
 

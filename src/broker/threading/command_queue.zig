@@ -8,7 +8,7 @@
 //! serializing Command structs as ring buffer records.
 
 const std = @import("std");
-const RingBuffer = @import("brz_common").concurrent.ring_buffer.RingBuffer;
+const RingBuffer = @import("ringloom_common").concurrent.ring_buffer.RingBuffer;
 const Command = @import("command.zig").Command;
 
 /// A command queue backed by an MPSC ring buffer.
@@ -64,8 +64,8 @@ pub const command_queue_buffer_length: usize = 8 * 1024;
 // ── Tests ─────────────────────────────────────────────────────────────
 
 const testing = std.testing;
-const record_alignment = @import("brz_common").concurrent.ring_buffer.record_alignment;
-const trailer_length = @import("brz_common").concurrent.ring_buffer.trailer_length;
+const record_alignment = @import("ringloom_common").concurrent.ring_buffer.record_alignment;
+const trailer_length = @import("ringloom_common").concurrent.ring_buffer.trailer_length;
 
 fn allocateAlignedBuffer(allocator: std.mem.Allocator, buf_size: usize) ![]align(record_alignment) u8 {
     const buf = try allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(record_alignment)), buf_size);

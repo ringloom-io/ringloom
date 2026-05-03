@@ -1,5 +1,5 @@
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 
 test "service discovery updates are delivered" {
@@ -14,7 +14,7 @@ test "service discovery updates are delivered" {
 
     // When — start ping first; it subscribes to echo but echo isn't running yet
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{ "--target-service", "echo", "--message-count", "5", "--warmup-count", "0" },
     });
@@ -25,7 +25,7 @@ test "service discovery updates are delivered" {
 
     // When — now start echo; discovery should propagate to ping
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
@@ -54,14 +54,14 @@ test "late service registration triggers discovery notification" {
 
     // When — start two ping services both targeting echo, before echo exists
     const ping_a = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping-a",
         .extra_args = &.{ "--target-service", "echo", "--message-count", "3", "--warmup-count", "0" },
     });
     try harness.waitForServiceReady(ping_a, 5000);
 
     const ping_b = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping-b",
         .extra_args = &.{ "--target-service", "echo", "--message-count", "3", "--warmup-count", "0" },
     });
@@ -73,7 +73,7 @@ test "late service registration triggers discovery notification" {
 
     // When — start echo; both pings should discover it
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
@@ -104,13 +104,13 @@ test "service removal triggers discovery removal notification" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
 
     const forwarder = try harness.startService(.{
-        .executable_name = "brz-test-forwarder-service",
+        .executable_name = "ringloom-test-forwarder-service",
         .service_name = "forwarder",
         .extra_args = &.{"--target-service", "echo"},
     });

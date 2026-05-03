@@ -13,13 +13,13 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const brz_service = @import("brz_service");
-const brz_common = @import("brz_common");
-const platform = brz_common.platform;
+const ringloom_service = @import("ringloom_service");
+const ringloom_common = @import("ringloom_common");
+const platform = ringloom_common.platform;
 
-const BrzEngine = brz_service.BrzEngine;
-const ServiceConfig = brz_service.ServiceConfig;
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
+const RingLoomEngine = ringloom_service.RingLoomEngine;
+const ServiceConfig = ringloom_service.ServiceConfig;
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 
 // ── Mutable file-level state for the function-pointer message handler ─
 
@@ -104,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
         .service_name = service_name,
     };
 
-    const engine = BrzEngine.start(allocator, config) catch |err| {
+    const engine = RingLoomEngine.start(allocator, config) catch |err| {
         try stderr.print("crashy: failed to start engine: {}\n", .{err});
         try stderr.flush();
         std.process.exit(2);

@@ -12,7 +12,7 @@ const std = @import("std");
 const ServiceRegistry = @import("service_registry.zig").ServiceRegistry;
 const ServiceInstance = @import("service_registry.zig").ServiceInstance;
 const msg = @import("control_messages.zig");
-const constants = @import("brz_common").platform.constants;
+const constants = @import("ringloom_common").platform.constants;
 const log = std.log.scoped(.leader_election);
 
 pub const ServiceLeaderElection = struct {

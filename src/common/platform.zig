@@ -1,4 +1,4 @@
-//! Platform abstraction layer for the BRZ broker.
+//! Platform abstraction layer for the RingLoom broker.
 //!
 //! This is the single import point for all platform-specific functionality.
 //! The rest of the codebase imports this module instead of individual platform files.

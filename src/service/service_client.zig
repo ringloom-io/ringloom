@@ -5,23 +5,23 @@
 //! path depending on the target instance's node_id.
 
 const std = @import("std");
-const brz_common = @import("brz_common");
+const ringloom_common = @import("ringloom_common");
 const IpcProducer = @import("ipc/ipc_producer.zig").IpcProducer;
 const ServiceInstance = @import("service_instance.zig").ServiceInstance;
 const load_balancer = @import("load_balancer.zig");
-const message_header = brz_common.message.message_header;
-const memory = brz_common.memory;
-const constants = brz_common.memory.constants;
-const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
+const message_header = ringloom_common.message.message_header;
+const memory = ringloom_common.memory;
+const constants = ringloom_common.memory.constants;
+const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const FlowControlRegion = memory.FlowControlRegion;
 const FlowControlEntry = memory.FlowControlEntry;
 const PeerSendCountersRegion = memory.PeerSendCountersRegion;
 const fc_config_mod = @import("flow_control_config.zig");
 const FlowControlConfig = fc_config_mod.FlowControlConfig;
 const BackpressureStrategy = fc_config_mod.BackpressureStrategy;
-const Clock = brz_common.platform.Clock;
+const Clock = ringloom_common.platform.Clock;
 
-const frame_parser = brz_common.protocol.frame_parser;
+const frame_parser = ringloom_common.protocol.frame_parser;
 const TcpFrameHeader = frame_parser.TcpFrameHeader;
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const MessageHeader = message_header.MessageHeader;
@@ -32,7 +32,7 @@ pub const ServiceClient = struct {
     allocator: std.mem.Allocator,
     balancer: load_balancer.ClientLoadBalancer,
 
-    /// IPC context — set during BrzEngine initialization.
+    /// IPC context — set during RingLoomEngine initialization.
     broker_meta: ?*BrokerMetadataFile,
     local_node_id: i16,
     local_service_id: i32,

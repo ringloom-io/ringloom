@@ -1,5 +1,5 @@
 const std = @import("std");
-const testing_mod = @import("brz_testing");
+const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 
 test "large messages are fragmented and reassembled correctly" {
@@ -13,14 +13,14 @@ test "large messages are fragmented and reassembled correctly" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
 
     // When — ping sends messages larger than MTU (4096 bytes each)
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
             "--target-service",  "echo",
@@ -50,14 +50,14 @@ test "very large messages beyond multiple fragment boundaries" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
 
     // When — ping sends messages at 64KB (well beyond single-fragment size)
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
             "--target-service",  "echo",
@@ -87,14 +87,14 @@ test "mixed small and large messages are handled correctly" {
     try harness.waitForBrokerReady(broker, 5000);
 
     const echo = try harness.startService(.{
-        .executable_name = "brz-test-echo-service",
+        .executable_name = "ringloom-test-echo-service",
         .service_name = "echo",
     });
     try harness.waitForServiceReady(echo, 5000);
 
     // When — ping sends a mix of small (64 byte) and large (8192 byte) messages
     const ping = try harness.startService(.{
-        .executable_name = "brz-test-ping-service",
+        .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
             "--target-service",    "echo",

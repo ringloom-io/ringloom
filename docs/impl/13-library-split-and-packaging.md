@@ -6,7 +6,7 @@
 >
 > 1. broker code is packaged independently from service code,
 > 2. shared/common code is reusable without dragging in the whole broker,
-> 3. the `brz-broker` binary actually starts the broker process,
+> 3. the `ringloom-broker` binary actually starts the broker process,
 > 4. end-to-end and performance testing can be built on top of the packaged artifacts.
 
 This document is intentionally packaging-focused. It does **not** redefine the runtime architecture from `architecture.md`; instead, it maps that architecture onto a cleaner Zig project structure.
@@ -23,11 +23,11 @@ This document is intentionally packaging-focused. It does **not** redefine the r
    3. [Process Model](#33-process-model)
 4. [Target Repository Layout](#4-target-repository-layout)
 5. [Library Specifications](#5-library-specifications)
-   1. [`brz-common`](#51-brz-common)
-   2. [`brz-service`](#52-brz-service)
-   3. [`brz-broker`](#53-brz-broker)
+   1. [`ringloom-common`](#51-ringloom-common)
+   2. [`ringloom-service`](#52-ringloom-service)
+   3. [`ringloom-broker`](#53-ringloom-broker)
 6. [Executable Specifications](#6-executable-specifications)
-   1. [`brz-broker`](#61-brz-broker-executable)
+   1. [`ringloom-broker`](#61-ringloom-broker-executable)
    2. [Test Service Executables](#62-test-service-executables)
    3. [Utility Executables](#63-utility-executables)
 7. [Public API Boundaries](#7-public-api-boundaries)
@@ -57,7 +57,7 @@ The packaging split must satisfy these goals:
   A service should not need sender, receiver, cluster, or broker control-loop code linked into its binary.
 
 - **Make the main broker binary real.**
-  Running `zig build run` or invoking the installed `brz-broker` executable must create the broker runtime, start its event loops, and block until shutdown.
+  Running `zig build run` or invoking the installed `ringloom-broker` executable must create the broker runtime, start its event loops, and block until shutdown.
 
 - **Enable realistic end-to-end tests.**
   Tests must be able to launch a broker process and one or more service processes as separate OS processes.
@@ -95,7 +95,7 @@ The current `src/main.zig` behaves like a placeholder and only prints startup te
 - wait for shutdown,
 - perform graceful cleanup.
 
-That means the installed `brz-broker` executable does not match its name.
+That means the installed `ringloom-broker` executable does not match its name.
 
 ### 2.3 No dedicated end-to-end or performance test packaging
 
@@ -116,12 +116,12 @@ The project must be split into **three Zig libraries/modules** and **multiple ex
 
 | Package | Type | Purpose |
 |---|---|---|
-| `brz-common` | library/module | Shared low-level runtime used by both broker and services |
-| `brz-tcp` | library/module | TCP transport library: io_uring/kqueue I/O engine, connection management, message framing |
-| `brz-service` | library/module | Service-side engine, clients, control agent, IPC helpers |
-| `brz-broker` | library/module | Broker-side runtime, routing, transport, cluster, control loop |
-| `brz-broker` | executable | Standalone broker process launcher |
-| `brz-stat` | executable | Monitoring/inspection tool |
+| `ringloom-common` | library/module | Shared low-level runtime used by both broker and services |
+| `ringloom-tcp` | library/module | TCP transport library: io_uring/kqueue I/O engine, connection management, message framing |
+| `ringloom-service` | library/module | Service-side engine, clients, control agent, IPC helpers |
+| `ringloom-broker` | library/module | Broker-side runtime, routing, transport, cluster, control loop |
+| `ringloom-broker` | executable | Standalone broker process launcher |
+| `ringloom-stat` | executable | Monitoring/inspection tool |
 | `e2e-*` | executables | Test-only broker/service fixtures |
 | `bench-*` | executables | Performance harnesses |
 
@@ -143,26 +143,26 @@ The dependency graph must be strictly acyclic:
 
 | Package | May depend on |
 |---|---|
-| `brz-common` | nothing internal |
-| `brz-tcp` | `brz-common` (for constants, platform abstractions) |
-| `brz-service` | `brz-common` |
-| `brz-broker` | `brz-common`, `brz-tcp` |
-| broker executable | `brz-broker` |
-| service executable | `brz-service`, optionally app code |
-| e2e harnesses | `brz-broker`, `brz-service`, `brz-common` |
-| benchmarks | `brz-broker`, `brz-service`, `brz-common` |
+| `ringloom-common` | nothing internal |
+| `ringloom-tcp` | `ringloom-common` (for constants, platform abstractions) |
+| `ringloom-service` | `ringloom-common` |
+| `ringloom-broker` | `ringloom-common`, `ringloom-tcp` |
+| broker executable | `ringloom-broker` |
+| service executable | `ringloom-service`, optionally app code |
+| e2e harnesses | `ringloom-broker`, `ringloom-service`, `ringloom-common` |
+| benchmarks | `ringloom-broker`, `ringloom-service`, `ringloom-common` |
 
 ### 3.2.1 Forbidden dependencies
 
 These imports must be forbidden by convention and code review:
 
-- `brz-common` importing `brz-tcp`
-- `brz-common` importing `brz-service`
-- `brz-common` importing `brz-broker`
-- `brz-tcp` importing `brz-service`
-- `brz-tcp` importing `brz-broker`
-- `brz-service` importing `brz-broker`
-- `brz-service` importing `brz-tcp`
+- `ringloom-common` importing `ringloom-tcp`
+- `ringloom-common` importing `ringloom-service`
+- `ringloom-common` importing `ringloom-broker`
+- `ringloom-tcp` importing `ringloom-service`
+- `ringloom-tcp` importing `ringloom-broker`
+- `ringloom-service` importing `ringloom-broker`
+- `ringloom-service` importing `ringloom-tcp`
 - broker runtime importing service application helpers
 
 ### 3.2.2 Allowed duplication
@@ -180,7 +180,7 @@ A broker process owns:
 - broker metadata file,
 - broker control ring buffer,
 - broker send/messages ring buffer,
-- TCP transport connections (via `brz_tcp` library),
+- TCP transport connections (via `ringloom_tcp` library),
 - sender/receiver/control event loops,
 - cluster state,
 - service registry,
@@ -204,7 +204,7 @@ Broker and services are separate processes that map the same metadata-backed sha
 
 - broker code manages broker-owned shared memory regions,
 - service code manages service-owned shared memory regions,
-- shared file layouts and ring buffer semantics live in `brz-common`.
+- shared file layouts and ring buffer semantics live in `ringloom-common`.
 
 ---
 
@@ -213,7 +213,7 @@ Broker and services are separate processes that map the same metadata-backed sha
 The repository should be reorganized conceptually as follows:
 
 ```text
-brz-broker/
+ringloom-broker/
 ├── build.zig
 ├── build.zig.zon
 ├── src/
@@ -252,8 +252,8 @@ brz-broker/
 │   │   ├── cluster/
 │   │   └── config/
 │   ├── bin/
-│   │   ├── brz_broker_main.zig
-│   │   ├── brz_stat_main.zig
+│   │   ├── ringloom_broker_main.zig
+│   │   ├── ringloom_stat_main.zig
 │   │   └── test_services/
 │   └── testing/
 │       ├── e2e/
@@ -316,9 +316,9 @@ These shims must be removed once all imports are updated.
 
 ## 5. Library Specifications
 
-## 5.1 `brz-common`
+## 5.1 `ringloom-common`
 
-`brz-common` is the shared substrate. It must contain only code that is meaningful to both broker and service runtimes.
+`ringloom-common` is the shared substrate. It must contain only code that is meaningful to both broker and service runtimes.
 
 ### 5.1.1 Responsibilities
 
@@ -330,13 +330,13 @@ These shims must be removed once all imports are updated.
 - buffers provider abstractions that are shared
 - common message header definitions
 - control message wire structs and codecs shared by both sides
-- TCP wire protocol frame header definitions (shared by `brz-tcp` and `brz-broker`)
+- TCP wire protocol frame header definitions (shared by `ringloom-tcp` and `ringloom-broker`)
 - shared config parsing utilities
 - common constants
 
 ### 5.1.2 Non-responsibilities
 
-`brz-common` must **not** contain:
+`ringloom-common` must **not** contain:
 
 - broker control loop logic
 - broker sender/receiver loops
@@ -347,7 +347,7 @@ These shims must be removed once all imports are updated.
 
 ### 5.1.3 Public API
 
-The public API of `brz-common` should be intentionally small and stable:
+The public API of `ringloom-common` should be intentionally small and stable:
 
 - `platform`
 - `concurrent`
@@ -370,9 +370,9 @@ Example export groups:
 - `pub const message = @import("message/root.zig");`
 - `pub const protocol = @import("protocol/root.zig");`
 
-## 5.2 `brz-service`
+## 5.2 `ringloom-service`
 
-`brz-service` is the service-side runtime library.
+`ringloom-service` is the service-side runtime library.
 
 ### 5.2.1 Responsibilities
 
@@ -393,7 +393,7 @@ Example export groups:
 
 The service library should expose a clean application-facing API centered around:
 
-- `BrzEngine`
+- `RingLoomEngine`
 - `ServiceConfig`
 - `ServiceClient`
 - `MessageHandler`
@@ -401,7 +401,7 @@ The service library should expose a clean application-facing API centered around
 
 ### 5.2.3 Internal-only service modules
 
-These should remain internal to `brz-service`:
+These should remain internal to `ringloom-service`:
 
 - control message polling internals
 - registration wait loops
@@ -410,13 +410,13 @@ These should remain internal to `brz-service`:
 
 ### 5.2.4 Dependency rule
 
-`brz-service` may import only `brz-common` plus Zig stdlib.
+`ringloom-service` may import only `ringloom-common` plus Zig stdlib.
 
 It must not import broker runtime code.
 
-## 5.3 `brz-broker`
+## 5.3 `ringloom-broker`
 
-`brz-broker` is the broker-side runtime library.
+`ringloom-broker` is the broker-side runtime library.
 
 ### 5.3.1 Responsibilities
 
@@ -447,7 +447,7 @@ The broker library should expose:
 
 ### 5.3.3 Internal-only broker modules
 
-These should remain internal to `brz-broker`:
+These should remain internal to `ringloom-broker`:
 
 - low-level routing tables
 - peer connection state machines
@@ -458,9 +458,9 @@ These should remain internal to `brz-broker`:
 
 ## 6. Executable Specifications
 
-## 6.1 `brz-broker` executable
+## 6.1 `ringloom-broker` executable
 
-The installed `brz-broker` executable must be the real broker launcher.
+The installed `ringloom-broker` executable must be the real broker launcher.
 
 ### 6.1.1 Required behavior
 
@@ -481,10 +481,10 @@ On startup it must:
 
 Minimum CLI:
 
-- `brz-broker`
-- `brz-broker --config path/to/broker.properties`
-- `brz-broker --help`
-- `brz-broker --version`
+- `ringloom-broker`
+- `ringloom-broker --config path/to/broker.properties`
+- `ringloom-broker --help`
+- `ringloom-broker --version`
 
 Optional later:
 
@@ -501,7 +501,7 @@ The executable main should be thin:
 - call broker application bootstrap,
 - map errors to exit codes.
 
-All real runtime logic belongs in the `brz-broker` library, not in the executable.
+All real runtime logic belongs in the `ringloom-broker` library, not in the executable.
 
 ## 6.2 Test Service Executables
 
@@ -516,13 +516,13 @@ Required test fixtures:
 | `e2e-heartbeat-service` | stays registered and emits heartbeats |
 | `e2e-crash-service` | registers, then exits abruptly for failure tests |
 
-These binaries should be tiny wrappers around `brz-service`.
+These binaries should be tiny wrappers around `ringloom-service`.
 
 ## 6.3 Utility Executables
 
-### 6.3.1 `brz-stat`
+### 6.3.1 `ringloom-stat`
 
-`brz-stat` remains a separate executable and should depend primarily on `brz-common` monitoring and metadata readers.
+`ringloom-stat` remains a separate executable and should depend primarily on `ringloom-common` monitoring and metadata readers.
 
 ### 6.3.2 Benchmark executables
 
@@ -580,17 +580,17 @@ If an executable needs a deep internal import, that is a signal that the library
 
 The build graph must define at least these modules:
 
-- `brz_common`
-- `brz_service`
-- `brz_broker`
+- `ringloom_common`
+- `ringloom_service`
+- `ringloom_broker`
 
 And these artifacts:
 
-- static or object library for `brz_common`
-- static or object library for `brz_service`
-- static or object library for `brz_broker`
-- executable `brz-broker`
-- executable `brz-stat`
+- static or object library for `ringloom_common`
+- static or object library for `ringloom_service`
+- static or object library for `ringloom_broker`
+- executable `ringloom-broker`
+- executable `ringloom-stat`
 - test executables
 - benchmark executables
 
@@ -604,13 +604,13 @@ Preferred model:
 
 ### 8.1.2 Import wiring
 
-`brz_service` imports `brz_common`.
+`ringloom_service` imports `ringloom_common`.
 
-`brz_broker` imports `brz_common`.
+`ringloom_broker` imports `ringloom_common`.
 
-The broker executable imports `brz_broker`.
+The broker executable imports `ringloom_broker`.
 
-Test fixtures import either `brz_service` or `brz_broker` as needed.
+Test fixtures import either `ringloom_service` or `ringloom_broker` as needed.
 
 ## 8.2 Build Steps
 
@@ -619,12 +619,12 @@ The build should expose these top-level steps:
 | Step | Purpose |
 |---|---|
 | `zig build` | build and install default artifacts |
-| `zig build run` | run `brz-broker` |
+| `zig build run` | run `ringloom-broker` |
 | `zig build test` | run unit and integration tests |
 | `zig build e2e` | run process-based end-to-end tests |
 | `zig build bench` | build benchmark executables |
 | `zig build perf` | run selected performance tests |
-| `zig build stat` | run `brz-stat` |
+| `zig build stat` | run `ringloom-stat` |
 
 ### 8.2.1 `run` step contract
 
@@ -653,15 +653,15 @@ Installed artifacts should look like:
 ```text
 zig-out/
 ├── bin/
-│   ├── brz-broker
-│   ├── brz-stat
+│   ├── ringloom-broker
+│   ├── ringloom-stat
 │   ├── e2e-echo-service
 │   ├── e2e-ping-service
 │   └── bench-ipc-local
 └── lib/
-    ├── libbrz_common.a
-    ├── libbrz_service.a
-    └── libbrz_broker.a
+    ├── libringloom_common.a
+    ├── libringloom_service.a
+    └── libringloom_broker.a
 ```
 
 Static library installation is optional if the project is only consumed as a Zig package, but the logical split must still exist in the build graph.
@@ -752,7 +752,7 @@ Update imports.
 ### Phase 3 — Move service runtime into `service`
 
 Move:
-- `BrzEngine`
+- `RingLoomEngine`
 - service control agent
 - service client registry
 - service-side IPC wrappers
@@ -775,8 +775,8 @@ Update imports so broker code depends only on `common`.
 
 ### Phase 5 — Replace placeholder main
 
-- create `src/bin/brz_broker_main.zig`
-- wire it to `brz-broker` library
+- create `src/bin/ringloom_broker_main.zig`
+- wire it to `ringloom-broker` library
 - make `zig build run` launch the real broker
 
 ### Phase 6 — Add e2e and benchmark packaging
@@ -800,19 +800,19 @@ This document is considered implemented when all of the following are true:
 
 ### 11.1 Library split
 
-- there are distinct `brz_common`, `brz_service`, and `brz_broker` modules,
-- `brz_service` does not import broker internals,
-- `brz_broker` does not depend on service runtime code.
+- there are distinct `ringloom_common`, `ringloom_service`, and `ringloom_broker` modules,
+- `ringloom_service` does not import broker internals,
+- `ringloom_broker` does not depend on service runtime code.
 
 ### 11.2 Broker executable
 
 - `zig build run` starts a real broker,
-- installed `brz-broker` starts a real broker,
+- installed `ringloom-broker` starts a real broker,
 - broker remains running until signaled or fatal error occurs.
 
 ### 11.3 Service executable compatibility
 
-- a standalone service binary can link only `brz-service` and `brz-common`,
+- a standalone service binary can link only `ringloom-service` and `ringloom-common`,
 - service registration and messaging still work.
 
 ### 11.4 Testability
@@ -872,11 +872,11 @@ Use hyphenated names for executables and underscored names for Zig module identi
 
 | Concern | Name |
 |---|---|
-| executable | `brz-broker` |
-| executable | `brz-stat` |
-| module | `brz_broker` |
-| module | `brz_service` |
-| module | `brz_common` |
+| executable | `ringloom-broker` |
+| executable | `ringloom-stat` |
+| module | `ringloom_broker` |
+| module | `ringloom_service` |
+| module | `ringloom_common` |
 
 ### 13.2 Keep roots small
 
@@ -923,10 +923,10 @@ Those documents should build directly on the package boundaries defined here.
 
 The current codebase already contains the right conceptual pieces, but they are packaged too loosely. The correct fix is to split the implementation into:
 
-- `brz-common` for shared substrate,
-- `brz-service` for service runtime,
-- `brz-broker` for broker runtime,
+- `ringloom-common` for shared substrate,
+- `ringloom-service` for service runtime,
+- `ringloom-broker` for broker runtime,
 
-and then make the `brz-broker` executable a real broker launcher.
+and then make the `ringloom-broker` executable a real broker launcher.
 
 This split aligns the Zig packaging model with the actual runtime architecture: one broker process per host, many service processes per host, shared memory between them, and cleanly separated responsibilities. It also creates the foundation needed for robust end-to-end and performance testing.
