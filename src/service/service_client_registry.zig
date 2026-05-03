@@ -8,6 +8,7 @@ const ServiceInstance = @import("service_instance.zig").ServiceInstance;
 const IpcProducer = @import("ipc/ipc_producer.zig").IpcProducer;
 const ringloom_common = @import("ringloom_common");
 const memory = ringloom_common.memory;
+const control_encoding = ringloom_common.message.control_encoding;
 
 const BuffersProvider = memory.BuffersProvider;
 const BrokerMetadataFile = memory.BrokerMetadataFile;
@@ -48,16 +49,22 @@ pub const ServiceClientRegistry = struct {
             return existing;
         }
 
+        const owned_service_name = try self.allocator.dupe(u8, service_name);
+        errdefer self.allocator.free(owned_service_name);
+
         const client = try self.allocator.create(ServiceClient);
+        errdefer self.allocator.destroy(client);
+
         client.* = ServiceClient.init(
             self.allocator,
-            service_name,
+            owned_service_name,
             self.broker_meta,
             self.local_node_id,
             self.local_service_id,
         );
+        client.owns_service_name = true;
 
-        try self.clients.put(service_name, client);
+        try self.clients.put(owned_service_name, client);
         return client;
     }
 
@@ -69,42 +76,99 @@ pub const ServiceClientRegistry = struct {
         is_leader: bool,
     }) void {
         const client = self.clients.get(instance_data.service_name) orelse return;
+        self.addOrUpdateClientInstance(client, .{
+            .service_id = instance_data.service_id,
+            .node_id = instance_data.node_id,
+            .is_leader = if (instance_data.is_leader) 1 else 0,
+        });
+    }
+
+    /// Called when the broker sends the complete instance snapshot for a service.
+    pub fn replaceInstances(
+        self: *Self,
+        service_name: []const u8,
+        entries: []const control_encoding.ServiceInstanceEntry,
+    ) void {
+        const client = self.clients.get(service_name) orelse return;
+
+        var i: usize = 0;
+        while (i < client.instances.items.len) {
+            const current = client.instances.items[i];
+            if (!snapshotContains(entries, current.service_id)) {
+                client.removeInstance(current.service_id);
+                continue;
+            }
+            i += 1;
+        }
+
+        for (entries) |entry| {
+            self.addOrUpdateClientInstance(client, entry);
+        }
+    }
+
+    fn addOrUpdateClientInstance(
+        self: *Self,
+        client: *ServiceClient,
+        entry: control_encoding.ServiceInstanceEntry,
+    ) void {
+        const is_leader = entry.is_leader != 0;
 
         // Check if this instance already exists — update in place if so.
-        if (client.findInstance(instance_data.service_id)) |existing| {
-            existing.is_leader = instance_data.is_leader;
+        if (client.findInstance(entry.service_id)) |existing| {
+            existing.node_id = entry.node_id;
+            existing.is_leader = is_leader;
             return;
         }
 
         // For local instances, open the target service's metadata file
         // and create an IpcProducer for direct shared-memory writes.
-        var ipc_producer: ?*IpcProducer = null;
-        if (instance_data.node_id == self.local_node_id) {
-            if (BuffersProvider.getInstance(
-                self.allocator,
-                instance_data.service_id,
-                instance_data.service_name,
-                self.storage_path,
-                self.group,
-            )) |provider| {
-                const producer = self.allocator.create(IpcProducer) catch return;
-                producer.* = IpcProducer.init(
-                    @alignCast(provider.getMessagesBuffer()),
-                ) catch {
-                    self.allocator.destroy(producer);
-                    return;
-                };
-                ipc_producer = producer;
-            } else |_| {}
-        }
+        const ipc_producer = self.createIpcProducer(entry.service_id, entry.node_id, client.service_name);
 
         client.addInstance(.{
-            .service_id = instance_data.service_id,
-            .service_name = instance_data.service_name,
-            .node_id = instance_data.node_id,
-            .is_leader = instance_data.is_leader,
+            .service_id = entry.service_id,
+            .service_name = client.service_name,
+            .node_id = entry.node_id,
+            .is_leader = is_leader,
             .ipc_producer = ipc_producer,
         }) catch {};
+    }
+
+    fn createIpcProducer(
+        self: *Self,
+        service_id: i32,
+        node_id: i16,
+        service_name: []const u8,
+    ) ?*IpcProducer {
+        if (node_id != self.local_node_id) return null;
+
+        if (BuffersProvider.getInstance(
+            self.allocator,
+            service_id,
+            service_name,
+            self.storage_path,
+            self.group,
+        )) |provider| {
+            const producer = self.allocator.create(IpcProducer) catch return null;
+            producer.* = IpcProducer.init(
+                @alignCast(provider.getMessagesBuffer()),
+            ) catch {
+                self.allocator.destroy(producer);
+                return null;
+            };
+            return producer;
+        } else |_| {}
+
+        return null;
+    }
+
+    fn snapshotContains(
+        entries: []const control_encoding.ServiceInstanceEntry,
+        service_id: i32,
+    ) bool {
+        for (entries) |entry| {
+            if (entry.service_id == service_id) return true;
+        }
+        return false;
     }
 
     /// Called when the broker notifies that a service instance was removed.

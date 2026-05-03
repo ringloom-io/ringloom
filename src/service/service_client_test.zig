@@ -99,3 +99,43 @@ test "ServiceClient removeInstance removes correct instance" {
     try testing.expectEqual(@as(usize, 1), client.instanceCount());
     try testing.expectEqual(@as(i32, 2), client.instances.items[0].service_id);
 }
+
+test "ServiceClient copyTargetInstances returns service ids with leader flags" {
+    var client = ServiceClient.init(
+        testing.allocator,
+        "target-list-test",
+        null,
+        1,
+        100,
+    );
+    defer client.deinit();
+
+    try client.addInstance(.{
+        .service_id = 11,
+        .service_name = "target-list-test",
+        .node_id = 1,
+        .is_leader = false,
+    });
+    try client.addInstance(.{
+        .service_id = 12,
+        .service_name = "target-list-test",
+        .node_id = 2,
+        .is_leader = true,
+    });
+
+    var targets: [1]ServiceClient.TargetInstanceInfo = undefined;
+    const total = client.copyTargetInstances(targets[0..]);
+
+    try testing.expectEqual(@as(usize, 2), total);
+    try testing.expectEqual(@as(i32, 11), targets[0].target_service_id);
+    try testing.expect(!targets[0].is_leader);
+
+    var all_targets: [2]ServiceClient.TargetInstanceInfo = undefined;
+    const all_total = client.copyTargetInstances(all_targets[0..]);
+
+    try testing.expectEqual(@as(usize, 2), all_total);
+    try testing.expectEqual(@as(i32, 11), all_targets[0].target_service_id);
+    try testing.expect(!all_targets[0].is_leader);
+    try testing.expectEqual(@as(i32, 12), all_targets[1].target_service_id);
+    try testing.expect(all_targets[1].is_leader);
+}

@@ -2,3 +2,6 @@
 zig-out
 .agents
 copilot-instructions.md
+
+build
+.gradle

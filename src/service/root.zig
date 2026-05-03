@@ -77,6 +77,7 @@ comptime {
     _ = @import("load_balancer.zig");
     _ = @import("service_client_test.zig");
     _ = @import("flow_control_config.zig");
+    _ = @import("c_abi.zig");
 
     // IPC
     _ = @import("ipc/ipc_producer.zig");

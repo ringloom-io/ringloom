@@ -691,25 +691,30 @@ pub const ControlLoop = struct {
             return;
         };
 
-        // Send one ServiceInstance message per instance (matches service-side decoder).
-        for (instance_buf[0..count]) |inst| {
+        // Send one complete snapshot, including empty snapshots so subscribers
+        // can remove stale instances when a service becomes unavailable.
+        var entry_buf: [constants.default_max_services]encoding.ServiceInstanceEntry = undefined;
+        for (instance_buf[0..count], 0..) |inst, i| {
             const is_leader_id = self.service_registry.getLeader(service_name);
             const is_leader = is_leader_id != null and is_leader_id.? == inst.service_id;
 
-            const len = encoding.encodeServiceInstance(&self.encode_buf, .{
+            entry_buf[i] = .{
                 .service_id = inst.service_id,
                 .node_id = @intCast(inst.node_id),
-                .is_leader = is_leader,
-                .service_name = service_name,
-            });
-
-            control_rb.write(CONTROL_MSG_TYPE, self.encode_buf[0..len]) catch {
-                log.warn("subscriber {} control ring buffer full — dropping ServiceInstance", .{
-                    subscriber_id,
-                });
-                return;
+                .is_leader = if (is_leader) 1 else 0,
             };
         }
+
+        const len = encoding.encodeServiceInstances(
+            &self.encode_buf,
+            service_name,
+            entry_buf[0..count],
+        );
+        control_rb.write(CONTROL_MSG_TYPE, self.encode_buf[0..len]) catch {
+            log.warn("subscriber {} control ring buffer full — dropping ServiceInstances", .{
+                subscriber_id,
+            });
+        };
     }
 
     /// Called whenever the instance set for a service name changes. Sends the

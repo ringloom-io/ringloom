@@ -37,6 +37,21 @@ pub const ServiceConfig = struct {
     idle_strategy: platform.IdleStrategy = .{ .backoff = .{} },
 };
 
+pub const MessageConsumerMode = enum {
+    threaded,
+    external_polling,
+};
+
+pub const ControlAgentMode = enum {
+    threaded,
+    manual,
+};
+
+pub const StartOptions = struct {
+    message_consumer_mode: MessageConsumerMode = .threaded,
+    control_agent_mode: ControlAgentMode = .threaded,
+};
+
 pub const RingLoomEngine = struct {
     config: ServiceConfig,
     allocator: std.mem.Allocator,
@@ -53,10 +68,11 @@ pub const RingLoomEngine = struct {
     service_registry: ServiceClientRegistry,
 
     // ── Agent threads ─────────────────────────────────────────────────
-    message_consumer: *MessageConsumer,
+    message_consumer: ?*MessageConsumer,
     message_consumer_runner: ?ThreadRunner,
     control_agent: *ControlAgent,
     control_agent_runner: ?ThreadRunner,
+    message_consumer_mode: MessageConsumerMode,
 
     // ── State ─────────────────────────────────────────────────────────
     running: platform.AtomicBool,
@@ -66,11 +82,26 @@ pub const RingLoomEngine = struct {
     /// Start the RingLoomEngine: create metadata, register with broker,
     /// start heartbeat, launch agent threads.
     pub fn start(allocator: std.mem.Allocator, config: ServiceConfig) !*Self {
+        return startWithOptions(allocator, config, .{});
+    }
+
+    /// Start the engine with explicit runtime options.
+    pub fn startWithOptions(
+        allocator: std.mem.Allocator,
+        config: ServiceConfig,
+        options: StartOptions,
+    ) !*Self {
         var engine = try allocator.create(Self);
         errdefer allocator.destroy(engine);
 
         // ── Step 1–4: Create metadata and register ────────────────────
         const meta = try createServiceMetadata(allocator, config);
+        errdefer {
+            meta.service_meta.close();
+            allocator.destroy(meta.service_meta);
+            meta.broker_meta.close();
+            allocator.destroy(meta.broker_meta);
+        }
         engine.service_meta = meta.service_meta;
         engine.broker_meta = meta.broker_meta;
         engine.service_id = meta.service_id;
@@ -78,6 +109,10 @@ pub const RingLoomEngine = struct {
         engine.config = config;
         engine.allocator = allocator;
         engine.running = platform.AtomicBool.init(true);
+        engine.message_consumer = null;
+        engine.message_consumer_runner = null;
+        engine.control_agent_runner = null;
+        engine.message_consumer_mode = options.message_consumer_mode;
 
         // Register with the broker.
         try control_agent_mod.registerWithBroker(
@@ -103,26 +138,35 @@ pub const RingLoomEngine = struct {
             config.group,
         );
 
-        // ── Step 6: Start message consumer thread ─────────────────────
-        const message_consumer = try allocator.create(MessageConsumer);
-        message_consumer.* = try MessageConsumer.init(
-            @alignCast(meta.service_meta.getMessagesBuffer()),
-        );
-        engine.message_consumer = message_consumer;
+        // ── Step 6: Start message consumer thread when requested ──────
+        if (options.message_consumer_mode == .threaded) {
+            const message_consumer = try allocator.create(MessageConsumer);
+            errdefer allocator.destroy(message_consumer);
 
-        engine.message_consumer_runner = ThreadRunner.init(
-            "msg-consumer",
-            EventLoop{
-                .context = @ptrCast(message_consumer),
-                .doWorkFn = &MessageConsumer.doWorkFn,
-                .onCloseFn = &MessageConsumer.onCloseFn,
-            },
-            config.idle_strategy,
-        );
-        try engine.message_consumer_runner.?.start();
+            message_consumer.* = try MessageConsumer.init(
+                @alignCast(meta.service_meta.getMessagesBuffer()),
+            );
+            engine.message_consumer = message_consumer;
+
+            engine.message_consumer_runner = ThreadRunner.init(
+                "msg-consumer",
+                EventLoop{
+                    .context = @ptrCast(message_consumer),
+                    .doWorkFn = &MessageConsumer.doWorkFn,
+                    .onCloseFn = &MessageConsumer.onCloseFn,
+                },
+                config.idle_strategy,
+            );
+            errdefer if (engine.message_consumer_runner) |*runner| {
+                runner.stopAndJoin();
+            };
+
+            try engine.message_consumer_runner.?.start();
+        }
 
         // ── Step 7: Start control agent thread ────────────────────────
         const ctrl_agent = try allocator.create(ControlAgent);
+        errdefer allocator.destroy(ctrl_agent);
         ctrl_agent.* = try ControlAgent.init(
             meta.service_meta,
             meta.broker_meta,
@@ -130,16 +174,18 @@ pub const RingLoomEngine = struct {
         );
         engine.control_agent = ctrl_agent;
 
-        engine.control_agent_runner = ThreadRunner.init(
-            "control-agent",
-            EventLoop{
-                .context = @ptrCast(ctrl_agent),
-                .doWorkFn = &ControlAgent.doWorkFn,
-                .onCloseFn = &ControlAgent.onCloseFn,
-            },
-            config.idle_strategy,
-        );
-        try engine.control_agent_runner.?.start();
+        if (options.control_agent_mode == .threaded) {
+            engine.control_agent_runner = ThreadRunner.init(
+                "control-agent",
+                EventLoop{
+                    .context = @ptrCast(ctrl_agent),
+                    .doWorkFn = &ControlAgent.doWorkFn,
+                    .onCloseFn = &ControlAgent.onCloseFn,
+                },
+                config.idle_strategy,
+            );
+            try engine.control_agent_runner.?.start();
+        }
 
         return engine;
     }
@@ -168,7 +214,10 @@ pub const RingLoomEngine = struct {
 
         // 5. Clean up.
         self.service_registry.deinit();
-        self.allocator.destroy(self.message_consumer);
+        if (self.message_consumer) |message_consumer| {
+            self.allocator.destroy(message_consumer);
+            self.message_consumer = null;
+        }
         self.allocator.destroy(self.control_agent);
     }
 
@@ -190,7 +239,10 @@ pub const RingLoomEngine = struct {
 
     /// Register a message handler for incoming messages.
     pub fn setMessageHandler(self: *Self, handler: RingBuffer.MessageHandler) void {
-        self.message_consumer.setHandler(handler);
+        const message_consumer = self.message_consumer orelse {
+            @panic("setMessageHandler requires threaded message consumer mode");
+        };
+        message_consumer.setHandler(handler);
     }
 };
 

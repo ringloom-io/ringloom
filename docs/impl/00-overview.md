@@ -86,8 +86,9 @@ The documents are ordered so that each phase depends only on previous phases.
 | 10 | [`11-cluster-management.md`](11-cluster-management.md) | Leader election, state synchronization, admin messages between brokers |
 | 11 | [`12-configuration-and-monitoring.md`](12-configuration-and-monitoring.md) | Configuration loading, monitoring counters, error handling patterns |
 | 12 | [`13-library-split-and-packaging.md`](13-library-split-and-packaging.md) | Library boundaries: `ringloom_common`, `ringloom_tcp`, `ringloom_broker`, `ringloom_service` |
-| 13 | [`14-broker-executable.md`](14-broker-executable.md) | Broker main, startup sequence, signal handling |
-| 14 | [`15-e2e-testing.md`](15-e2e-testing.md) | End-to-end test framework, multi-broker test scenarios |
+| 13 | [`14-broker-executable-and-startup.md`](14-broker-executable-and-startup.md) | Broker main, startup sequence, signal handling |
+| 14 | [`15-end-to-end-and-performance-testing.md`](15-end-to-end-and-performance-testing.md) | End-to-end test framework, multi-broker test scenarios, performance validation |
+| 15 | [`16-service-c-abi-and-java-bindings.md`](16-service-c-abi-and-java-bindings.md) | Service shared library packaging, C ABI, zero-copy Java FFM bindings, Java integration tests |
 
 **Note:** The previous `07-flow-control.md` has been removed. Back-pressure is now covered
 in the send path (05) and receive path (06) documents, since TCP delegates flow control to

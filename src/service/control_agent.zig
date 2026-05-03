@@ -62,16 +62,22 @@ pub const ControlAgent = struct {
         var work_count: u32 = 0;
 
         // 1. Poll control ring buffer for broker messages.
-        work_count += self.pollControlMessages();
+        work_count += self.pollControlMessages(constants.control_read_limit);
 
         // 2. Write heartbeat if interval has elapsed.
-        if (self.shouldWriteHeartbeat()) {
-            self.service_meta.storeHeartbeat(Clock.epochMillis());
-            self.last_heartbeat_ns = Clock.monotonicNanos();
+        if (self.writeHeartbeatIfDue()) {
             work_count += 1;
         }
 
         return work_count;
+    }
+
+    /// Poll control messages from an application-owned thread and keep the
+    /// service heartbeat fresh. Returns only the number of messages processed.
+    pub fn poll(self: *Self, limit: u32) u32 {
+        const messages_read = self.pollControlMessages(limit);
+        _ = self.writeHeartbeatIfDue();
+        return messages_read;
     }
 
     /// EventLoop-compatible function pointer.
@@ -83,12 +89,13 @@ pub const ControlAgent = struct {
     /// No-op close function for EventLoop compatibility.
     pub fn onCloseFn(_: *anyopaque) void {}
 
-    fn pollControlMessages(self: *Self) u32 {
+    pub fn pollControlMessages(self: *Self, limit: u32) u32 {
         // Set file-level context so the bare function pointer handler can
         // reach this agent instance. Safe because ControlAgent runs on a
         // single dedicated thread.
         dispatch_agent_ptr = self;
-        return self.control_rb.read(&dispatchWrapper, constants.control_read_limit);
+        defer dispatch_agent_ptr = null;
+        return self.control_rb.read(&dispatchWrapper, limit);
     }
 
     /// Dispatch a single control message based on its template ID.
@@ -101,14 +108,13 @@ pub const ControlAgent = struct {
             },
 
             TemplateId.service_instances => {
-                // Broker sends current set of instances for a subscribed service.
-                const inst = control_encoding.decodeServiceInstance(payload);
-                self.service_registry.addOrUpdateInstance(.{
-                    .service_id = inst.service_id,
-                    .service_name = inst.service_name,
-                    .node_id = inst.node_id,
-                    .is_leader = inst.is_leader,
-                });
+                // Broker sends the complete current set of instances for a
+                // subscribed service, including empty snapshots.
+                const snapshot = control_encoding.decodeServiceInstances(payload);
+                self.service_registry.replaceInstances(
+                    snapshot.service_name,
+                    snapshot.entries,
+                );
             },
 
             TemplateId.leader_changed => {
@@ -128,6 +134,13 @@ pub const ControlAgent = struct {
     fn shouldWriteHeartbeat(self: *const Self) bool {
         const now = Clock.monotonicNanos();
         return (now - self.last_heartbeat_ns) >= heartbeat_write_interval_ns;
+    }
+
+    fn writeHeartbeatIfDue(self: *Self) bool {
+        if (!self.shouldWriteHeartbeat()) return false;
+        self.service_meta.storeHeartbeat(Clock.epochMillis());
+        self.last_heartbeat_ns = Clock.monotonicNanos();
+        return true;
     }
 };
 

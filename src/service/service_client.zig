@@ -27,13 +27,40 @@ const BrokerMetadataFile = memory.BrokerMetadataFile;
 const MessageHeader = message_header.MessageHeader;
 
 pub const ServiceClient = struct {
+    pub const TargetInstanceInfo = extern struct {
+        target_service_id: i32,
+        is_leader: bool,
+    };
+
+    pub const LifecycleEventType = enum {
+        available,
+        unavailable,
+    };
+
+    pub const LifecycleEvent = struct {
+        event_type: LifecycleEventType,
+        service_name: []const u8,
+        service_id: i32,
+        node_id: i16,
+        is_leader: bool,
+    };
+
+    pub const LifecycleHandler = *const fn (
+        context: ?*anyopaque,
+        event: LifecycleEvent,
+    ) void;
+
     service_name: []const u8,
     instances: std.ArrayList(ServiceInstance),
     allocator: std.mem.Allocator,
     balancer: load_balancer.ClientLoadBalancer,
+    owns_service_name: bool = false,
+    lifecycle_handler: ?LifecycleHandler = null,
+    lifecycle_context: ?*anyopaque = null,
 
     /// IPC context — set during RingLoomEngine initialization.
     broker_meta: ?*BrokerMetadataFile,
+    broker_send_ring_buffer: ?RingBuffer = null,
     local_node_id: i16,
     local_service_id: i32,
 
@@ -59,6 +86,19 @@ pub const ServiceClient = struct {
         PeerDisconnected,
     } || RingBuffer.WriteError;
 
+    pub const SendClaim = struct {
+        claim: RingBuffer.Claim,
+        payload: []u8,
+
+        pub fn commit(self: *SendClaim) void {
+            self.claim.commit();
+        }
+
+        pub fn abort(self: *SendClaim) void {
+            self.claim.abort();
+        }
+    };
+
     pub fn init(
         allocator: std.mem.Allocator,
         service_name: []const u8,
@@ -72,6 +112,7 @@ pub const ServiceClient = struct {
             .allocator = allocator,
             .balancer = .{ .round_robin = .{} },
             .broker_meta = broker_meta,
+            .broker_send_ring_buffer = initBrokerSendRingBuffer(broker_meta),
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
         };
@@ -94,6 +135,7 @@ pub const ServiceClient = struct {
             .allocator = allocator,
             .balancer = .{ .round_robin = .{} },
             .broker_meta = broker_meta,
+            .broker_send_ring_buffer = initBrokerSendRingBuffer(broker_meta),
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
             .fc_config = fc_config,
@@ -174,10 +216,30 @@ pub const ServiceClient = struct {
         return error.NoLeaderAvailable;
     }
 
+    /// Claim writable ring-buffer memory for a zero-copy send on the
+    /// load-balanced path.
+    pub fn tryClaim(self: *Self, template_id: u16, payload_len: usize) SendError!SendClaim {
+        const instance = self.balancer.next(self.instances.items) orelse
+            return error.NoAvailableInstance;
+
+        if (self.fc_config.enabled) {
+            try self.applyFlowControl(instance, payload_len);
+        }
+
+        return self.tryClaimToInstance(instance, template_id, payload_len);
+    }
+
     // ── Instance Management ───────────────────────────────────────────
 
     pub fn addInstance(self: *Self, instance: ServiceInstance) !void {
         try self.instances.append(self.allocator, instance);
+        self.emitLifecycle(.{
+            .event_type = .available,
+            .service_name = instance.service_name,
+            .service_id = instance.service_id,
+            .node_id = instance.node_id,
+            .is_leader = instance.is_leader,
+        });
     }
 
     pub fn removeInstance(self: *Self, service_id: i32) void {
@@ -185,6 +247,13 @@ pub const ServiceClient = struct {
         while (i < self.instances.items.len) {
             if (self.instances.items[i].service_id == service_id) {
                 const removed = self.instances.swapRemove(i);
+                self.emitLifecycle(.{
+                    .event_type = .unavailable,
+                    .service_name = removed.service_name,
+                    .service_id = removed.service_id,
+                    .node_id = removed.node_id,
+                    .is_leader = removed.is_leader,
+                });
                 if (removed.ipc_producer) |producer| {
                     self.allocator.destroy(producer);
                 }
@@ -204,11 +273,31 @@ pub const ServiceClient = struct {
         return self.instances.items.len;
     }
 
+    pub fn copyTargetInstances(self: *const Self, out: []TargetInstanceInfo) usize {
+        const copy_len = @min(out.len, self.instances.items.len);
+        for (out[0..copy_len], self.instances.items[0..copy_len]) |*slot, inst| {
+            slot.* = .{
+                .target_service_id = inst.service_id,
+                .is_leader = inst.is_leader,
+            };
+        }
+        return self.instances.items.len;
+    }
+
     pub fn findInstance(self: *const Self, service_id: i32) ?*ServiceInstance {
         for (self.instances.items) |*inst| {
             if (inst.service_id == service_id) return inst;
         }
         return null;
+    }
+
+    pub fn setLifecycleHandler(
+        self: *Self,
+        handler: ?LifecycleHandler,
+        context: ?*anyopaque,
+    ) void {
+        self.lifecycle_handler = handler;
+        self.lifecycle_context = if (handler == null) null else context;
     }
 
     pub fn deinit(self: *Self) void {
@@ -218,6 +307,15 @@ pub const ServiceClient = struct {
             }
         }
         self.instances.deinit(self.allocator);
+        if (self.owns_service_name) {
+            self.allocator.free(self.service_name);
+        }
+    }
+
+    fn emitLifecycle(self: *Self, event: LifecycleEvent) void {
+        if (self.lifecycle_handler) |handler| {
+            handler(self.lifecycle_context, event);
+        }
     }
 
     // ── Flow Control API ─────────────────────────────────────────────
@@ -238,15 +336,11 @@ pub const ServiceClient = struct {
 
     /// Returns the estimated remaining bytes in the broker's send ring buffer.
     pub fn sendBufferRemaining(self: *const Self) usize {
-        const broker = self.broker_meta orelse return 0;
-        const send_buf = broker.getSendBuffer();
-        var send_rb = RingBuffer.init(
-            @alignCast(send_buf),
-            false,
-            null,
-            null,
-        ) catch return 0;
-        return send_rb.getCapacity() - send_rb.size();
+        if (self.broker_send_ring_buffer) |send_rb| {
+            var ring = send_rb;
+            return ring.getCapacity() - ring.size();
+        }
+        return 0;
     }
 
     /// Returns the total bytes pending in the outbound pipeline for a specific peer.
@@ -368,22 +462,70 @@ pub const ServiceClient = struct {
         target_service_id: i32,
         payload: []const u8,
     ) SendError!void {
-        const broker = self.broker_meta orelse return error.SendBufferFull;
-        const send_buf = broker.getSendBuffer();
+        var send_claim = try self.tryClaimRemoteService(
+            target_node_id,
+            target_service_id,
+            0,
+            payload.len,
+        );
 
-        // We need at least ring_buffer_alignment alignment for RingBuffer.init.
-        // The send buffer from BrokerMetadataFile is part of an aligned mmap region.
-        var send_rb = RingBuffer.init(
-            @alignCast(send_buf),
-            false,
-            null,
-            null,
-        ) catch return error.SendBufferFull;
+        // Copy the application payload immediately after the TCP frame header.
+        if (payload.len > 0) {
+            @memcpy(send_claim.payload, payload);
+        }
 
-        // Write TcpFrameHeader + app payload — matching the wire format that
-        // the sender event loop expects (it casts the ring buffer payload as
-        // TcpFrameHeader to read target_node_id for routing).
-        const total_len = TcpFrameHeader.size + payload.len;
+        // Commit — makes the message visible to the broker's sender event loop.
+        send_claim.commit();
+    }
+
+    fn tryClaimToInstance(
+        self: *Self,
+        instance: *ServiceInstance,
+        template_id: u16,
+        payload_len: usize,
+    ) SendError!SendClaim {
+        if (instance.node_id == self.local_node_id) {
+            const producer = instance.ipc_producer orelse
+                return error.ProducerNotInitialized;
+            const msg_type_id: i32 = if (template_id == 0)
+                constants.application_msg_type_id
+            else
+                @intCast(template_id);
+
+            if (payload_len > producer.ring_buffer.maxMessageLength()) {
+                return error.MessageTooLong;
+            }
+
+            const claim = producer.tryClaim(msg_type_id, payload_len) orelse
+                return error.SendBufferFull;
+            return .{
+                .claim = claim,
+                .payload = claim.buffer,
+            };
+        }
+
+        return self.tryClaimRemoteService(
+            instance.node_id,
+            instance.service_id,
+            template_id,
+            payload_len,
+        );
+    }
+
+    fn tryClaimRemoteService(
+        self: *Self,
+        target_node_id: i16,
+        target_service_id: i32,
+        template_id: u16,
+        payload_len: usize,
+    ) SendError!SendClaim {
+        const send_rb = self.brokerSendRingBuffer() orelse return error.SendBufferFull;
+        const total_len = TcpFrameHeader.size + payload_len;
+
+        if (total_len > send_rb.maxMessageLength()) {
+            return error.MessageTooLong;
+        }
+
         var claim = send_rb.tryClaim(constants.application_msg_type_id, total_len) orelse
             return error.SendBufferFull;
 
@@ -395,16 +537,28 @@ pub const ServiceClient = struct {
             .target_node_id = @intCast(target_node_id),
             .source_service_id = @intCast(self.local_service_id),
             .target_service_id = @intCast(target_service_id),
-            .template_id = 0,
+            .template_id = template_id,
             .correlation_id = 0,
         };
 
-        // Copy the application payload immediately after the TCP frame header.
-        if (payload.len > 0) {
-            @memcpy(claim.buffer[TcpFrameHeader.size..][0..payload.len], payload);
-        }
+        return .{
+            .claim = claim,
+            .payload = claim.buffer[TcpFrameHeader.size..][0..payload_len],
+        };
+    }
 
-        // Commit — makes the message visible to the broker's sender event loop.
-        claim.commit();
+    fn brokerSendRingBuffer(self: *Self) ?*RingBuffer {
+        if (self.broker_send_ring_buffer == null) return null;
+        return &self.broker_send_ring_buffer.?;
+    }
+
+    fn initBrokerSendRingBuffer(broker_meta: ?*BrokerMetadataFile) ?RingBuffer {
+        const broker = broker_meta orelse return null;
+        return RingBuffer.init(
+            @alignCast(broker.getSendBuffer()),
+            false,
+            null,
+            null,
+        ) catch null;
     }
 };

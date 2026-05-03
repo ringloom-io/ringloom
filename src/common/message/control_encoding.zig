@@ -168,54 +168,68 @@ pub const ServiceInstanceData = struct {
     is_leader: bool,
 };
 
-/// Encode a ServiceInstances control message (one instance per message).
-/// Layout: [template_id: u16][service_id: i32][node_id: i16][is_leader: u8][name_len: u16][name: bytes]
-pub fn encodeServiceInstance(buf: []u8, data: ServiceInstanceData) usize {
+pub const ServiceInstanceEntry = extern struct {
+    service_id: i32 align(1),
+    node_id: i16 align(1),
+    is_leader: u8,
+    _padding: u8 = 0,
+};
+
+pub const ServiceInstancesData = struct {
+    service_name: []const u8,
+    entries: []const ServiceInstanceEntry,
+};
+
+/// Encode a ServiceInstances control message as a complete snapshot.
+/// Layout: [template_id: u16][instance_count: u16][name_len: u16][name: bytes][entries...]
+pub fn encodeServiceInstances(
+    buf: []u8,
+    service_name: []const u8,
+    entries: []const ServiceInstanceEntry,
+) usize {
     var offset: usize = 0;
 
     std.mem.writeInt(u16, buf[offset..][0..2], 4, .little);
     offset += 2;
 
-    std.mem.writeInt(i32, buf[offset..][0..4], data.service_id, .little);
-    offset += 4;
-
-    std.mem.writeInt(i16, buf[offset..][0..2], data.node_id, .little);
+    const instance_count: u16 = @intCast(entries.len);
+    std.mem.writeInt(u16, buf[offset..][0..2], instance_count, .little);
     offset += 2;
 
-    buf[offset] = if (data.is_leader) 1 else 0;
-    offset += 1;
-
-    const name_len: u16 = @intCast(data.service_name.len);
+    const name_len: u16 = @intCast(service_name.len);
     std.mem.writeInt(u16, buf[offset..][0..2], name_len, .little);
     offset += 2;
 
-    @memcpy(buf[offset..][0..data.service_name.len], data.service_name);
-    offset += data.service_name.len;
+    @memcpy(buf[offset..][0..service_name.len], service_name);
+    offset += service_name.len;
+
+    const entries_size = entries.len * @sizeOf(ServiceInstanceEntry);
+    if (entries_size > 0) {
+        const entries_src: [*]const u8 = @ptrCast(entries.ptr);
+        @memcpy(buf[offset..][0..entries_size], entries_src[0..entries_size]);
+        offset += entries_size;
+    }
 
     return offset;
 }
 
-/// Decode a ServiceInstances control message.
-pub fn decodeServiceInstance(payload: []const u8) ServiceInstanceData {
+/// Decode a ServiceInstances snapshot message.
+pub fn decodeServiceInstances(payload: []const u8) ServiceInstancesData {
     var offset: usize = 2;
 
-    const service_id = std.mem.readInt(i32, payload[offset..][0..4], .little);
-    offset += 4;
-
-    const node_id = std.mem.readInt(i16, payload[offset..][0..2], .little);
+    const instance_count: usize = std.mem.readInt(u16, payload[offset..][0..2], .little);
     offset += 2;
-
-    const is_leader = payload[offset] != 0;
-    offset += 1;
 
     const name_len: usize = std.mem.readInt(u16, payload[offset..][0..2], .little);
     offset += 2;
 
+    const service_name = payload[offset..][0..name_len];
+    offset += name_len;
+
+    const entries_ptr: [*]const ServiceInstanceEntry = @ptrCast(payload[offset..].ptr);
     return .{
-        .service_id = service_id,
-        .service_name = payload[offset..][0..name_len],
-        .node_id = node_id,
-        .is_leader = is_leader,
+        .service_name = service_name,
+        .entries = entries_ptr[0..instance_count],
     };
 }
 
@@ -343,22 +357,36 @@ test "SubscribeToServiceUpdates encode and decode roundtrip" {
     try testing.expectEqualStrings("pricing", decoded.target_service_name);
 }
 
-test "ServiceInstance encode and decode roundtrip" {
+test "ServiceInstances encode and decode snapshot roundtrip" {
     var buf: [256]u8 = undefined;
-    const len = encodeServiceInstance(&buf, .{
-        .service_id = 5,
-        .service_name = "risk-engine",
-        .node_id = 2,
-        .is_leader = true,
-    });
+    const entries = [_]ServiceInstanceEntry{
+        .{ .service_id = 5, .node_id = 2, .is_leader = 1 },
+        .{ .service_id = 8, .node_id = 1, .is_leader = 0 },
+    };
+    const len = encodeServiceInstances(&buf, "risk-engine", &entries);
 
     try testing.expectEqual(@as(u16, 4), readTemplateId(buf[0..len]));
 
-    const decoded = decodeServiceInstance(buf[0..len]);
-    try testing.expectEqual(@as(i32, 5), decoded.service_id);
-    try testing.expectEqual(@as(i16, 2), decoded.node_id);
-    try testing.expect(decoded.is_leader);
+    const decoded = decodeServiceInstances(buf[0..len]);
     try testing.expectEqualStrings("risk-engine", decoded.service_name);
+    try testing.expectEqual(@as(usize, 2), decoded.entries.len);
+    try testing.expectEqual(@as(i32, 5), decoded.entries[0].service_id);
+    try testing.expectEqual(@as(i16, 2), decoded.entries[0].node_id);
+    try testing.expectEqual(@as(u8, 1), decoded.entries[0].is_leader);
+    try testing.expectEqual(@as(i32, 8), decoded.entries[1].service_id);
+    try testing.expectEqual(@as(i16, 1), decoded.entries[1].node_id);
+    try testing.expectEqual(@as(u8, 0), decoded.entries[1].is_leader);
+}
+
+test "ServiceInstances encode and decode empty snapshot" {
+    var buf: [256]u8 = undefined;
+    const len = encodeServiceInstances(&buf, "empty-service", &.{});
+
+    try testing.expectEqual(@as(u16, 4), readTemplateId(buf[0..len]));
+
+    const decoded = decodeServiceInstances(buf[0..len]);
+    try testing.expectEqualStrings("empty-service", decoded.service_name);
+    try testing.expectEqual(@as(usize, 0), decoded.entries.len);
 }
 
 test "UnregisterService encode and decode roundtrip" {

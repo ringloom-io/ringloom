@@ -27,6 +27,44 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const service_c_abi_shared_mod = b.createModule(.{
+        .root_source_file = b.path("src/service/c_abi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ringloom_common", .module = ringloom_common },
+        },
+    });
+
+    const service_c_abi_static_mod = b.createModule(.{
+        .root_source_file = b.path("src/service/c_abi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ringloom_common", .module = ringloom_common },
+        },
+    });
+
+    const service_shared_lib = b.addLibrary(.{
+        .name = "ringloom_service",
+        .linkage = .dynamic,
+        .root_module = service_c_abi_shared_mod,
+    });
+    b.installArtifact(service_shared_lib);
+
+    const service_static_lib = b.addLibrary(.{
+        .name = "ringloom_service",
+        .linkage = .static,
+        .root_module = service_c_abi_static_mod,
+    });
+    b.installArtifact(service_static_lib);
+
+    const install_service_header = b.addInstallHeaderFile(
+        b.path("include/ringloom_service.h"),
+        "ringloom_service.h",
+    );
+    b.getInstallStep().dependOn(&install_service_header.step);
+
     const ringloom_broker = b.addModule("ringloom_broker", .{
         .root_source_file = b.path("src/broker/root.zig"),
         .target = target,
@@ -190,6 +228,10 @@ pub fn build(b: *std.Build) void {
     const test_testing_step = b.step("test-testing", "Run testing harness tests only");
     test_testing_step.dependOn(&run_testing_tests.step);
 
+    const service_c_step = b.step("service-c", "Build the service C ABI library and header");
+    service_c_step.dependOn(b.getInstallStep());
+    service_c_step.dependOn(&run_service_tests.step);
+
     // ── End-to-end correctness tests ─────────────────────────────────
     //
     // These tests spawn real broker and service processes. The build
@@ -239,6 +281,26 @@ pub fn build(b: *std.Build) void {
 
     const perf_step = b.step("perf", "Run performance benchmarks (ReleaseFast)");
     perf_step.dependOn(&run_perf_tests.step);
+
+    const java_bindings_cmd = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "cd bindings/java && gradle --no-daemon classes",
+    });
+    java_bindings_cmd.step.dependOn(b.getInstallStep());
+
+    const java_bindings_step = b.step("java-bindings", "Compile the Java FFM bindings");
+    java_bindings_step.dependOn(&java_bindings_cmd.step);
+
+    const java_test_cmd = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "ROOT=$(pwd) && cd bindings/java && gradle --no-daemon test -Dringloom.projectRoot=\"$ROOT\" -Dringloom.nativeLibDir=\"$ROOT/zig-out/lib\" -Dringloom.brokerBin=\"$ROOT/zig-out/bin/ringloom-broker\"",
+    });
+    java_test_cmd.step.dependOn(b.getInstallStep());
+
+    const test_java_step = b.step("test-java", "Run Java integration tests");
+    test_java_step.dependOn(&java_test_cmd.step);
 
     // ── ringloom-stat utility ─────────────────────────────────────────────
 
