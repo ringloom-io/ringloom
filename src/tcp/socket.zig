@@ -1,3 +1,10 @@
+//! TCP socket helpers used by the broker's low-level networking paths.
+//!
+//! Zig 0.16 removed the old `std.net`/`std.posix` convenience layer for these
+//! operations. The broker owns non-blocking descriptors directly so it can
+//! integrate them with io_uring/kqueue, so this module keeps the raw syscall
+//! boundary in one place while using `std.Io.net` for address parsing.
+
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;

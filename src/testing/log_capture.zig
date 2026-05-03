@@ -13,7 +13,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 
-const io_compat = @import("io_compat.zig");
+const test_io = @import("io.zig");
 const process_runner = @import("process_runner.zig");
 const ProcessHandle = process_runner.ProcessHandle;
 const temp_env = @import("temp_env.zig");
@@ -118,7 +118,7 @@ pub const LogCapture = struct {
     /// Writes the accumulated output to a file at `path`, creating or
     /// truncating the file as necessary.
     pub fn writeToFile(self: *const LogCapture, path: []const u8) !void {
-        try io_compat.writeFile(path, self.accumulated.items);
+        try test_io.writeFile(path, self.accumulated.items);
     }
 
     /// Clears all accumulated data, keeping allocated memory for reuse.
@@ -141,7 +141,7 @@ pub fn dumpFailureDiagnostics(
     processes: []const *ProcessHandle,
     env: *const TempEnv,
 ) void {
-    const io = io_compat.io();
+    const io = test_io.io();
     var stderr_buf: [4096]u8 = undefined;
     var stderr_w = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_w.interface;
@@ -202,7 +202,7 @@ fn dumpTailOfFile(
     max_lines: usize,
     label: []const u8,
 ) void {
-    const content = io_compat.readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |err| {
+    const content = test_io.readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |err| {
         if (err == error.FileNotFound) {
             writer.print("   ({s} file not found)\n", .{label}) catch return;
         } else {
@@ -241,11 +241,11 @@ fn dumpTailOfFile(
 }
 
 fn listDirectoryRecursive(writer: anytype, path: []const u8, depth: usize) !void {
-    var dir = try io_compat.openDir(path, .{ .iterate = true });
-    defer dir.close(io_compat.io());
+    var dir = try test_io.openDir(path, .{ .iterate = true });
+    defer dir.close(test_io.io());
 
     var iter = dir.iterate();
-    while (try iter.next(io_compat.io())) |entry| {
+    while (try iter.next(test_io.io())) |entry| {
         // Indent by depth.
         var i: usize = 0;
         while (i < depth) : (i += 1) {
@@ -409,9 +409,9 @@ test "writeToFile persists accumulated data" {
     try lc.writeToFile(tmp_path);
 
     // Then
-    defer io_compat.deleteFile(tmp_path) catch {};
+    defer test_io.deleteFile(tmp_path) catch {};
 
-    const content = try io_compat.readFileAlloc(std.testing.allocator, tmp_path, 256);
+    const content = try test_io.readFileAlloc(std.testing.allocator, tmp_path, 256);
     defer std.testing.allocator.free(content);
     try std.testing.expectEqualStrings("persisted content\n", content);
 }

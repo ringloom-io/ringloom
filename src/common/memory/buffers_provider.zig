@@ -77,7 +77,7 @@ pub const BuffersProvider = struct {
 
     /// Check if the service is healthy (heartbeat within timeout).
     pub fn isHealthy(self: *const BuffersProvider) bool {
-        const now_ms = platform.epochMillis();
+        const now_ms = platform.Clock.epochMillis();
         const last_heartbeat = self.readHeartbeat();
         return (now_ms - last_heartbeat) <= constants.default_svc_heartbeat_timeout_ms;
     }

@@ -7,6 +7,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const thread = @import("thread.zig");
+const Clock = @import("clock.zig").Clock;
 
 pub const WaitResult = enum {
     /// Woken by a wake() call.
@@ -245,9 +246,9 @@ test "ProcessSynchronizer wait times out" {
 
     var word: i32 = 1;
     // Wait with expected=1 — value matches, so it will sleep until timeout.
-    const start = @divTrunc(std.Io.Clock.real.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds, std.time.ns_per_ms);
+    const start = Clock.epochMillis();
     const result = sync.wait(&word, 1, 10_000_000); // 10ms timeout
-    const elapsed = @divTrunc(std.Io.Clock.real.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds, std.time.ns_per_ms) - start;
+    const elapsed = Clock.epochMillis() - start;
 
     try std.testing.expect(result == .timed_out);
     try std.testing.expect(elapsed >= 5); // Allow some slack.

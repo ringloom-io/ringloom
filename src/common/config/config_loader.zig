@@ -21,21 +21,35 @@ pub const ConfigError = error{
 
 pub const ConfigLoader = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: ?*const std.process.Environ.Map,
 
-    pub fn init(allocator: std.mem.Allocator) ConfigLoader {
-        return .{ .allocator = allocator };
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        environ_map: ?*const std.process.Environ.Map,
+    ) ConfigLoader {
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .environ_map = environ_map,
+        };
+    }
+
+    pub fn initForTesting(allocator: std.mem.Allocator) ConfigLoader {
+        return init(allocator, std.testing.io, null);
     }
 
     /// Load configuration from a file. Tries BRZ_CONFIG_FILE env var first,
     /// falls back to broker.properties in the current directory.
     pub fn load(self: *const ConfigLoader) ConfigError!BrokerConfig {
-        const path = getEnvVar("BRZ_CONFIG_FILE") orelse "broker.properties";
+        const path = getEnvVar(self.environ_map, "BRZ_CONFIG_FILE") orelse "broker.properties";
         return self.loadFromFile(path);
     }
 
     /// Load configuration from a specific file path.
     pub fn loadFromFile(self: *const ConfigLoader, path: []const u8) ConfigError!BrokerConfig {
-        const io = std.Io.Threaded.global_single_threaded.io();
+        const io = self.io;
         const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => return ConfigError.FileNotFound,
             else => return ConfigError.IoError,
@@ -58,7 +72,7 @@ pub const ConfigLoader = struct {
         defer props.deinit();
 
         // Apply environment variable overrides.
-        applyEnvOverrides(&props, self.allocator) catch
+        applyEnvOverrides(&props, self.allocator, self.environ_map) catch
             return ConfigError.IoError;
 
         var config = BrokerConfig{
@@ -272,6 +286,7 @@ fn parseProperties(
 fn applyEnvOverrides(
     props: *std.StringHashMap([]const u8),
     allocator: std.mem.Allocator,
+    environ_map: ?*const std.process.Environ.Map,
 ) !void {
     const keys = [_][]const u8{
         "broker.node.id",
@@ -319,18 +334,16 @@ fn applyEnvOverrides(
             env_name_buf[len] = 0;
             break :blk env_name_buf[0..len :0];
         };
-        if (getEnvVar(env_name)) |env_value| {
+        if (getEnvVar(environ_map, env_name)) |env_value| {
             const owned = try allocator.dupe(u8, env_value);
             try props.put(key, owned);
         }
     }
 }
 
-fn getEnvVar(name: []const u8) ?[]const u8 {
-    return if (std.Io.Threaded.global_single_threaded.environ.process_environ.getPosix(name)) |value|
-        value
-    else
-        null;
+fn getEnvVar(environ_map: ?*const std.process.Environ.Map, name: []const u8) ?[]const u8 {
+    const map = environ_map orelse return null;
+    return map.get(name);
 }
 
 fn validate(config: *BrokerConfig) ConfigError!void {
@@ -394,7 +407,7 @@ test "load valid config from properties string" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const loader = ConfigLoader.init(allocator);
+    const loader = ConfigLoader.initForTesting(allocator);
 
     // When
     const config = try loader.parseAndBuild(content);
@@ -422,7 +435,7 @@ test "default values are applied for omitted properties" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const config = try loader.parseAndBuild(content);
@@ -442,7 +455,7 @@ test "windows-style line endings are handled" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const config = try loader.parseAndBuild(content);
@@ -466,7 +479,7 @@ test "comments and blank lines are skipped" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const config = try loader.parseAndBuild(content);
@@ -484,7 +497,7 @@ test "colon separator is accepted" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const config = try loader.parseAndBuild(content);
@@ -501,7 +514,7 @@ test "missing broker.node.id returns MissingRequiredProperty" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const result = loader.parseAndBuild(content);
@@ -518,7 +531,7 @@ test "missing broker.local.host.port returns MissingRequiredProperty" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const result = loader.parseAndBuild(content);
@@ -537,7 +550,7 @@ test "non-power-of-2 buffer size is auto-aligned" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const config = try loader.parseAndBuild(content);
@@ -557,7 +570,7 @@ test "buffer size too small returns BufferSizeTooSmall" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const result = loader.parseAndBuild(content);
@@ -576,7 +589,7 @@ test "node ID conflicting with a peer returns NodeIdConflict" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const result = loader.parseAndBuild(content);
@@ -595,7 +608,7 @@ test "invalid peer format returns InvalidPeerFormat" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const result = loader.parseAndBuild(content);
@@ -614,7 +627,7 @@ test "max_frame_length out of range returns InvalidValue" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const result = loader.parseAndBuild(content);
@@ -633,7 +646,7 @@ test "computed fields are set after validation" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const loader = ConfigLoader.init(arena.allocator());
+    const loader = ConfigLoader.initForTesting(arena.allocator());
 
     // When
     const config = try loader.parseAndBuild(content);

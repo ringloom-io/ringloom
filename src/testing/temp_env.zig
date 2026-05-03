@@ -20,7 +20,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const io_compat = @import("io_compat.zig");
+const test_io = @import("io.zig");
 
 /// Returns the current process ID portably.
 fn getCurrentPid() i64 {
@@ -84,11 +84,11 @@ pub const TempEnv = struct {
         const default_services = try std.fmt.allocPrint(allocator, "{s}/brz-test/services", .{storage_path});
         defer allocator.free(default_services);
 
-        try io_compat.createDirPath(default_services);
-        try io_compat.createDirPath(logs_path);
-        try io_compat.createDirPath(config_path);
-        try io_compat.createDirPath(results_path);
-        try io_compat.createDirPath(artifacts_path);
+        try test_io.createDirPath(default_services);
+        try test_io.createDirPath(logs_path);
+        try test_io.createDirPath(config_path);
+        try test_io.createDirPath(results_path);
+        try test_io.createDirPath(artifacts_path);
 
         return TempEnv{
             .allocator = allocator,
@@ -108,7 +108,7 @@ pub const TempEnv = struct {
     /// (useful when a test fails and the operator wants to inspect logs).
     pub fn deinit(self: *TempEnv) void {
         if (!self.preserved) {
-            io_compat.deleteTree(self.base_path) catch |err| {
+            test_io.deleteTree(self.base_path) catch |err| {
                 std.log.warn("TempEnv: failed to delete {s}: {}", .{ self.base_path, err });
             };
         }
@@ -137,7 +137,7 @@ pub const TempEnv = struct {
         const services_path = try std.fmt.allocPrint(self.allocator, "{s}/services", .{group_path});
         defer self.allocator.free(services_path);
 
-        try io_compat.createDirPath(services_path);
+        try test_io.createDirPath(services_path);
 
         return group_path;
     }
@@ -166,25 +166,25 @@ test "init creates expected directory structure" {
     defer env.deinit();
 
     // Then — every subdirectory must exist.
-    var storage_dir = try io_compat.openDir(env.storage_path, .{});
-    storage_dir.close(io_compat.io());
+    var storage_dir = try test_io.openDir(env.storage_path, .{});
+    storage_dir.close(test_io.io());
 
-    var logs_dir = try io_compat.openDir(env.logs_path, .{});
-    logs_dir.close(io_compat.io());
+    var logs_dir = try test_io.openDir(env.logs_path, .{});
+    logs_dir.close(test_io.io());
 
-    var config_dir = try io_compat.openDir(env.config_path, .{});
-    config_dir.close(io_compat.io());
+    var config_dir = try test_io.openDir(env.config_path, .{});
+    config_dir.close(test_io.io());
 
-    var results_dir = try io_compat.openDir(env.results_path, .{});
-    results_dir.close(io_compat.io());
+    var results_dir = try test_io.openDir(env.results_path, .{});
+    results_dir.close(test_io.io());
 
-    var artifacts_dir = try io_compat.openDir(env.artifacts_path, .{});
-    artifacts_dir.close(io_compat.io());
+    var artifacts_dir = try test_io.openDir(env.artifacts_path, .{});
+    artifacts_dir.close(test_io.io());
 
     // The default group services directory must also exist.
     const services = try std.fmt.allocPrint(allocator, "{s}/brz-test/services", .{env.storage_path});
-    var services_dir = try io_compat.openDir(services, .{});
-    services_dir.close(io_compat.io());
+    var services_dir = try test_io.openDir(services, .{});
+    services_dir.close(test_io.io());
 }
 
 test "preserve prevents deletion on deinit" {
@@ -201,11 +201,11 @@ test "preserve prevents deletion on deinit" {
     env.deinit();
 
     // Then — directory should still exist on disk.
-    var dir = try io_compat.openDir(base_copy, .{});
-    dir.close(io_compat.io());
+    var dir = try test_io.openDir(base_copy, .{});
+    dir.close(test_io.io());
 
     // Cleanup: remove the preserved directory manually.
-    try io_compat.deleteTree(base_copy);
+    try test_io.deleteTree(base_copy);
 }
 
 test "groupStoragePath creates group directory on demand" {
@@ -222,8 +222,8 @@ test "groupStoragePath creates group directory on demand" {
 
     // Then
     const services_path = try std.fmt.allocPrint(allocator, "{s}/services", .{path});
-    var dir = try io_compat.openDir(services_path, .{});
-    dir.close(io_compat.io());
+    var dir = try test_io.openDir(services_path, .{});
+    dir.close(test_io.io());
 }
 
 test "deinit removes directory tree" {
@@ -239,7 +239,7 @@ test "deinit removes directory tree" {
     env.deinit();
 
     // Then — the base directory should no longer exist.
-    const result = io_compat.openDir(base_copy, .{});
+    const result = test_io.openDir(base_copy, .{});
     try std.testing.expectError(error.FileNotFound, result);
 }
 

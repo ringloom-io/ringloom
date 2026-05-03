@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const net = @import("../net_compat.zig");
+const net = @import("brz_tcp").socket;
 const WriteQueue = @import("write_queue.zig").WriteQueue;
 const constants = @import("brz_common").platform.constants;
 const platform = @import("brz_common").platform;

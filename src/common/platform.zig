@@ -4,6 +4,7 @@
 //! The rest of the codebase imports this module instead of individual platform files.
 
 pub const constants = @import("platform/constants.zig");
+pub const io = @import("platform/io.zig");
 pub const atomic = @import("platform/atomic.zig");
 pub const mapped_file = @import("platform/mapped_file.zig");
 pub const MappedFile = mapped_file.MappedFile;
@@ -30,28 +31,17 @@ pub const serviceMetadataPath = mapped_file.serviceMetadataPath;
 pub const servicesDirectoryPath = mapped_file.servicesDirectoryPath;
 pub const ensureServicesDirectory = mapped_file.ensureServicesDirectory;
 
-// Re-export clock helpers as free functions for convenience.
-pub fn epochMillis() i64 {
-    return Clock.epochMillis();
-}
-
-pub fn monotonicNanos() i64 {
-    return Clock.monotonicNanos();
-}
-
 pub fn sleepNanos(duration_ns: u64) void {
     return thread.sleepNanos(duration_ns);
 }
 
 // Platform helpers that wrap OS-specific calls used by the memory subsystem.
 
-const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 
-fn defaultIo() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}
+const std = @import("std");
+pub const defaultIo = io.default;
 
 /// Get the current process ID.
 pub fn getPid() i64 {
@@ -142,6 +132,7 @@ pub fn munmap(mapped: []align(constants.page_size) u8) void {
 // Ensure all platform module tests are discovered by `zig build test`.
 comptime {
     _ = @import("platform/constants.zig");
+    _ = @import("platform/io.zig");
     _ = @import("platform/atomic.zig");
     _ = @import("platform/mapped_file.zig");
     _ = @import("platform/clock.zig");

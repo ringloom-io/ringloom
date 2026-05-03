@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const AtomicBool = @import("atomic.zig").AtomicBool;
+const platform_io = @import("io.zig");
 
 /// Interface that all event loops implement.
 /// The ThreadRunner calls doWork() in a loop and onClose() when stopping.
@@ -94,7 +95,7 @@ pub const BackoffState = struct {
 };
 
 pub fn sleepNanos(duration_ns: u64) void {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = platform_io.default();
     std.Io.sleep(io, .fromNanoseconds(@intCast(duration_ns)), .awake) catch unreachable;
 }
 

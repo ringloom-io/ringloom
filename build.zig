@@ -14,6 +14,9 @@ pub fn build(b: *std.Build) void {
     const brz_tcp = b.addModule("brz_tcp", .{
         .root_source_file = b.path("src/tcp/tcp.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "brz_common", .module = brz_common },
+        },
     });
 
     const brz_service = b.addModule("brz_service", .{
@@ -36,6 +39,9 @@ pub fn build(b: *std.Build) void {
     const brz_testing = b.addModule("brz_testing", .{
         .root_source_file = b.path("src/testing/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "brz_common", .module = brz_common },
+        },
     });
 
     // ── Broker executable ────────────────────────────────────────────
@@ -131,6 +137,9 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tcp/tcp.zig"),
             .target = target,
+            .imports = &.{
+                .{ .name = "brz_common", .module = brz_common },
+            },
         }),
     });
     const run_tcp_tests = b.addRunArtifact(tcp_tests);
@@ -163,6 +172,9 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/testing/root.zig"),
             .target = target,
+            .imports = &.{
+                .{ .name = "brz_common", .module = brz_common },
+            },
         }),
     });
     const run_testing_tests = b.addRunArtifact(testing_tests);
@@ -189,6 +201,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/e2e/root.zig"),
             .target = target,
             .imports = &.{
+                .{ .name = "brz_common", .module = brz_common },
                 .{ .name = "brz_testing", .module = brz_testing },
             },
         }),
@@ -213,6 +226,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
+                .{ .name = "brz_common", .module = brz_common },
                 .{ .name = "brz_testing", .module = brz_testing },
             },
         }),

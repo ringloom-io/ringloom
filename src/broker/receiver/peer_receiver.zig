@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const brz_common = @import("brz_common");
-const net = @import("../net_compat.zig");
+const net = @import("brz_tcp").socket;
 const constants = brz_common.platform.constants;
 const Clock = brz_common.platform.clock.Clock;
 const frame_parser = brz_common.protocol.frame_parser;

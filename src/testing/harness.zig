@@ -32,7 +32,7 @@ const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
-const io_compat = @import("io_compat.zig");
+const test_io = @import("io.zig");
 
 const temp_env = @import("temp_env.zig");
 const TempEnv = temp_env.TempEnv;
@@ -458,11 +458,11 @@ test "TestHarness markFailed preserves environment" {
     h.deinit();
 
     // Then — the directory should still exist because we marked failed.
-    var dir = try io_compat.openDir(base_copy, .{});
-    dir.close(io_compat.io());
+    var dir = try test_io.openDir(base_copy, .{});
+    dir.close(test_io.io());
 
     // Manual cleanup.
-    try io_compat.deleteTree(base_copy);
+    try test_io.deleteTree(base_copy);
 }
 
 test "TestHarness setBinDir overrides default" {

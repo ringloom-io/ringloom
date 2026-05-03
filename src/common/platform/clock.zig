@@ -10,6 +10,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const thread = @import("thread.zig");
+const platform_io = @import("io.zig");
 
 /// True when we can use RDTSC: x86_64, Linux, non-Debug build.
 const use_rdtsc = builtin.cpu.arch == .x86_64 and
@@ -133,7 +134,7 @@ pub const Clock = struct {
 
     /// Portable fallback using std.time.
     fn monotonicNanosStd() i64 {
-        const io = std.Io.Threaded.global_single_threaded.io();
+        const io = platform_io.default();
         return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
     }
 
@@ -168,7 +169,7 @@ pub const Clock = struct {
 
     /// Portable fallback using std.time.
     fn epochMillisStd() i64 {
-        const io = std.Io.Threaded.global_single_threaded.io();
+        const io = platform_io.default();
         return @intCast(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
     }
 };

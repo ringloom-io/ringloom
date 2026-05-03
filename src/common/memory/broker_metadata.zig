@@ -176,7 +176,7 @@ pub const BrokerMetadataFile = struct {
         self.header.service_id = constants.broker_service_id;
         self.header.node_id = node_id;
         self.header.pid = platform.getPid();
-        self.header.start_timestamp_ms = platform.epochMillis();
+        self.header.start_timestamp_ms = platform.Clock.epochMillis();
 
         // Store FC region sizes in the header (at fixed offsets beyond 32-byte struct).
         self.storeFcBufferLength(@intCast(fc_buf_len));
@@ -186,7 +186,7 @@ pub const BrokerMetadataFile = struct {
         self.storeNextServiceId(1);
 
         // Write initial heartbeat.
-        self.storeHeartbeat(platform.epochMillis());
+        self.storeHeartbeat(platform.Clock.epochMillis());
 
         return self;
     }
@@ -415,7 +415,7 @@ pub const BrokerMetadataFile = struct {
 
     fn ensureDirectoryExists(file_path: []const u8) !void {
         const dir_path = std.fs.path.dirname(file_path) orelse return error.InvalidPath;
-        const io = std.Io.Threaded.global_single_threaded.io();
+        const io = platform.defaultIo();
         var root_dir = std.Io.Dir.openDirAbsolute(io, "/", .{}) catch return error.FileNotFound;
         defer root_dir.close(io);
         const relative = if (dir_path.len > 0 and dir_path[0] == '/') dir_path[1..] else dir_path;

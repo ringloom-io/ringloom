@@ -1,14 +1,8 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 pub fn io() std.Io {
-    if (builtin.is_test) return std.testing.io;
-    return std.Io.Threaded.global_single_threaded.io();
-}
-
-pub fn monotonicNanos() i128 {
-    return @intCast(std.Io.Clock.awake.now(io()).nanoseconds);
+    return std.testing.io;
 }
 
 pub fn sleepMs(ms: u64) void {

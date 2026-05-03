@@ -98,7 +98,7 @@ pub const ServiceScanner = struct {
         }
 
         var max_service_id: i32 = 0;
-        const now_ms = platform.epochMillis();
+        const now_ms = platform.Clock.epochMillis();
 
         var iter = dir.iterate();
         while (try iter.next()) |entry| {

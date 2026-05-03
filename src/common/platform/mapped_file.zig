@@ -7,10 +7,8 @@
 const std = @import("std");
 const posix = std.posix;
 const constants = @import("constants.zig");
-
-fn defaultIo() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}
+const platform_io = @import("io.zig");
+const defaultIo = platform_io.default;
 
 fn closeFd(fd: posix.fd_t) void {
     switch (posix.errno(posix.system.close(fd))) {

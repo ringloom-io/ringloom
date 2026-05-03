@@ -5,13 +5,10 @@
 //! detection and exponential backoff for reconnection.
 
 const std = @import("std");
+const Clock = @import("brz_common").platform.Clock;
 const io_engine = @import("io_engine.zig");
 const frame_mod = @import("frame.zig");
 const handshake_mod = @import("handshake.zig");
-
-fn monotonicNanos() i128 {
-    return @intCast(std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds);
-}
 
 pub const ConnectionHandle = io_engine.ConnectionHandle;
 
@@ -77,7 +74,7 @@ pub const ConnectionManager = struct {
             .peers = peers,
             .local_node_id = local_node_id,
             .group_name_hash = handshake_mod.HandshakeFrame.hashGroupName(group_name),
-            .session_epoch = @intCast(monotonicNanos()),
+            .session_epoch = @intCast(Clock.monotonicNanosStable()),
             .allocator = allocator,
         };
     }

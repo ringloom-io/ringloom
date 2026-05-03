@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const platform = @import("brz_common").platform;
+const Clock = platform.Clock;
 const testing_mod = @import("brz_testing");
 const TestHarness = testing_mod.TestHarness;
 const BrokerSpec = testing_mod.BrokerSpec;
@@ -44,7 +45,7 @@ test "service recovery time after crash" {
     // When — the crashy service terminates on its own.
     _ = try crashy.waitForExit(5000);
 
-    const crash_detected_ns = platform.monotonicNanos();
+    const crash_detected_ns = Clock.monotonicNanosStable();
 
     // Allow the broker's heartbeat checker to notice the dead service.
     // Default heartbeat timeout is 10 s; we wait a bit longer to be safe.
@@ -58,7 +59,7 @@ test "service recovery time after crash" {
     });
     try harness.waitForServiceReady(replacement, 5000);
 
-    const recovery_ns = platform.monotonicNanos() - crash_detected_ns;
+    const recovery_ns = Clock.monotonicNanosStable() - crash_detected_ns;
 
     // Then — recovery completes within a reasonable bound.
     const recovery_ms: u64 = @intCast(@divFloor(recovery_ns, std.time.ns_per_ms));
@@ -110,7 +111,7 @@ test "service recovery time after kill" {
     // When — we forcefully kill the service.
     harness.killProcess(echo);
 
-    const kill_ns = platform.monotonicNanos();
+    const kill_ns = Clock.monotonicNanosStable();
 
     // Wait for the broker to notice via heartbeat timeout.
     platform.sleepNanos(12 * std.time.ns_per_s);
@@ -123,7 +124,7 @@ test "service recovery time after kill" {
     });
     try harness.waitForServiceReady(replacement, 5000);
 
-    const recovery_ns = platform.monotonicNanos() - kill_ns;
+    const recovery_ns = Clock.monotonicNanosStable() - kill_ns;
 
     // Then — record the recovery time.
     const recovery_ms: u64 = @intCast(@divFloor(recovery_ns, std.time.ns_per_ms));
@@ -204,10 +205,10 @@ test "broker recovery - cross-broker messaging resumes after restart" {
         .broker_node_id = 1,
         .extra_args = &.{
             "--target-service", "echo",
-            "--message-count", "1000",
-            "--message-size",  "128",
-            "--warmup-count",  "100",
-            "--result-file",   baseline_result_path,
+            "--message-count",  "1000",
+            "--message-size",   "128",
+            "--warmup-count",   "100",
+            "--result-file",    baseline_result_path,
         },
     });
     try harness.waitForServiceReady(baseline_ping, 5000);
@@ -219,7 +220,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     try harness.stopProcess(echo);
     try harness.stopProcess(broker_b);
 
-    const stop_ns = platform.monotonicNanos();
+    const stop_ns = Clock.monotonicNanosStable();
 
     platform.sleepNanos(2 * std.time.ns_per_s);
 
@@ -242,7 +243,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     });
     try harness.waitForServiceReady(echo2, 5000);
 
-    const recovery_ns = platform.monotonicNanos() - stop_ns;
+    const recovery_ns = Clock.monotonicNanosStable() - stop_ns;
 
     // Then — cross-broker messaging works again.
     const recovered_result_path = try std.fmt.allocPrint(
@@ -258,10 +259,10 @@ test "broker recovery - cross-broker messaging resumes after restart" {
         .broker_node_id = 1,
         .extra_args = &.{
             "--target-service", "echo",
-            "--message-count", "1000",
-            "--message-size",  "128",
-            "--warmup-count",  "100",
-            "--result-file",   recovered_result_path,
+            "--message-count",  "1000",
+            "--message-size",   "128",
+            "--warmup-count",   "100",
+            "--result-file",    recovered_result_path,
         },
     });
     try harness.waitForServiceReady(recovery_ping, 5000);
@@ -347,10 +348,10 @@ test "broker recovery - local services survive remote broker restart" {
         .broker_node_id = 1,
         .extra_args = &.{
             "--target-service", "echo",
-            "--message-count", "5000",
-            "--message-size",  "128",
-            "--warmup-count",  "500",
-            "--result-file",   result_path,
+            "--message-count",  "5000",
+            "--message-size",   "128",
+            "--warmup-count",   "500",
+            "--result-file",    result_path,
         },
     });
     try harness.waitForServiceReady(ping, 5000);
@@ -395,12 +396,12 @@ test "rapid service restart recovery" {
             .executable_name = "brz-test-echo-service",
             .service_name = "rapid",
             .extra_args = &.{"--quiet"},
-    });
+        });
         try harness.waitForServiceReady(svc, 5000);
 
         harness.killProcess(svc);
 
-        const iter_start = platform.monotonicNanos();
+        const iter_start = Clock.monotonicNanosStable();
 
         // Heartbeat timeout before re-registration.
         platform.sleepNanos(12 * std.time.ns_per_s);
@@ -409,10 +410,10 @@ test "rapid service restart recovery" {
             .executable_name = "brz-test-echo-service",
             .service_name = "rapid",
             .extra_args = &.{"--quiet"},
-    });
+        });
         try harness.waitForServiceReady(replacement, 5000);
 
-        const iter_recovery_ns = platform.monotonicNanos() - iter_start;
+        const iter_recovery_ns = Clock.monotonicNanosStable() - iter_start;
         total_recovery_ns += iter_recovery_ns;
 
         const iter_ms: u64 = @intCast(@divFloor(iter_recovery_ns, std.time.ns_per_ms));

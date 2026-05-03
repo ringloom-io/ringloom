@@ -25,9 +25,10 @@ const mem = std.mem;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
-const io_compat = @import("io_compat.zig");
+const test_io = @import("io.zig");
 const log_capture = @import("log_capture.zig");
 const LogCapture = log_capture.LogCapture;
+const Clock = @import("brz_common").platform.Clock;
 
 /// The lifecycle state of a managed child process.
 pub const ProcessState = enum {
@@ -90,11 +91,11 @@ pub const ProcessHandle = struct {
         errdefer allocator.free(stderr_path);
 
         // Open log files for mirroring pipe output.
-        const stdout_file = try io_compat.createFile(stdout_path, .{ .truncate = true });
-        errdefer stdout_file.close(io_compat.io());
+        const stdout_file = try test_io.createFile(stdout_path, .{ .truncate = true });
+        errdefer stdout_file.close(test_io.io());
 
-        const stderr_file = try io_compat.createFile(stderr_path, .{ .truncate = true });
-        errdefer stderr_file.close(io_compat.io());
+        const stderr_file = try test_io.createFile(stderr_path, .{ .truncate = true });
+        errdefer stderr_file.close(test_io.io());
 
         // Build the argv array: [exe_path] ++ args.
         var argv: std.ArrayList([]const u8) = .empty;
@@ -104,7 +105,7 @@ pub const ProcessHandle = struct {
             try argv.append(allocator, arg);
         }
 
-        const child = try std.process.spawn(io_compat.io(), .{
+        const child = try std.process.spawn(test_io.io(), .{
             .argv = argv.items,
             .stdout = .pipe,
             .stderr = .pipe,
@@ -174,7 +175,7 @@ pub const ProcessHandle = struct {
 
         // Mirror to the log file.
         if (self.stdout_file) |f| {
-            f.writeStreamingAll(io_compat.io(), data) catch {};
+            f.writeStreamingAll(test_io.io(), data) catch {};
         }
 
         return n;
@@ -205,7 +206,7 @@ pub const ProcessHandle = struct {
 
         // Mirror to the stderr log file.
         if (self.stderr_file) |f| {
-            f.writeStreamingAll(io_compat.io(), data) catch {};
+            f.writeStreamingAll(test_io.io(), data) catch {};
         }
 
         return n;
@@ -271,9 +272,9 @@ pub const ProcessHandle = struct {
     /// Returns the exit code on success.  Returns `error.Timeout` if
     /// the child did not exit within the specified duration.
     pub fn waitForExit(self: *ProcessHandle, timeout_ms: u64) !u32 {
-        const deadline_ns: i128 = io_compat.monotonicNanos() + @as(i128, timeout_ms) * std.time.ns_per_ms;
+        const deadline_ns: i128 = @as(i128, Clock.monotonicNanosStable()) + @as(i128, timeout_ms) * std.time.ns_per_ms;
 
-        while (io_compat.monotonicNanos() < deadline_ns) {
+        while (Clock.monotonicNanosStable() < deadline_ns) {
             // Drain any pending stdout so logs are up-to-date.
             _ = self.drainAvailableOutput() catch {};
 
@@ -281,7 +282,7 @@ pub const ProcessHandle = struct {
                 return self.collectExitCode();
             }
 
-            io_compat.sleepMs(50);
+            test_io.sleepMs(50);
         }
 
         return error.Timeout;
@@ -312,13 +313,13 @@ pub const ProcessHandle = struct {
         // Ensure the child is not left behind.
         if (self.state != .exited and self.state != .created) {
             if (self.child) |*child| {
-                child.kill(io_compat.io());
+                child.kill(test_io.io());
                 self.state = .exited;
             }
         }
 
-        if (self.stdout_file) |f| f.close(io_compat.io());
-        if (self.stderr_file) |f| f.close(io_compat.io());
+        if (self.stdout_file) |f| f.close(test_io.io());
+        if (self.stderr_file) |f| f.close(test_io.io());
 
         self.stdout_capture.deinit();
 
@@ -438,8 +439,8 @@ test "spawn and wait for a trivial child process" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     // When — spawn `echo hello` which exits immediately.
     var handle = try ProcessHandle.spawn(
@@ -462,8 +463,8 @@ test "stdout capture accumulates output from child" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-capture";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     // When — spawn a child that writes a known string to stdout.
     var handle = try ProcessHandle.spawn(
@@ -489,8 +490,8 @@ test "kill terminates a long-running child" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-kill";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     // Spawn `sleep 300` — will run for 5 minutes unless killed.
     var handle = try ProcessHandle.spawn(
@@ -508,7 +509,7 @@ test "kill terminates a long-running child" {
     handle.kill();
 
     // Then — after kill + short wait the process must be gone.
-    io_compat.sleepMs(100);
+    test_io.sleepMs(100);
     try std.testing.expect(!handle.isAlive());
 }
 
@@ -517,8 +518,8 @@ test "stop sends SIGTERM to a running child" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-stop";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -549,8 +550,8 @@ test "markReady transitions state from spawned to ready" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-ready";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -575,8 +576,8 @@ test "setConfigPath stores and replaces config path" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-cfg";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -605,8 +606,8 @@ test "waitForExit returns Timeout when child does not exit" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-timeout";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -629,8 +630,8 @@ test "stdout log file is written alongside pipe capture" {
     const allocator = std.testing.allocator;
 
     const logs_dir = "/tmp/brz-test-process-runner-logfile";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -646,12 +647,12 @@ test "stdout log file is written alongside pipe capture" {
 
     // Flush and close the stdout log file so we can read it.
     if (handle.stdout_file) |f| {
-        f.close(io_compat.io());
+        f.close(test_io.io());
         handle.stdout_file = null;
     }
 
     // Then — the log file should contain the echoed text.
-    const content = try io_compat.readFileAlloc(allocator, handle.stdout_path, 256);
+    const content = try test_io.readFileAlloc(allocator, handle.stdout_path, 256);
     defer allocator.free(content);
     try std.testing.expect(mem.indexOf(u8, content, "log-output-check") != null);
 }

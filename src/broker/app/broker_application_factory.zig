@@ -25,12 +25,20 @@ const ConfigError = config_loader_mod.ConfigError;
 /// - map startup failures to process exit codes
 pub const BrokerApplicationFactory = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: ?*const std.process.Environ.Map,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator) Self {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        environ_map: ?*const std.process.Environ.Map,
+    ) Self {
         return .{
             .allocator = allocator,
+            .io = io,
+            .environ_map = environ_map,
         };
     }
 
@@ -40,7 +48,7 @@ pub const BrokerApplicationFactory = struct {
     /// 1. explicit `config_path`, if provided
     /// 2. environment/default behavior implemented by `ConfigLoader.load()`
     pub fn loadConfig(self: *const Self, config_path: ?[]const u8) ConfigError!BrokerConfig {
-        var loader = ConfigLoader.init(self.allocator);
+        var loader = ConfigLoader.init(self.allocator, self.io, self.environ_map);
 
         if (config_path) |path| {
             return loader.loadFromFile(path);
@@ -131,7 +139,7 @@ test "factory loads config from explicit path" {
     const tmp_abs = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(tmp_abs);
 
-    var factory = BrokerApplicationFactory.init(testing.allocator);
+    var factory = BrokerApplicationFactory.init(testing.allocator, testing.io, null);
 
     const file_path = try std.fmt.allocPrint(
         testing.allocator,

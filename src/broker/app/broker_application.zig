@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = @import("../net_compat.zig");
+const net = @import("brz_tcp").socket;
 
 const brz_common = @import("brz_common");
 const config_mod = @import("brz_common").config.broker_config;
@@ -45,6 +45,7 @@ var g_shutdown_signal: std.atomic.Value(bool) = std.atomic.Value(bool).init(fals
 
 pub const BrokerApplication = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: BrokerConfig,
 
     broker_metadata: ?BrokerMetadataFile = null,
@@ -75,9 +76,10 @@ pub const BrokerApplication = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, config: BrokerConfig) !Self {
+    pub fn init(allocator: std.mem.Allocator, config: BrokerConfig, io: std.Io) !Self {
         var self = Self{
             .allocator = allocator,
+            .io = io,
             .config = config,
         };
 
@@ -85,16 +87,24 @@ pub const BrokerApplication = struct {
         return self;
     }
 
-    pub fn initFromDefaultConfig(allocator: std.mem.Allocator) !Self {
-        var loader = ConfigLoader.init(allocator);
+    pub fn initFromDefaultConfig(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        environ_map: ?*const std.process.Environ.Map,
+    ) !Self {
+        var loader = ConfigLoader.init(allocator, io, environ_map);
         const config = try loader.load();
-        return Self.init(allocator, config);
+        return Self.init(allocator, config, io);
     }
 
-    pub fn initFromConfigFile(allocator: std.mem.Allocator, path: []const u8) !Self {
-        var loader = ConfigLoader.init(allocator);
+    pub fn initFromConfigFile(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        path: []const u8,
+    ) !Self {
+        var loader = ConfigLoader.init(allocator, io, null);
         const config = try loader.loadFromFile(path);
-        return Self.init(allocator, config);
+        return Self.init(allocator, config, io);
     }
 
     pub fn deinit(self: *Self) void {
@@ -172,7 +182,7 @@ pub const BrokerApplication = struct {
         while (!self.shutdown_requested.load(.acquire) and
             !g_shutdown_signal.load(.acquire))
         {
-            std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(50), .awake) catch unreachable;
+            std.Io.sleep(self.io, .fromMilliseconds(50), .awake) catch unreachable;
         }
 
         return @intFromEnum(ExitCode.success);
@@ -356,7 +366,7 @@ pub const BrokerApplication = struct {
     fn logStartup(self: *const Self) void {
         // stdout marker — the e2e test harness polls stdout for "broker started".
         var buf: [4096]u8 = undefined;
-        var stdout_w = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &buf);
+        var stdout_w = std.Io.File.stdout().writer(self.io, &buf);
         const stdout = &stdout_w.interface;
         stdout.print("broker started: node_id={}, bind={s}:{}, group={s}\n", .{
             self.config.node_id,
@@ -449,7 +459,7 @@ test "BrokerApplication initializes and can request shutdown" {
         .storage_path = "/tmp",
     };
 
-    var app = try BrokerApplication.init(allocator, config);
+    var app = try BrokerApplication.init(allocator, config, std.testing.io);
     defer app.deinit();
 
     try std.testing.expect(!app.shutdown_requested.load(.acquire));

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const clock = @import("../platform/clock.zig");
+const platform_io = @import("../platform/io.zig");
 const MonitoringSnapshot = @import("monitoring.zig").MonitoringSnapshot;
 const SystemCounters = @import("system_counters.zig").SystemCounters;
 const ErrorLog = @import("../concurrent/error_log.zig").ErrorLog;
@@ -43,7 +44,7 @@ pub const PeriodicMonitoringDump = struct {
 
         const snapshot = MonitoringSnapshot.take(self.node_id, self.counters, self.error_log);
         var dump_buf: [4096]u8 = undefined;
-        const io = std.Io.Threaded.global_single_threaded.io();
+        const io = platform_io.default();
         var stderr_w = std.Io.File.stderr().writer(io, &dump_buf);
         snapshot.dump(&stderr_w.interface) catch {};
         stderr_w.interface.flush() catch {};

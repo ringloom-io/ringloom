@@ -12,7 +12,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
-const io_compat = @import("io_compat.zig");
+const test_io = @import("io.zig");
 
 /// Captures the outcome of a single performance benchmark scenario.
 pub const PerfResult = struct {
@@ -57,7 +57,7 @@ pub fn writePerfResult(allocator: Allocator, dir_path: []const u8, result: PerfR
     const json = try formatPerfResultJson(allocator, result);
     defer allocator.free(json);
 
-    try io_compat.writeFile(file_name, json);
+    try test_io.writeFile(file_name, json);
 
     return file_name;
 }
@@ -77,7 +77,7 @@ pub fn writeCorrectnessResult(allocator: Allocator, dir_path: []const u8, result
     const json = try formatCorrectnessResultJson(allocator, result);
     defer allocator.free(json);
 
-    try io_compat.writeFile(file_name, json);
+    try test_io.writeFile(file_name, json);
 
     return file_name;
 }
@@ -161,7 +161,7 @@ fn formatCorrectnessResultJson(allocator: Allocator, r: CorrectnessResult) ![]co
 /// Reads a JSON result file and returns the raw content.  Utility for
 /// tests that need to verify written output.
 fn readFileContent(allocator: Allocator, path: []const u8) ![]const u8 {
-    return io_compat.readFileAlloc(allocator, path, 1024 * 1024);
+    return test_io.readFileAlloc(allocator, path, 1024 * 1024);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -171,8 +171,8 @@ test "writePerfResult creates valid JSON file" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-result-writer-perf";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const result = PerfResult{
         .suite = "ipc",
@@ -215,8 +215,8 @@ test "writePerfResult file is named suite_scenario.json" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-result-writer-name";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const result = PerfResult{
         .suite = "throughput",
@@ -249,8 +249,8 @@ test "writeCorrectnessResult creates JSON for passing test" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-result-writer-pass";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const result = CorrectnessResult{
         .scenario = "single_broker_two_services",
@@ -278,8 +278,8 @@ test "writeCorrectnessResult creates JSON for failing test" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-result-writer-fail";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const result = CorrectnessResult{
         .scenario = "broker_failover",
@@ -305,8 +305,8 @@ test "writeCorrectnessResult file is named scenario.json" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-result-writer-cname";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const result = CorrectnessResult{
         .scenario = "heartbeat_recovery",

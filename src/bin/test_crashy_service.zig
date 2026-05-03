@@ -25,12 +25,13 @@ const RingBuffer = brz_common.concurrent.ring_buffer.RingBuffer;
 
 var received_count: u64 = 0;
 var crash_after_messages: u64 = 0;
+var runtime_io: std.Io = undefined;
 
 fn messageHandler(_: i32, payload: []const u8) void {
     received_count += 1;
 
     var buf: [512]u8 = undefined;
-    var stdout_w = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &buf);
+    var stdout_w = std.Io.File.stdout().writer(runtime_io, &buf);
     const stdout = &stdout_w.interface;
     stdout.print("crashy: received msg {d}, len={d}\n", .{ received_count, payload.len }) catch {};
     stdout.flush() catch {};
@@ -69,6 +70,7 @@ fn parseIntArg(comptime T: type, args: []const [:0]const u8, flag: []const u8, d
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+    runtime_io = io;
     var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
     const allocator = switch (builtin.mode) {
         .Debug, .ReleaseSafe => debug_alloc.allocator(),

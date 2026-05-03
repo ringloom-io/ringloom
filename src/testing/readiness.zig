@@ -19,10 +19,11 @@
 const std = @import("std");
 const time = std.time;
 
-const io_compat = @import("io_compat.zig");
+const test_io = @import("io.zig");
 const process_runner = @import("process_runner.zig");
 const ProcessHandle = process_runner.ProcessHandle;
 const ProcessState = process_runner.ProcessState;
+const Clock = @import("brz_common").platform.Clock;
 
 /// Default polling interval used by wait functions (50 ms).
 pub const default_poll_interval_ms: u64 = 50;
@@ -38,9 +39,9 @@ pub const default_poll_interval_ms: u64 = 50;
 /// Returns `error.ProcessExited` if the child exits before the needle
 /// is detected.
 pub fn waitForLogLine(handle: *ProcessHandle, needle: []const u8, timeout_ms: u64) !void {
-    const deadline_ns: i128 = io_compat.monotonicNanos() + @as(i128, timeout_ms) * time.ns_per_ms;
+    const deadline_ns: i128 = @as(i128, Clock.monotonicNanosStable()) + @as(i128, timeout_ms) * time.ns_per_ms;
 
-    while (io_compat.monotonicNanos() < deadline_ns) {
+    while (Clock.monotonicNanosStable() < deadline_ns) {
         // Drain any bytes that have accumulated on the pipe.
         _ = handle.drainAvailableOutput() catch {};
 
@@ -62,7 +63,7 @@ pub fn waitForLogLine(handle: *ProcessHandle, needle: []const u8, timeout_ms: u6
             return error.ProcessExited;
         }
 
-        io_compat.sleepMs(default_poll_interval_ms);
+        test_io.sleepMs(default_poll_interval_ms);
     }
 
     return error.Timeout;
@@ -76,14 +77,14 @@ pub fn waitForLogLine(handle: *ProcessHandle, needle: []const u8, timeout_ms: u6
 ///
 /// Returns `error.Timeout` if the file does not appear within `timeout_ms`.
 pub fn waitForFileExists(path: []const u8, timeout_ms: u64) !void {
-    const deadline_ns: i128 = io_compat.monotonicNanos() + @as(i128, timeout_ms) * time.ns_per_ms;
+    const deadline_ns: i128 = @as(i128, Clock.monotonicNanosStable()) + @as(i128, timeout_ms) * time.ns_per_ms;
 
-    while (io_compat.monotonicNanos() < deadline_ns) {
-        if (io_compat.access(path)) |_| {
+    while (Clock.monotonicNanosStable() < deadline_ns) {
+        if (test_io.access(path)) |_| {
             return;
         } else |_| {}
 
-        io_compat.sleepMs(default_poll_interval_ms);
+        test_io.sleepMs(default_poll_interval_ms);
     }
 
     return error.Timeout;
@@ -97,14 +98,14 @@ pub fn waitForFileExists(path: []const u8, timeout_ms: u64) !void {
 ///
 /// Returns `error.Timeout` if the condition is not met within `timeout_ms`.
 pub fn waitForDirectoryPopulated(path: []const u8, min_entries: usize, timeout_ms: u64) !void {
-    const deadline_ns: i128 = io_compat.monotonicNanos() + @as(i128, timeout_ms) * time.ns_per_ms;
+    const deadline_ns: i128 = @as(i128, Clock.monotonicNanosStable()) + @as(i128, timeout_ms) * time.ns_per_ms;
 
-    while (io_compat.monotonicNanos() < deadline_ns) {
+    while (Clock.monotonicNanosStable() < deadline_ns) {
         if (countDirectoryEntries(path)) |count| {
             if (count >= min_entries) return;
         } else |_| {}
 
-        io_compat.sleepMs(default_poll_interval_ms);
+        test_io.sleepMs(default_poll_interval_ms);
     }
 
     return error.Timeout;
@@ -122,11 +123,11 @@ pub fn waitForCondition(
     poll_interval_ms: u64,
 ) !void {
     const interval = if (poll_interval_ms == 0) default_poll_interval_ms else poll_interval_ms;
-    const deadline_ns: i128 = io_compat.monotonicNanos() + @as(i128, timeout_ms) * time.ns_per_ms;
+    const deadline_ns: i128 = @as(i128, Clock.monotonicNanosStable()) + @as(i128, timeout_ms) * time.ns_per_ms;
 
-    while (io_compat.monotonicNanos() < deadline_ns) {
+    while (Clock.monotonicNanosStable() < deadline_ns) {
         if (condition_fn()) return;
-        io_compat.sleepMs(interval);
+        test_io.sleepMs(interval);
     }
 
     return error.Timeout;
@@ -144,11 +145,11 @@ pub fn waitForConditionCtx(
     poll_interval_ms: u64,
 ) !void {
     const interval = if (poll_interval_ms == 0) default_poll_interval_ms else poll_interval_ms;
-    const deadline_ns: i128 = io_compat.monotonicNanos() + @as(i128, timeout_ms) * time.ns_per_ms;
+    const deadline_ns: i128 = @as(i128, Clock.monotonicNanosStable()) + @as(i128, timeout_ms) * time.ns_per_ms;
 
-    while (io_compat.monotonicNanos() < deadline_ns) {
+    while (Clock.monotonicNanosStable() < deadline_ns) {
         if (condition_fn(context)) return;
-        io_compat.sleepMs(interval);
+        test_io.sleepMs(interval);
     }
 
     return error.Timeout;
@@ -160,9 +161,9 @@ pub fn waitForConditionCtx(
 ///
 /// Scans the process's stdout for `"broker started"` or `"broker ready"`.
 pub fn waitForBrokerReady(handle: *ProcessHandle, timeout_ms: u64) !void {
-    const deadline_ns: i128 = io_compat.monotonicNanos() + @as(i128, timeout_ms) * time.ns_per_ms;
+    const deadline_ns: i128 = @as(i128, Clock.monotonicNanosStable()) + @as(i128, timeout_ms) * time.ns_per_ms;
 
-    while (io_compat.monotonicNanos() < deadline_ns) {
+    while (Clock.monotonicNanosStable() < deadline_ns) {
         _ = handle.drainAvailableOutput() catch {};
 
         if (handle.stdout_capture.contains("broker started") or
@@ -183,7 +184,7 @@ pub fn waitForBrokerReady(handle: *ProcessHandle, timeout_ms: u64) !void {
             return error.ProcessExited;
         }
 
-        io_compat.sleepMs(default_poll_interval_ms);
+        test_io.sleepMs(default_poll_interval_ms);
     }
 
     return error.Timeout;
@@ -193,9 +194,9 @@ pub fn waitForBrokerReady(handle: *ProcessHandle, timeout_ms: u64) !void {
 ///
 /// Scans the process's stdout for `"service ready"` or `"service registered"`.
 pub fn waitForServiceReady(handle: *ProcessHandle, timeout_ms: u64) !void {
-    const deadline_ns: i128 = io_compat.monotonicNanos() + @as(i128, timeout_ms) * time.ns_per_ms;
+    const deadline_ns: i128 = @as(i128, Clock.monotonicNanosStable()) + @as(i128, timeout_ms) * time.ns_per_ms;
 
-    while (io_compat.monotonicNanos() < deadline_ns) {
+    while (Clock.monotonicNanosStable() < deadline_ns) {
         _ = handle.drainAvailableOutput() catch {};
 
         if (handle.stdout_capture.contains("service ready") or
@@ -216,7 +217,7 @@ pub fn waitForServiceReady(handle: *ProcessHandle, timeout_ms: u64) !void {
             return error.ProcessExited;
         }
 
-        io_compat.sleepMs(default_poll_interval_ms);
+        test_io.sleepMs(default_poll_interval_ms);
     }
 
     return error.Timeout;
@@ -234,9 +235,9 @@ pub fn waitForAllReady(
 ) !void {
     std.debug.assert(handles.len == needles.len);
 
-    const deadline_ns: i128 = io_compat.monotonicNanos() + @as(i128, timeout_ms) * time.ns_per_ms;
+    const deadline_ns: i128 = @as(i128, Clock.monotonicNanosStable()) + @as(i128, timeout_ms) * time.ns_per_ms;
 
-    while (io_compat.monotonicNanos() < deadline_ns) {
+    while (Clock.monotonicNanosStable() < deadline_ns) {
         var all_ready = true;
 
         for (handles, 0..) |handle, i| {
@@ -252,7 +253,7 @@ pub fn waitForAllReady(
 
         if (all_ready) return;
 
-        io_compat.sleepMs(default_poll_interval_ms);
+        test_io.sleepMs(default_poll_interval_ms);
     }
 
     return error.Timeout;
@@ -261,12 +262,12 @@ pub fn waitForAllReady(
 // ── Internal helpers ─────────────────────────────────────────────────
 
 fn countDirectoryEntries(path: []const u8) !usize {
-    var dir = try io_compat.openDir(path, .{ .iterate = true });
-    defer dir.close(io_compat.io());
+    var dir = try test_io.openDir(path, .{ .iterate = true });
+    defer dir.close(test_io.io());
 
     var count: usize = 0;
     var iter = dir.iterate();
-    while (try iter.next(io_compat.io())) |_| {
+    while (try iter.next(test_io.io())) |_| {
         count += 1;
     }
     return count;
@@ -277,9 +278,9 @@ fn countDirectoryEntries(path: []const u8) !usize {
 test "waitForFileExists succeeds when file already exists" {
     // Given — create a temporary file.
     const tmp_path = "/tmp/brz-test-readiness-exists.marker";
-    var file = try io_compat.createFile(tmp_path, .{});
-    file.close(io_compat.io());
-    defer io_compat.deleteFile(tmp_path) catch {};
+    var file = try test_io.createFile(tmp_path, .{});
+    file.close(test_io.io());
+    defer test_io.deleteFile(tmp_path) catch {};
 
     // When / Then — should return immediately (well within timeout).
     try waitForFileExists(tmp_path, 1000);
@@ -299,14 +300,14 @@ test "waitForFileExists returns Timeout for missing file" {
 test "waitForDirectoryPopulated succeeds when directory has entries" {
     // Given
     const dir_path = "/tmp/brz-test-readiness-populated";
-    try io_compat.createDirPath(dir_path);
-    defer io_compat.deleteTree(dir_path) catch {};
+    try test_io.createDirPath(dir_path);
+    defer test_io.deleteTree(dir_path) catch {};
 
     // Create two marker files.
-    var f1 = try io_compat.createFile("/tmp/brz-test-readiness-populated/a.txt", .{});
-    f1.close(io_compat.io());
-    var f2 = try io_compat.createFile("/tmp/brz-test-readiness-populated/b.txt", .{});
-    f2.close(io_compat.io());
+    var f1 = try test_io.createFile("/tmp/brz-test-readiness-populated/a.txt", .{});
+    f1.close(test_io.io());
+    var f2 = try test_io.createFile("/tmp/brz-test-readiness-populated/b.txt", .{});
+    f2.close(test_io.io());
 
     // When / Then — require at least 2 entries.
     try waitForDirectoryPopulated(dir_path, 2, 1000);
@@ -315,12 +316,12 @@ test "waitForDirectoryPopulated succeeds when directory has entries" {
 test "waitForDirectoryPopulated returns Timeout when not enough entries" {
     // Given
     const dir_path = "/tmp/brz-test-readiness-underpop";
-    try io_compat.createDirPath(dir_path);
-    defer io_compat.deleteTree(dir_path) catch {};
+    try test_io.createDirPath(dir_path);
+    defer test_io.deleteTree(dir_path) catch {};
 
     // Only one file, but we require 5.
-    var f = try io_compat.createFile("/tmp/brz-test-readiness-underpop/only.txt", .{});
-    f.close(io_compat.io());
+    var f = try test_io.createFile("/tmp/brz-test-readiness-underpop/only.txt", .{});
+    f.close(test_io.io());
 
     // When
     const result = waitForDirectoryPopulated(dir_path, 5, 150);
@@ -373,8 +374,8 @@ test "waitForLogLine detects marker in echo output" {
     // Given
     const allocator = std.testing.allocator;
     const logs_dir = "/tmp/brz-test-readiness-logline";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     // Spawn a process that prints a known marker line.
     var handle = try ProcessHandle.spawn(
@@ -397,8 +398,8 @@ test "waitForLogLine returns ProcessExited when child dies without marker" {
     // Given
     const allocator = std.testing.allocator;
     const logs_dir = "/tmp/brz-test-readiness-nolog";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     // Spawn a process that prints something *other* than the expected marker.
     var handle = try ProcessHandle.spawn(
@@ -411,7 +412,7 @@ test "waitForLogLine returns ProcessExited when child dies without marker" {
     defer handle.deinit();
 
     // Give the process a moment to finish.
-    io_compat.sleepMs(200);
+    test_io.sleepMs(200);
 
     // When
     const result = waitForLogLine(&handle, "broker started", 1000);
@@ -424,8 +425,8 @@ test "waitForBrokerReady detects broker started marker" {
     // Given
     const allocator = std.testing.allocator;
     const logs_dir = "/tmp/brz-test-readiness-broker";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,
@@ -445,8 +446,8 @@ test "waitForServiceReady detects service registered marker" {
     // Given
     const allocator = std.testing.allocator;
     const logs_dir = "/tmp/brz-test-readiness-service";
-    try io_compat.createDirPath(logs_dir);
-    defer io_compat.deleteTree(logs_dir) catch {};
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
 
     var handle = try ProcessHandle.spawn(
         allocator,

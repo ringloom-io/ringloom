@@ -13,6 +13,7 @@ pub const io_engine = @import("io_engine.zig");
 pub const frame = @import("frame.zig");
 pub const handshake = @import("handshake.zig");
 pub const socket_config = @import("socket_config.zig");
+pub const socket = @import("socket.zig");
 pub const connection_manager = @import("connection_manager.zig");
 pub const transport = @import("transport.zig");
 
@@ -22,6 +23,7 @@ pub const Completion = io_engine.Completion;
 pub const FrameHeader = frame.FrameHeader;
 pub const HandshakeFrame = handshake.HandshakeFrame;
 pub const SocketConfig = socket_config.SocketConfig;
+pub const Address = socket.Address;
 pub const ConnectionState = connection_manager.ConnectionState;
 pub const PeerConnection = connection_manager.PeerConnection;
 pub const ConnectionManager = connection_manager.ConnectionManager;
@@ -52,6 +54,7 @@ comptime {
     _ = frame;
     _ = handshake;
     _ = socket_config;
+    _ = socket;
     _ = connection_manager;
     _ = transport;
     // Backend engines — only reference them to pull in their tests.

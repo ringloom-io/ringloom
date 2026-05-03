@@ -8,7 +8,7 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 const io_engine = @import("io_engine.zig");
-const net = @import("net_compat.zig");
+const net = @import("socket.zig");
 const socket_config_mod = @import("socket_config.zig");
 
 const ConnectionHandle = io_engine.ConnectionHandle;

@@ -34,7 +34,7 @@ const mem = std.mem;
 const Allocator = std.mem.Allocator;
 
 const harness = @import("harness.zig");
-const io_compat = @import("io_compat.zig");
+const test_io = @import("io.zig");
 const BrokerSpec = harness.BrokerSpec;
 const ServiceSpec = harness.ServiceSpec;
 const PeerSpec = harness.PeerSpec;
@@ -67,7 +67,7 @@ pub const ConfigGen = struct {
         const content = try self.formatBrokerProperties(spec, storage_path);
         defer self.allocator.free(content);
 
-        try io_compat.writeFile(file_name, content);
+        try test_io.writeFile(file_name, content);
 
         return file_name;
     }
@@ -91,7 +91,7 @@ pub const ConfigGen = struct {
         const content = try self.formatServiceProperties(spec, storage_path);
         defer self.allocator.free(content);
 
-        try io_compat.writeFile(file_name, content);
+        try test_io.writeFile(file_name, content);
 
         return file_name;
     }
@@ -187,7 +187,7 @@ pub const ConfigGen = struct {
 // ── Test helpers ─────────────────────────────────────────────────────
 
 fn readFileContent(allocator: Allocator, path: []const u8) ![]const u8 {
-    return io_compat.readFileAlloc(allocator, path, 1024 * 1024);
+    return test_io.readFileAlloc(allocator, path, 1024 * 1024);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -197,8 +197,8 @@ test "writeBrokerConfig generates valid properties file" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-broker";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = BrokerSpec{};
@@ -226,8 +226,8 @@ test "writeBrokerConfig file is named broker_<node_id>.properties" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-name";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = BrokerSpec{ .node_id = 7 };
@@ -245,8 +245,8 @@ test "writeBrokerConfig includes peer endpoints" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-peers";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const peers = [_]PeerSpec{
@@ -274,8 +274,8 @@ test "writeBrokerConfig omits peer line when no peers" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-nopeers";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = BrokerSpec{ .peers = &.{} };
@@ -296,8 +296,8 @@ test "writeBrokerConfig respects custom spec values" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-custom";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = BrokerSpec{
@@ -334,8 +334,8 @@ test "writeServiceConfig generates valid properties file" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-svc";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = ServiceSpec{
@@ -363,8 +363,8 @@ test "writeServiceConfig file is named service_<name>.properties" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-svcname";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = ServiceSpec{
@@ -385,8 +385,8 @@ test "writeServiceConfig with leader election enabled" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-svcle";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = ServiceSpec{
@@ -411,8 +411,8 @@ test "writeServiceConfig with custom broker node and group" {
     const allocator = std.testing.allocator;
 
     const tmp_dir = "/tmp/brz-test-config-gen-svccustom";
-    try io_compat.createDirPath(tmp_dir);
-    defer io_compat.deleteTree(tmp_dir) catch {};
+    try test_io.createDirPath(tmp_dir);
+    defer test_io.deleteTree(tmp_dir) catch {};
 
     const gen = ConfigGen.init(allocator);
     const spec = ServiceSpec{

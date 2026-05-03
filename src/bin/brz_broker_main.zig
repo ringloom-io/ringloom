@@ -39,14 +39,14 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(@intFromEnum(ExitCode.usage_error));
     };
 
-    var factory = BrokerApplicationFactory.init(allocator);
+    var factory = BrokerApplicationFactory.init(allocator, io, init.environ_map);
     var bootstrap = factory.create(config_path) catch |err| {
         std.log.err("failed to load broker configuration: {}", .{err});
         std.process.exit(@intFromEnum(ExitCode.config_error));
     };
     defer bootstrap.deinit();
 
-    var app = brz_broker.BrokerApplication.init(allocator, bootstrap.config) catch |err| {
+    var app = brz_broker.BrokerApplication.init(allocator, bootstrap.config, io) catch |err| {
         std.log.err("failed to initialize broker application: {}", .{err});
         std.process.exit(@intFromEnum(ExitCode.startup_error));
     };

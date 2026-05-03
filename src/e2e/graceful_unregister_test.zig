@@ -1,4 +1,5 @@
 const std = @import("std");
+const Clock = @import("brz_common").platform.Clock;
 const testing_mod = @import("brz_testing");
 const TestHarness = testing_mod.TestHarness;
 const readiness = testing_mod.readiness;
@@ -20,18 +21,18 @@ test "graceful unregister is processed faster than heartbeat timeout" {
     try harness.waitForServiceReady(echo, 5000);
 
     // When — stop echo gracefully (sends unregister control message)
-    const before_stop = @divTrunc(std.Io.Clock.real.now(std.testing.io).nanoseconds, std.time.ns_per_ms);
+    const before_stop = Clock.monotonicNanosStable();
     try harness.stopProcess(echo);
     const echo_exit = try echo.waitForExit(5000);
     try std.testing.expectEqual(@as(u32, 0), echo_exit);
 
     // Then — broker logs removal well before heartbeat timeout (10s default)
     try readiness.waitForLogLine(broker, "service unregistered", 5000);
-    const elapsed = @divTrunc(std.Io.Clock.real.now(std.testing.io).nanoseconds, std.time.ns_per_ms) - before_stop;
+    const elapsed_ms = @divTrunc(Clock.monotonicNanosStable() - before_stop, std.time.ns_per_ms);
 
     // Graceful unregister should be near-instant, certainly under 3 seconds.
     // Heartbeat timeout is 10s — if it took that long we fell back to timeout cleanup.
-    try std.testing.expect(elapsed < 3000);
+    try std.testing.expect(elapsed_ms < 3000);
 
     // Cleanup
     try harness.stopProcess(broker);

@@ -69,7 +69,7 @@ pub const MetadataDescriptorProvider = struct {
 
     /// Update the broker's heartbeat timestamp.
     pub fn updateHeartbeat(self: *MetadataDescriptorProvider) void {
-        self.broker_file.storeHeartbeat(platform.epochMillis());
+        self.broker_file.storeHeartbeat(platform.Clock.epochMillis());
     }
 
     /// Read the broker's current heartbeat timestamp.
