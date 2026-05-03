@@ -10,7 +10,7 @@
 ## Table of Contents
 
 1. [Broker Identity & Bootstrap](#1-broker-identity--bootstrap)
-2. [Aeron Channel Topology](#2-aeron-channel-topology)
+2. [TCP Peer Topology](#2-tcp-peer-topology)
 3. [Service Registration Protocol](#3-service-registration-protocol)
 4. [Service Discovery Protocol](#4-service-discovery-protocol)
 5. [Heartbeat Protocol](#5-heartbeat-protocol)
@@ -31,7 +31,7 @@
 
 ### 1.2 Bootstrap Sequence
 
-1. **Load configuration:** Read `broker.properties` (or the file specified by `broker.properties.file` system property). Parse `broker.node.id`, `broker.local.host.port`, `broker.member.host.ports`, stream IDs, and encryption settings.
+1. **Load configuration:** Read `broker.properties` (or the file specified by `broker.properties.file` system property). Parse `broker.node.id`, `broker.local.host.port`, `broker.member.host.ports`, and encryption settings.
 
 2. **Create metadata file:** Write the broker's metadata file at:
    ```
@@ -51,71 +51,69 @@
 
 3. **Initialize ring buffers:** Create the control and messages ring buffers from the metadata file's mapped memory regions. Control buffer receives service registration and heartbeat messages. Messages buffer receives cross-host messages to route.
 
-4. **Start Aeron transport** (if multi-node cluster):
-   - Start embedded media driver (if `broker.media.driver.enabled = true`).
-   - Create Aeron subscriptions and publications (see Section 2).
+4. **Start peer transport** (if multi-node cluster):
+   - Open the local TCP listener on `broker.local.host.port`.
+   - Establish or accept peer broker TCP connections (see Section 2).
 
 5. **Start agent threads:**
    - **Broker agent thread** (`BrokerAgent`): Runs scheduler tasks (heartbeat checking, admin subscriber polling) and control message processing.
-   - **Routing agent thread** (`MessageRoutingAgent`): Handles Aeron message routing subscriber (inbound from remote brokers) and message routing consumer (outbound to remote brokers).
+   - **Routing agent thread** (`MessageRoutingAgent`): Handles inbound peer TCP traffic and the outbound routing queue for remote brokers.
 
 6. **Initiate election** (if multi-node cluster): Begin broker leader election protocol (see Section 7).
 
-7. **Single-node cluster:** If `broker.member.host.ports` is empty, auto-elect self as leader. Skip Aeron transport initialization.
+7. **Single-node cluster:** If `broker.member.host.ports` is empty, auto-elect self as leader. Skip peer transport initialization.
 
 ### 1.3 Shutdown Sequence
 
 1. Close agent runners (stops both broker-agent and routing-agent threads).
-2. Close Aeron transport (publications, subscriptions, media driver).
+2. Close peer transport (listener socket and peer connections).
 3. Unmap and clean up the metadata file.
 
 ---
 
-## 2. Aeron Channel Topology
+## 2. TCP Peer Topology
 
-Aeron provides reliable UDP transport for cross-host communication between brokers. Each broker uses two Aeron stream types.
+RingLoom uses TCP for cross-host communication between brokers. Each broker maintains one logical peer link per remote node, carrying both admin traffic and routed service messages.
 
-### 2.1 Stream Types
+### 2.1 Traffic Types
 
-| Stream | Default Stream ID | Header Type | Purpose |
-|--------|-------------------|-------------|---------|
-| Admin | `100` (`broker.admin.stream.id`) | `brokerMessageHeader` (8 bytes) | Broker-to-broker cluster messages: election, heartbeat, state sync. |
-| Message | `101` (`broker.message.stream.id`) | `ringloomMessageHeader` (19 bytes) | Cross-host service message routing. |
+| Traffic | Marker | Purpose |
+|--------|--------|---------|
+| Admin | `ADMIN` flag set in the TCP frame header | Broker-to-broker cluster messages: election, heartbeat, and state sync. |
+| Message | `ADMIN` flag clear; payload carries the RingLoom message header | Cross-host service message routing. |
 
-### 2.2 Channel Format
+### 2.2 Peer Endpoint Format
 
-All Aeron channels use unicast UDP:
+Peer brokers are addressed by configured `host:port` pairs from `broker.member.host.ports`:
 
 ```
-aeron:udp?endpoint=<host>:<port>
+<host>:<port>
 ```
 
-Example: `aeron:udp?endpoint=192.168.1.10:40456`
+Example: `192.168.1.10:40456`
 
 ### 2.3 Per-Broker Resources
 
-Each broker creates the following Aeron resources:
+Each broker creates the following transport resources:
 
 | Resource | Count | Description |
 |----------|-------|-------------|
-| **Subscription** (admin) | 1 | Listens on own `host:port`, admin stream ID. Receives cluster messages from all peers. |
-| **Subscription** (message) | 1 | Listens on own `host:port`, message stream ID. Receives routed service messages from all peers. |
-| **ExclusivePublication** (admin) | 1 per peer | One publication per peer broker for sending cluster messages. Channel = peer's `host:port`, admin stream ID. |
-| **ExclusivePublication** (message) | 1 per peer | One publication per peer broker for sending routed service messages. Channel = peer's `host:port`, message stream ID. |
+| **Listener socket** | 1 | Accepts inbound peer TCP connections on the local broker endpoint. |
+| **Outbound peer connection** | 1 per peer | Sends admin and routed service messages to that peer. |
+| **Inbound peer connection** | 1 per peer | Receives admin and routed service messages from that peer. |
+| **Per-peer sender state** | 1 per peer | Tracks write queue, connection status, and reconnect state. |
 
-**ExclusivePublication** is used (not `Publication`) because each publication has a single writer thread, avoiding CAS overhead.
+### 2.4 Session Establishment
 
-### 2.4 Media Driver
-
-- **Directory:** `<ringloom_directory>/aeron/` (where `ringloom_directory = <storage_path>/<broker_group_name>`).
-- **Embedded mode** (`broker.media.driver.enabled = true`): The broker starts its own `MediaDriver` instance.
-- **External mode** (`broker.media.driver.enabled = false`): The broker connects to a pre-existing media driver at the configured directory.
+- Open the listening socket before attempting outbound connections.
+- Exchange the broker handshake when a TCP connection is established.
+- Treat a peer as connected only after handshake validation succeeds.
 
 ### 2.5 Connection Detection
 
-Aeron provides image lifecycle callbacks:
-- **Image available:** New peer broker connected. Triggers election (see Section 7).
-- **Image unavailable:** Peer broker disconnected. Triggers election (see Section 7).
+Connection state is driven by peer socket lifecycle:
+- **Connection established:** A peer handshake completes successfully. Triggers election (see Section 7).
+- **Connection lost:** A socket closes, read/write fails, or handshake validation fails. Triggers election (see Section 7).
 
 ---
 
@@ -171,7 +169,7 @@ Registration establishes the communication channel between a service and the bro
    - If leader changed, broadcast `LeaderChanged` to all local instances.
 
 5. **Notify peer brokers:**
-   - Broadcast `ServiceAdded` (templateId = 6) via the admin stream to all peer brokers.
+   - Broadcast `ServiceAdded` (templateId = 6) via the admin channel to all peer brokers.
    - This message includes `nodeId`, `serviceId`, `serviceName`, and `leaderElectionEnabled`.
 
 6. **Notify local subscribers:**
@@ -244,17 +242,17 @@ When `handleServiceRemoved(service)` is triggered:
 
 1. Unregister the service from `ServiceRegistry`.
 2. Close the `BuffersProvider` for the service's metadata file.
-3. Broadcast `ServiceRemoved` (templateId = 7) to all peer brokers via the admin stream.
+3. Broadcast `ServiceRemoved` (templateId = 7) to all peer brokers via the admin channel.
 4. Send updated `ServiceInstances` (empty or reduced list) to all local subscribers of this service name.
 5. Re-evaluate service leader election if the removed service was a leader or leader election was enabled (see Section 8).
 
 ### 5.4 Broker-to-Broker Heartbeat
 
-Brokers send `BrokerHeartbeat` messages to peer brokers via the admin Aeron stream (stream ID `100`) to detect cluster-member failures.
+Brokers send `BrokerHeartbeat` messages to peer brokers via admin TCP frames to detect cluster-member failures.
 
 - **Message:** `BrokerHeartbeat` (broker `templateId = 4`, see spec-wire-protocol.md Section 3 for broker message schemas).
 - **Frequency:** Sent periodically by the broker admin scheduler, piggy-backed onto the scheduler's normal duty cycle.
-- **Detection:** Failure to receive Aeron images (i.e., Aeron "image unavailable" event) is the primary partition-detection mechanism. The explicit `BrokerHeartbeat` message serves as a liveness signal used in leader election logic (see Section 7).
+- **Detection:** Lost peer connections are the primary partition-detection mechanism. The explicit `BrokerHeartbeat` message serves as a liveness signal used in leader election logic (see Section 7).
 - **Handling:** Received `BrokerHeartbeat` messages update the per-peer liveness state in `NodeMembership`.
 
 ### 5.5 Timeout Configuration
@@ -277,9 +275,9 @@ When `targetNodeId == sourceNodeId` (both services on the same broker):
 
 ```
 ┌──────────┐                    ┌──────────┐
-│ Service A │───IpcProducer────►│ Service B │
-│           │  (direct ring     │           │
-│           │   buffer write)   │           │
+│ Service A│───IpcProducer────► │ Service B│
+│          │  (direct ring      │          │
+│          │   buffer write)    │          │
 └──────────┘                    └──────────┘
 ```
 
@@ -293,10 +291,10 @@ When `targetNodeId == sourceNodeId` (both services on the same broker):
 When `targetNodeId != sourceNodeId` (services on different brokers):
 
 ```
-┌──────────┐         ┌──────────┐         ┌──────────┐         ┌──────────┐
-│ Service A │──IPC──►│ Broker 1  │──Aeron──►│ Broker 2  │──IPC──►│ Service B │
-│ (Node 1)  │        │ (Node 1)  │  (UDP)   │ (Node 2)  │        │ (Node 2)  │
-└──────────┘         └──────────┘         └──────────┘         └──────────┘
+┌──────────┐         ┌──────────┐          ┌──────────┐         ┌──────────┐
+│ Service A│──IPC──► │ Broker 1 │──TCP────►│ Broker 2 │──IPC──► │ Service B│
+│ (Node 1) │         │ (Node 1) │ (framed) │ (Node 2) │         │ (Node 2) │
+└──────────┘         └──────────┘          └──────────┘         └──────────┘
 ```
 
 **Sending side (Broker 1):**
@@ -304,13 +302,13 @@ When `targetNodeId != sourceNodeId` (services on different brokers):
 1. Service A writes to Broker 1's **messages ring buffer** with `targetNodeId = 2` and `targetServiceId = B's ID`.
 2. `MessageRoutingConsumer` polls Broker 1's messages ring buffer.
 3. For each message, parse the `targetNodeId` from the RingLoom header.
-4. Look up the `AeronProducer` (ExclusivePublication) for the target node.
-5. `MessageRoutingPublisher` forwards the message via the Aeron message stream.
+4. Look up the peer sender for the target node.
+5. `MessageRoutingPublisher` forwards the message as a framed TCP payload on the peer connection.
 6. If transport encryption is enabled, encrypt the payload before sending (RingLoom header remains plaintext).
 
 **Receiving side (Broker 2):**
 
-1. `MessageRoutingSubscriber` polls the Aeron message stream subscription.
+1. The receiver event loop reads framed messages from the peer TCP connection.
 2. For each received message, parse the `targetServiceId` from the RingLoom header.
 3. If transport encryption is enabled, decrypt the payload.
 4. Look up the target service's `BuffersProvider` (messages ring buffer) via `targetServiceId`.
@@ -324,12 +322,12 @@ The routing decision is made solely by the `targetNodeId` field in the RingLoom 
 | Condition | Action |
 |-----------|--------|
 | `targetNodeId == localNodeId` | Should not reach broker's message ring buffer (direct IPC). However, if it does, the broker delivers locally. |
-| `targetNodeId != localNodeId` | Forward via Aeron to the target broker. |
+| `targetNodeId != localNodeId` | Forward via the peer TCP connection to the target broker. |
 
 ### 6.4 Message Ordering
 
 - **Same-host (IPC):** Messages from a single producer to a single consumer are delivered in FIFO order (ring buffer guarantees).
-- **Cross-host (Aeron):** Messages are delivered in the order they are offered to the Aeron publication. Aeron provides reliable, ordered delivery per stream.
+- **Cross-host (TCP):** Messages are delivered in the order they are written to a peer connection. TCP provides reliable, ordered delivery per connection.
 - **Multi-producer:** When multiple services send to the same target, ordering between different senders is determined by the ring buffer CAS ordering (not guaranteed to match wall-clock time).
 
 ---
@@ -341,16 +339,16 @@ The broker cluster uses a Bully algorithm variant to elect a cluster leader. The
 ### 7.1 Election Triggers
 
 An election is initiated when:
-- An Aeron **image becomes available** (new peer broker connected).
-- An Aeron **image becomes unavailable** (existing peer broker disconnected).
+- A peer TCP connection becomes available (new peer broker connected).
+- A peer TCP connection becomes unavailable (existing peer broker disconnected).
 
 ### 7.2 Protocol
 
 ```
 ┌─────────────┐         ┌─────────────┐         ┌─────────────┐
-│   Broker A   │         │   Broker B   │         │   Broker C   │
-│   nodeId=1   │         │   nodeId=2   │         │   nodeId=3   │
-└──────┬───────┘         └──────┬───────┘         └──────┬───────┘
+│   Broker A  │         │   Broker B  │         │   Broker C  │
+│   nodeId=1  │         │   nodeId=2  │         │   nodeId=3  │
+└──────┬──────┘         └──────┬──────┘         └──────┬──────┘
        │                        │                        │
        │  InitiateElection(1)   │                        │
        ├───────────────────────►├───────────────────────►│
@@ -377,7 +375,7 @@ An election is initiated when:
 **Step-by-step:**
 
 1. **Trigger detected:** Any broker can initiate.
-2. **Broadcast `InitiateElection(myNodeId, myHostPort)`** (templateId = 1) to all peers via the admin stream.
+2. **Broadcast `InitiateElection(myNodeId, myHostPort)`** (templateId = 1) to all peers via the admin channel.
 3. **On receiving `InitiateElection(senderNodeId)`:**
    - Register the sender as a known cluster member.
    - If `myNodeId < senderNodeId`: Send `NodeAcknowledgment(myNodeId)` (templateId = 2) — "I have priority."
@@ -396,7 +394,7 @@ If `broker.member.host.ports` is empty (no peers), the broker automatically elec
 ### 7.4 Election Invariants
 
 - The broker with the **lowest `nodeId`** always wins.
-- Election is triggered by Aeron connection lifecycle events, not by timers.
+- Election is triggered by peer connection lifecycle events, not by timers.
 - Each broker maintains a `NodeMembership` map (`nodeId → Node`) tracking all known peers and their leader status.
 - The leader status is used to gate certain operations (e.g., service leader designation, state broadcasts).
 
@@ -443,7 +441,7 @@ When the broker cluster leader evaluates a service leader:
 2. Find the instance with the lowest `serviceId`.
 3. If the leader changed (or no leader was previously set):
    a. **Broadcast `LeaderChanged` (templateId = 6)** to all **local** instances of that service name via their control ring buffers.
-   b. **Broadcast `ServiceLeaderDesignated` (templateId = 8)** to all **peer brokers** via the admin stream. Peers then forward `LeaderChanged` to their local instances.
+   b. **Broadcast `ServiceLeaderDesignated` (templateId = 8)** to all **peer brokers** via the admin channel. Peers then forward `LeaderChanged` to their local instances.
 
 ### 8.6 Service-Side Leader Handling
 
@@ -519,4 +517,4 @@ When the cluster leader designates a new service leader:
 | `ServiceRegistry` | `BiInt2ObjectMap` | `(serviceId, nodeId)` | `ServiceInstance` |
 | `ServiceSubscriptionRegistry` | Map | `serviceName` | `Set<subscriberServiceId>` |
 | `NodeMembership` | `Int2ObjectHashMap` | `nodeId` | `Node (id, hostAndPort, local, leader)` |
-| `MessageRoutingProducerRegistry` | Map | `nodeId` | `AeronProducer` |
+| `MessageRoutingProducerRegistry` | Map | `nodeId` | `PeerMessageProducer` |

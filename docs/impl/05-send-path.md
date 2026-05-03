@@ -11,11 +11,8 @@ messages from the send ring buffer, prepends a 24-byte length-prefixed frame hea
 enqueues them in per-peer write queues, and writes them to outgoing TCP connections
 via `ringloom_tcp` (io_uring on Linux, kqueue on macOS).
 
-The TCP send path is significantly simpler than the previous UDP design. TCP provides
-reliable, ordered byte-stream delivery, so there is no retransmit buffer, no message
-fragmentation, no NAK handling, and no Status Messages. The sender writes complete
-frames to the TCP stream and relies on the kernel for segmentation, retransmission,
-and flow control.
+The sender writes complete framed messages to the TCP stream and relies on the kernel
+for segmentation, retransmission, and flow control.
 
 **Delivery semantics:** best-effort across disconnects. If a TCP connection drops,
 in-flight messages in the kernel buffer and the per-peer write queue are lost. There
@@ -61,18 +58,6 @@ broker's metadata file. A dedicated **sender thread** is the sole consumer. It r
 messages, looks up the destination peer by `target_node_id`, prepends a 24-byte frame
 header, and enqueues the frame into the peer's write queue. The write queue is drained
 to the TCP connection via io_uring (Linux) or kqueue (macOS) through the `ringloom_tcp` library.
-
-### What Changed from UDP
-
-| Concern | UDP (old) | TCP (new) |
-|---------|-----------|-----------|
-| Reliability | Retransmit buffer + NAK handling | TCP handles retransmission |
-| Ordering | Sequence numbers + receive log | TCP provides ordered delivery |
-| Fragmentation | Sender splits at MTU boundary | TCP handles segmentation |
-| Flow control | Status Messages + send_limit | Per-peer write queue + TCP backpressure |
-| Connection | Stateless UDP + SETUP frame | Persistent TCP connection + handshake |
-| Heartbeat | Zero-length DATA frame at 100 ms | Minimal frame at 500 ms |
-| Frame header | 40 bytes (data frame header) | 24 bytes (length-prefixed) |
 
 ### Data Flow Summary
 
@@ -937,8 +922,7 @@ fn sendHeartbeats(self: *SenderEventLoop, now_ns: i64) void {
   this timestamp. This ensures that a peer receiving a steady stream of data does not
   receive redundant heartbeats.
 
-- **No sequence numbers.** Unlike the old UDP heartbeats, TCP heartbeats do not carry
-  sequence numbers. The receiver identifies heartbeats by `frame_length == 24` and
+- **No sequence numbers.** TCP heartbeats do not carry sequence numbers. The receiver identifies heartbeats by `frame_length == 24` and
   `template_id == HEARTBEAT_TEMPLATE`.
 
 ---

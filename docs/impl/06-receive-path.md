@@ -11,10 +11,8 @@ TCP connections from peer brokers, reads length-prefixed message frames from the
 stream, validates frame headers, and routes complete messages to target service ring
 buffers.
 
-The TCP receive path is significantly simpler than a UDP receive path. TCP provides
-reliable, ordered delivery, so there is no receive log buffer, no packet insertion sort,
-no gap detection, no NAK generation, and no fragment reassembly. The receiver reads
-complete frames from the stream, validates them, and routes them.
+The receiver reads complete frames from the TCP stream, validates them, and routes
+them directly to the target service ring buffers.
 
 All code targets **Zig 0.14.x** stable.
 
@@ -79,20 +77,6 @@ The receiver event loop is a **single thread** that owns all incoming TCP connec
 from peer brokers and the TCP listener socket. It runs as a duty-cycle event loop
 (spin on work count, idle strategy when no work), following the same pattern as every
 other event loop in RingLoom (see doc 01, §5).
-
-### What the TCP receive path does NOT do
-
-Because TCP provides reliable, ordered byte-stream delivery, the receiver path is
-free from several complexities that would exist in a UDP design:
-
-| UDP concern | TCP equivalent | Receiver action |
-|-------------|----------------|-----------------|
-| Packet loss detection | TCP retransmission (kernel) | None needed |
-| NAK generation | TCP ACKs (kernel) | None needed |
-| Receive log buffer with gap tracking | Ordered stream | Read sequentially |
-| Fragment reassembly | TCP segmentation/reassembly | None needed |
-| Out-of-order insertion sort | Ordered delivery guarantee | None needed |
-| Status Messages (flow control) | TCP flow control (window) | None needed |
 
 ### Data Flow Summary
 

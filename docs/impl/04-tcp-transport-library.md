@@ -102,10 +102,9 @@ All code targets **Zig 0.14.x** stable.
 
 ## 1. Overview
 
-`ringloom_tcp` replaces the previous UDP transport layer. TCP eliminates the need for
-application-level retransmission, sequencing, fragmentation, and NAK handling. The
-kernel provides reliable, ordered byte-stream delivery. The library focuses on
-efficient I/O submission, connection lifecycle, and message framing.
+`ringloom_tcp` provides RingLoom's broker-to-broker transport layer. It relies on TCP's
+reliable, ordered byte-stream delivery and focuses on efficient I/O submission,
+connection lifecycle, and message framing.
 
 ### 1.1 Three-Layer Architecture
 

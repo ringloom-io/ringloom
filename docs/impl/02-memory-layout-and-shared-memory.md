@@ -869,12 +869,8 @@ does not require filesystem access.
 
 ## 5. Receive Log Buffer Layout
 
-> **Note:** The receive log buffer was used with the previous UDP transport for
-> assembling inbound packets and detecting gaps. With the TCP transport, TCP handles
-> reliability and ordering natively. The receive log buffer is **no longer part of the
-> active architecture**. This section is retained for historical reference only. Inbound
-> TCP data is now read through `ringloom_tcp`'s framing layer (doc 04) and routed directly
-> to service ring buffers by the receiver event loop (doc 06).
+> **Note:** Inbound TCP data is read through `ringloom_tcp`'s framing layer (doc 04)
+> and routed directly to service ring buffers by the receiver event loop (doc 06).
 
 ### 5.1 Binary Layout
 
@@ -888,7 +884,7 @@ Offset 0                                         log_buffer_length bytes
 │  Log Data                                                    │
 │  (log_buffer_length bytes, MUST be power of 2)               │
 │                                                              │
-│  Contains received UDP data frames from this peer.           │
+│  Contains received data frames from this peer.               │
 │  Frames are 32-byte aligned within the buffer.               │
 │  The receiver writes sequentially at tail_position.           │
 ├──────────────────────────────────────────────────────────────┤  ← offset = log_buffer_length
@@ -1078,10 +1074,6 @@ The receive log buffer uses a **circular overwrite model**:
 4. Back-pressure via Status Messages (doc 07) prevents this under normal operation:
    the receiver advertises its available window to the sender, which throttles
    accordingly.
-
-Unlike Aeron's 3-partition log buffer with term rotation, RingLoom uses a single partition
-because there is exactly one stream per peer link. This simplifies the design at the
-cost of requiring careful flow control to avoid overwrite.
 
 ---
 

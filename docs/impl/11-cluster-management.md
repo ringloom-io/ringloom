@@ -29,9 +29,6 @@ packages (`ClusterManager`, `LeaderElection`, `NodeMembership`, `ClusterEventHan
 4. **Snapshot on peer join only** — `ClusterStateSnapshot` is sent when a new peer
    connects, not on every leader change. Incremental updates handle the steady state.
 
-As with the rest of the Zig rewrite, Aeron is replaced with the custom TCP transport
-from doc 04 and SBE flyweights with `packed struct` overlays.
-
 ---
 
 ## Table of Contents
@@ -146,7 +143,7 @@ Broker A (nodeId=1)                        Broker B (nodeId=2)
 Both sides independently initiate SETUP to each other — the protocol is symmetric.
 A broker accepts a SETUP from a peer even if it has already sent its own SETUP to
 that peer. The result is two unidirectional channels (one send log per direction),
-matching the Java reference's one Aeron `Publication` + one `Subscription` per peer.
+matching RingLoom's one outbound and one inbound TCP flow per peer.
 
 **Connection state** is tracked directly on the `Node` struct in `NodeMembership`
 (see §7). There is no separate `PeerConnection` struct — all peer metadata lives in
@@ -509,9 +506,8 @@ t=5.5s   Leader preempted: A (nodeId=1). No election round needed.
 ### 4.1 Message Table
 
 Admin messages use a distinct **admin channel** — a separate logical stream from the
-service message channel. In the Java reference, this is an Aeron stream with a
-different `streamId` (`broker.admin.stream.id = 100`). In our TCP transport, admin
-messages are DATA frames with the `ADMIN` flag (`0x20`) set in the frame header's
+service message channel. In the TCP transport, admin messages are DATA frames with the
+`ADMIN` flag (`0x20`) set in the frame header's
 flags byte. The receiver event loop checks this flag and dispatches to the admin
 handler instead of the message router.
 
@@ -1552,7 +1548,7 @@ hashing, and is allocation-free after init. The Java reference uses
 `Int2ObjectHashMap` because Java lacks value-type arrays with nullable elements — in
 Zig the flat array is strictly better.
 
-**Why merge `PeerConnection` into `Node`:** The previous design had two parallel
+**Why merge `PeerConnection` into `Node`:** The split model had two parallel
 arrays — `NodeMembership.nodes[256]` and `ClusterEventHandler.peers[256]` — both
 indexed by `nodeId`, both tracking the same peer. This meant connection state was in
 `PeerConnection` while membership state was in `Node`, requiring coordinated updates
@@ -2165,9 +2161,8 @@ fn handleDataFrame(self: *ReceiverEventLoop, frame: *const DataFrameHeader, payl
 
 The sender event loop handles outbound admin messages by encoding them as frames
 with the `ADMIN` flag set. Admin messages share the same TCP connections as application
-messages — no separate connection is needed (unlike the Java reference which uses a
-separate Aeron stream ID). The `ADMIN` flag in the frame header is sufficient to
-distinguish the two types at the receiver.
+messages — no separate connection is needed. The `ADMIN` flag in the frame header is
+sufficient to distinguish the two types at the receiver.
 
 ### 12.4 Command Flow Diagram
 

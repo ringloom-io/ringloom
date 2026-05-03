@@ -23,26 +23,21 @@ communication between services on the same host and across hosts.
   services, manages service discovery and registration, and participates in cluster-wide
   leader election and state synchronization.
 
-The architecture is inspired by [Aeron](https://github.com/real-logic/aeron) but is
-**significantly simplified**: one TCP connection pair per peer (no multiplexed stream IDs),
-no command-and-control (CnC) file, no log rotation, no pub/sub abstraction, and no custom
-reliable transport protocol. TCP provides reliability, ordering, and flow control natively.
-Services talk to the broker; the broker talks to other brokers. That's it.
+The architecture is deliberately simple: one TCP connection pair per peer (no multiplexed
+stream IDs), no command-and-control (CnC) file, no log rotation, no pub/sub abstraction,
+and no custom reliable transport protocol. TCP provides reliability, ordering, and flow
+control natively. Services talk to the broker; the broker talks to other brokers. That's it.
 
 ---
 
 ## Key Architectural Choices
 
-### TCP Instead of Custom Reliable UDP
-
-The previous design used a custom Aeron-like reliable UDP protocol with NAK-based
-retransmission, Status Message flow control, receive log buffers, and message fragmentation.
-This has been replaced with **plain TCP**:
+### TCP
 
 - TCP handles reliability, ordering, segmentation, and flow control in the kernel.
 - The wire protocol is reduced to **length-prefixed message framing** with a 24-byte header.
-- Removed: NAK frames, retransmit buffers, loss detection, Status Messages, receive log
-  buffers, fragment reassembly, and setup/teardown frame types.
+- No multiplexing: each peer connection is a simple unidirectional stream. No stream IDs,
+  no interleaving, no reordering.
 
 ### Completion-Based I/O via `ringloom_tcp` Library
 

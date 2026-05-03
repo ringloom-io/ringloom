@@ -1728,14 +1728,14 @@ loops never share mutable state directly.
 
 | Source | Command | Description |
 |---|---|---|
-| Receiver → Control | `PeerConnected` | Aeron image available — a peer broker connected |
-| Receiver → Control | `PeerDisconnected` | Aeron image unavailable — a peer broker disconnected |
+| Receiver → Control | `PeerConnected` | Peer TCP connection established — a peer broker connected |
+| Receiver → Control | `PeerDisconnected` | Peer TCP connection lost — a peer broker disconnected |
 | Receiver → Control | `AdminMessageReceived` | Cluster protocol message (forwarded from receiver) |
 | Sender → Control | `SendError` | A send to a peer broker failed |
 
 ### 10.2 Command Struct
 
-Commands use self-dispatching function pointers (inspired by Aeron's command model).
+Commands use self-dispatching function pointers.
 Each command knows how to execute itself on the target event loop.
 
 ```zig

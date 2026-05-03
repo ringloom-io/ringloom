@@ -56,7 +56,7 @@ commands — passes through an MPSC ring buffer.
 | Service → broker send (cross-host) | Service message producer | Broker routing agent | Service metadata file |
 | Any → service application messages | Broker routing agent, peer services | Service message consumer | Service metadata file |
 
-The design follows the Aeron `ManyToOneRingBuffer` pattern: a flat byte buffer with a
+The design follows the standard `ManyToOneRingBuffer` pattern: a flat byte buffer with a
 trailing metadata region, lock-free multi-producer writes via CAS on a tail counter, and
 single-consumer reads that zero consumed records and advance a head counter.
 

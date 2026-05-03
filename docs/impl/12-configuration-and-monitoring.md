@@ -1350,8 +1350,7 @@ fn onPacket(frame: []const u8) void {
 ### 7.1 Shared-Memory Monitoring (Primary)
 
 The primary monitoring mechanism requires **zero broker overhead**: an external process
-`mmap`s the same counter values and error log buffers and reads them directly. This is
-the same technique used by Aeron's `AeronStat` tool.
+`mmap`s the same counter values and error log buffers and reads them directly.
 
 The counter values buffer and counter metadata buffer are stored in the broker's metadata
 file (see doc 02). Their offsets are derived from the broker metadata header:
