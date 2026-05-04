@@ -134,9 +134,15 @@ or startup fails immediately with a descriptive error.
 | `broker.heartbeat.timeout.ms` | `u32` | `2000` | No | Heartbeat receive timeout (ms) |
 | `broker.reconnect.base.delay.ms` | `u32` | `100` | No | Reconnect initial backoff (ms) |
 | `broker.reconnect.max.delay.ms` | `u32` | `1000` | No | Reconnect max backoff (ms) |
-| `broker.io.uring.queue.depth` | `u32` | `256` | No | io_uring SQ/CQ depth (Linux only) |
+| `broker.io.uring.queue.depth` | `u32` | `256` | No | io_uring SQ depth (Linux only) |
+| `broker.io.uring.cq.depth` | `u32` | `1024` | No | io_uring CQ depth (Linux only) |
 | `broker.io.uring.sqpoll` | `bool` | `false` | No | Enable io_uring SQPOLL mode (Linux only) |
+| `broker.io.uring.single.issuer` | `bool` | `true` | No | Enable SINGLE_ISSUER setup when supported |
+| `broker.io.uring.coop.taskrun` | `bool` | `true` | No | Enable COOP_TASKRUN setup when supported |
 | `broker.io.uring.registered.buffers` | `u32` | `64` | No | Number of registered io_uring buffers (Linux only) |
+| `broker.io.uring.receiver.enabled` | `bool` | `false` | No | Enable optional receiver multishot accept/recv path |
+| `broker.io.uring.recv.buffer.size` | `u32` | `16384` | No | Receiver provided-buffer size |
+| `broker.io.uring.recv.buffer.count` | `u32` | `256` | No | Receiver provided-buffer count |
 
 ### 2.2 BrokerConfig Struct
 

@@ -174,10 +174,25 @@ pub const ConfigLoader = struct {
         if (props.get("broker.io.uring.queue.depth")) |v|
             config.io_uring_queue_depth = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
+        if (props.get("broker.io.uring.cq.depth")) |v|
+            config.io_uring_cq_depth = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
         if (props.get("broker.io.uring.sqpoll")) |v|
             config.io_uring_sqpoll = std.mem.eql(u8, v, "true");
+        if (props.get("broker.io.uring.single.issuer")) |v|
+            config.io_uring_single_issuer = std.mem.eql(u8, v, "true");
+        if (props.get("broker.io.uring.coop.taskrun")) |v|
+            config.io_uring_coop_taskrun = std.mem.eql(u8, v, "true");
         if (props.get("broker.io.uring.registered.buffers")) |v|
             config.io_uring_registered_buffers = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.io.uring.receiver.enabled")) |v|
+            config.io_uring_receiver_enabled = std.mem.eql(u8, v, "true");
+        if (props.get("broker.io.uring.recv.buffer.size")) |v|
+            config.io_uring_recv_buffer_size = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.io.uring.recv.buffer.count")) |v|
+            config.io_uring_recv_buffer_count = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
         if (props.get("broker.benchmark.latency.tracing.enabled")) |v|
             config.benchmark_latency_tracing_enabled = std.mem.eql(u8, v, "true");
@@ -313,8 +328,14 @@ fn applyEnvOverrides(
         "broker.sender.cpu.affinity",
         "broker.receiver.cpu.affinity",
         "broker.io.uring.queue.depth",
+        "broker.io.uring.cq.depth",
         "broker.io.uring.sqpoll",
+        "broker.io.uring.single.issuer",
+        "broker.io.uring.coop.taskrun",
         "broker.io.uring.registered.buffers",
+        "broker.io.uring.receiver.enabled",
+        "broker.io.uring.recv.buffer.size",
+        "broker.io.uring.recv.buffer.count",
         "broker.benchmark.latency.tracing.enabled",
     };
 
@@ -368,6 +389,21 @@ fn validate(config: *BrokerConfig) ConfigError!void {
     // ── TCP frame size range check ──────────────────────────────
     if (config.max_frame_length < 256 or config.max_frame_length > 1_048_576)
         return ConfigError.InvalidValue;
+
+    if (config.io_uring_queue_depth == 0 or config.io_uring_queue_depth > 32768)
+        return ConfigError.InvalidValue;
+    config.io_uring_queue_depth = alignToPowerOfTwo(config.io_uring_queue_depth);
+    if (config.io_uring_cq_depth == 0)
+        config.io_uring_cq_depth = config.io_uring_queue_depth * 4;
+    config.io_uring_cq_depth = alignToPowerOfTwo(config.io_uring_cq_depth);
+    if (config.io_uring_cq_depth < config.io_uring_queue_depth)
+        config.io_uring_cq_depth = config.io_uring_queue_depth;
+    if (config.io_uring_recv_buffer_size < 1024 or config.io_uring_recv_buffer_size > config.max_frame_length)
+        return ConfigError.InvalidValue;
+    config.io_uring_recv_buffer_size = alignToPowerOfTwo(config.io_uring_recv_buffer_size);
+    if (config.io_uring_recv_buffer_count == 0 or config.io_uring_recv_buffer_count > 32768)
+        return ConfigError.InvalidValue;
+    config.io_uring_recv_buffer_count = alignToPowerOfTwo(config.io_uring_recv_buffer_count);
 
     // ── Compute derived fields ──────────────────────────────────
     config.max_counter_id = config.counter_values_buffer_size / 128;

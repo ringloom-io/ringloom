@@ -1553,6 +1553,11 @@ Managed exclusively by the **broker cluster leader**:
 | `broker.tcp.recv.buffer.size` | `262144` | TCP kernel receive buffer size per connection |
 | `broker.tcp.nodelay` | `true` | Enable TCP_NODELAY (disable Nagle) |
 | `broker.peer.write.queue.size` | `1024` | Max pending messages per peer write queue |
+| `broker.io.uring.receiver.enabled` | `false` | Enable optional Linux receiver multishot accept/recv path |
+| `broker.io.uring.queue.depth` | `256` | io_uring submission queue depth |
+| `broker.io.uring.cq.depth` | `1024` | io_uring completion queue depth |
+| `broker.io.uring.recv.buffer.size` | `16384` | Receiver provided-buffer size |
+| `broker.io.uring.recv.buffer.count` | `256` | Receiver provided-buffer count |
 | `broker.threading.mode` | `DEDICATED` | `DEDICATED`, `SHARED_NETWORK`, `SHARED` |
 | `broker.idle.strategy` | `backoff` | `busy_spin`, `yielding`, `sleeping`, `backoff` |
 

@@ -6,6 +6,7 @@
 //!
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ringloom_common = @import("ringloom_common");
 const net = @import("ringloom_tcp").socket;
 const constants = ringloom_common.platform.constants;
@@ -22,6 +23,7 @@ const TcpFrameHeader = frame_parser.TcpFrameHeader;
 const tcp = @import("ringloom_tcp");
 const HandshakeFrame = tcp.HandshakeFrame;
 const SocketConfig = tcp.SocketConfig;
+const transport = @import("../transport.zig");
 
 const PeerReceiver = @import("peer_receiver.zig").PeerReceiver;
 const LivenessState = @import("peer_receiver.zig").LivenessState;
@@ -32,6 +34,8 @@ const latency_trace = ringloom_common.message.latency_trace;
 
 const admin_dispatch = @import("../cluster/admin_dispatch.zig");
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
+const linux = std.os.linux;
+const log = std.log.scoped(.receiver);
 
 // ── Counter IDs ───────────────────────────────────────────────────────
 
@@ -50,6 +54,15 @@ pub const ReceiverCounters = struct {
     peer_reconnects: usize = 0,
     admin_messages_received: usize = 0,
     admin_message_errors: usize = 0,
+    sync_read_calls: usize = 0,
+    sync_read_bytes: usize = 0,
+    iouring_enabled: usize = 0,
+    iouring_fallbacks: usize = 0,
+    iouring_errors: usize = 0,
+    iouring_cqes: usize = 0,
+    iouring_accept_cqes: usize = 0,
+    iouring_recv_cqes: usize = 0,
+    iouring_recv_bytes: usize = 0,
 
     pub fn allocate(counters: *CountersManager) ReceiverCounters {
         return .{
@@ -67,9 +80,55 @@ pub const ReceiverCounters = struct {
             .peer_reconnects = counters.allocate(1, "recv_peer_reconnects") orelse 0,
             .admin_messages_received = counters.allocate(1, "recv_admin_messages_received") orelse 0,
             .admin_message_errors = counters.allocate(1, "recv_admin_message_errors") orelse 0,
+            .sync_read_calls = counters.allocate(1, "recv_sync_read_calls") orelse 0,
+            .sync_read_bytes = counters.allocate(1, "recv_sync_read_bytes") orelse 0,
+            .iouring_enabled = counters.allocate(1, "recv_iouring_enabled") orelse 0,
+            .iouring_fallbacks = counters.allocate(1, "recv_iouring_fallbacks") orelse 0,
+            .iouring_errors = counters.allocate(1, "recv_iouring_errors") orelse 0,
+            .iouring_cqes = counters.allocate(1, "recv_iouring_cqes") orelse 0,
+            .iouring_accept_cqes = counters.allocate(1, "recv_iouring_accept_cqes") orelse 0,
+            .iouring_recv_cqes = counters.allocate(1, "recv_iouring_recv_cqes") orelse 0,
+            .iouring_recv_bytes = counters.allocate(1, "recv_iouring_recv_bytes") orelse 0,
         };
     }
 };
+
+pub const ReceiverIoUringOptions = struct {
+    enabled: bool = false,
+    queue_depth: u16 = 256,
+    cq_depth: u32 = 1024,
+    sqpoll: bool = false,
+    single_issuer: bool = true,
+    coop_taskrun: bool = true,
+    recv_buffer_size: u32 = 16 * 1024,
+    recv_buffer_count: u16 = 256,
+};
+
+const ReceiverIoUringState = struct {
+    ring: transport.IoUring,
+    recv_group: linux.IoUring.BufferGroup,
+    accept_armed: bool = false,
+    cqe_buf: [256]linux.io_uring_cqe = undefined,
+};
+
+const ReceiverIoOp = enum(u8) {
+    accept = 1,
+    recv = 2,
+};
+
+fn encodeIoUserData(op: ReceiverIoOp, node_id: u8, generation: u8) u64 {
+    return @as(u64, @intFromEnum(op)) |
+        (@as(u64, node_id) << 8) |
+        (@as(u64, generation) << 16);
+}
+
+fn decodeIoUserData(user_data: u64) struct { op: ReceiverIoOp, node_id: u8, generation: u8 } {
+    return .{
+        .op = @enumFromInt(@as(u8, @truncate(user_data))),
+        .node_id = @truncate(user_data >> 8),
+        .generation = @truncate(user_data >> 16),
+    };
+}
 
 // ── Peer Map ──────────────────────────────────────────────────────────
 
@@ -165,6 +224,12 @@ pub const ReceiverEventLoop = struct {
     /// Enable benchmark-only payload timestamp tracing. Disabled in production.
     benchmark_latency_tracing_enabled: bool,
 
+    /// Requested io_uring receiver settings. Disabled by default.
+    iouring_options: ReceiverIoUringOptions,
+
+    /// Active io_uring receiver state, if initialization and feature probing succeeded.
+    iouring_state: ?ReceiverIoUringState,
+
     const Self = @This();
     const max_pending = 16;
 
@@ -193,6 +258,28 @@ pub const ReceiverEventLoop = struct {
         admin_queue: ?*AdminCommandQueue(64),
         benchmark_latency_tracing_enabled: bool,
     ) Self {
+        return initWithGroupAndIoUring(
+            service_registry,
+            counters,
+            local_node_id,
+            allocator,
+            group_name,
+            admin_queue,
+            benchmark_latency_tracing_enabled,
+            .{},
+        );
+    }
+
+    pub fn initWithGroupAndIoUring(
+        service_registry: *ServiceRegistry,
+        counters: *CountersManager,
+        local_node_id: u8,
+        allocator: std.mem.Allocator,
+        group_name: []const u8,
+        admin_queue: ?*AdminCommandQueue(64),
+        benchmark_latency_tracing_enabled: bool,
+        iouring_options: ReceiverIoUringOptions,
+    ) Self {
         return .{
             .peers = PeerMap.init(),
             .service_registry = service_registry,
@@ -207,6 +294,8 @@ pub const ReceiverEventLoop = struct {
             .pending_count = 0,
             .admin_cmd_queue = admin_queue,
             .benchmark_latency_tracing_enabled = benchmark_latency_tracing_enabled,
+            .iouring_options = iouring_options,
+            .iouring_state = null,
         };
     }
 
@@ -215,6 +304,11 @@ pub const ReceiverEventLoop = struct {
         if (self.listener_fd >= 0) {
             platform.closeFd(self.listener_fd);
             self.listener_fd = -1;
+        }
+        if (self.iouring_state) |*state| {
+            state.recv_group.deinit(self.allocator);
+            state.ring.deinit();
+            self.iouring_state = null;
         }
         // Close pending connections.
         for (self.pending_connections[0..self.pending_count]) |*pc| {
@@ -249,6 +343,100 @@ pub const ReceiverEventLoop = struct {
         try net.listen(fd, 128);
 
         self.listener_fd = fd;
+
+        if (self.iouring_options.enabled) {
+            self.enableIoUringReceiver() catch |err| {
+                self.counters.increment(self.counter_ids.iouring_fallbacks);
+                logIoUringFallback(err);
+            };
+        }
+    }
+
+    fn enableIoUringReceiver(self: *Self) !void {
+        if (comptime builtin.os.tag != .linux) return error.UnsupportedPlatform;
+        if (self.listener_fd < 0) return error.InvalidListener;
+
+        var ring = try transport.IoUring.initWithConfig(.{
+            .queue_depth = self.iouring_options.queue_depth,
+            .cq_depth = self.iouring_options.cq_depth,
+            .sqpoll = self.iouring_options.sqpoll,
+            .single_issuer = self.iouring_options.single_issuer,
+            .coop_taskrun = self.iouring_options.coop_taskrun,
+        });
+        var ring_moved_to_state = false;
+        errdefer if (!ring_moved_to_state) ring.deinit();
+
+        if (!ring.capabilities.accept_supported or !ring.capabilities.recv_supported) {
+            return error.IoUringTcpOpsUnsupported;
+        }
+
+        self.iouring_state = .{
+            .ring = ring,
+            .recv_group = undefined,
+            .accept_armed = false,
+        };
+        ring_moved_to_state = true;
+        errdefer {
+            if (self.iouring_state) |*state| {
+                state.ring.deinit();
+            }
+            self.iouring_state = null;
+        }
+
+        var state = &self.iouring_state.?;
+        state.recv_group = try linux.IoUring.BufferGroup.init(
+            &state.ring.ring,
+            self.allocator,
+            0,
+            self.iouring_options.recv_buffer_size,
+            self.iouring_options.recv_buffer_count,
+        );
+        errdefer state.recv_group.deinit(self.allocator);
+
+        try self.armIoUringAccept();
+        self.counters.increment(self.counter_ids.iouring_enabled);
+    }
+
+    fn disableIoUringReceiver(self: *Self, err: anyerror) void {
+        self.counters.increment(self.counter_ids.iouring_fallbacks);
+        logIoUringFallback(err);
+        if (self.iouring_state) |*state| {
+            state.recv_group.deinit(self.allocator);
+            state.ring.deinit();
+            self.iouring_state = null;
+        }
+        var iter = self.peers.iterator();
+        while (iter.next()) |peer| {
+            peer.io_recv_armed = false;
+        }
+    }
+
+    fn logIoUringFallback(err: anyerror) void {
+        log.warn("receiver io_uring disabled; falling back to synchronous TCP: {}", .{err});
+    }
+
+    fn armIoUringAccept(self: *Self) !void {
+        var state = if (self.iouring_state) |*s| s else return error.IoUringNotActive;
+        try state.ring.prepareAcceptMultishot(
+            self.listener_fd,
+            encodeIoUserData(.accept, 0, 0),
+            std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
+        );
+        _ = try state.ring.submit();
+        state.accept_armed = true;
+    }
+
+    fn armIoUringRecv(self: *Self, peer: *PeerReceiver) !void {
+        var state = if (self.iouring_state) |*s| s else return error.IoUringNotActive;
+        if (peer.io_recv_armed or !peer.connected or peer.socket_fd < 0) return;
+        try state.ring.prepareRecvMultishot(
+            &state.recv_group,
+            peer.socket_fd,
+            encodeIoUserData(.recv, peer.node_id, peer.io_generation),
+            0,
+        );
+        _ = try state.ring.submit();
+        peer.io_recv_armed = true;
     }
 
     // ── Duty Cycle ────────────────────────────────────────────────────
@@ -258,18 +446,30 @@ pub const ReceiverEventLoop = struct {
         var work_count: u32 = 0;
         const now_ns = Clock.monotonicNanos();
 
-        // ── Phase 1: Accept new connections ───────────────────────────
-        work_count += self.acceptNewConnections();
+        if (self.iouring_state != null) {
+            // ── Phase 1: Harvest io_uring accept/recv completions ─────
+            work_count += self.pollIoUringCompletions();
 
-        // ── Phase 2: Complete pending handshakes ──────────────────────
-        work_count += self.processPendingHandshakes();
+            // ── Phase 2: Complete pending handshakes ──────────────────
+            work_count += self.processPendingHandshakes();
 
-        // ── Phase 3: Read from connected peers ───────────────────────
-        work_count += self.readFromPeers();
+            // ── Phase 3: Harvest again to catch data that arrived while
+            //             parsing handshakes/routing prior completions.
+            work_count += self.pollIoUringCompletions();
+        } else {
+            // ── Phase 1: Accept new connections ───────────────────────
+            work_count += self.acceptNewConnections();
 
-        // ── Phase 4: Read again to catch data that arrived during
-        //             frame parsing (mirrors sender double-flush) ──────
-        work_count += self.readFromPeers();
+            // ── Phase 2: Complete pending handshakes ──────────────────
+            work_count += self.processPendingHandshakes();
+
+            // ── Phase 3: Read from connected peers ───────────────────
+            work_count += self.readFromPeers();
+
+            // ── Phase 4: Read again to catch data that arrived during
+            //             frame parsing (mirrors sender double-flush) ──
+            work_count += self.readFromPeers();
+        }
 
         // ── Phase 5: Check heartbeat timeouts ─────────────────────────
         work_count += self.checkHeartbeatTimeouts(now_ns);
@@ -315,6 +515,119 @@ pub const ReceiverEventLoop = struct {
         }
 
         return accepted;
+    }
+
+    fn pollIoUringCompletions(self: *Self) u32 {
+        var state = if (self.iouring_state) |*s| s else return 0;
+        const count = state.ring.ring.copy_cqes(&state.cqe_buf, 0) catch |err| {
+            self.counters.increment(self.counter_ids.iouring_errors);
+            self.disableIoUringReceiver(err);
+            return 0;
+        };
+        if (count == 0) return 0;
+
+        self.counters.add(self.counter_ids.iouring_cqes, count);
+
+        var work_count: u32 = 0;
+        for (state.cqe_buf[0..count]) |cqe| {
+            const decoded = decodeIoUserData(cqe.user_data);
+            switch (decoded.op) {
+                .accept => {
+                    self.counters.increment(self.counter_ids.iouring_accept_cqes);
+                    work_count += self.handleIoUringAcceptCqe(cqe);
+                },
+                .recv => {
+                    self.counters.increment(self.counter_ids.iouring_recv_cqes);
+                    work_count += self.handleIoUringRecvCqe(cqe, decoded.node_id, decoded.generation);
+                },
+            }
+        }
+
+        return work_count;
+    }
+
+    fn handleIoUringAcceptCqe(self: *Self, cqe: linux.io_uring_cqe) u32 {
+        if (self.iouring_state) |*state| {
+            if ((cqe.flags & linux.IORING_CQE_F_MORE) == 0) {
+                state.accept_armed = false;
+            }
+        }
+
+        if (cqe.res < 0) {
+            self.counters.increment(self.counter_ids.iouring_errors);
+            if (cqe.err() == .INVAL or cqe.err() == .OPNOTSUPP) {
+                self.disableIoUringReceiver(error.MultishotAcceptUnsupported);
+            } else if (self.iouring_state != null) {
+                self.armIoUringAccept() catch |err| self.disableIoUringReceiver(err);
+            }
+            return 0;
+        }
+
+        const fd: std.posix.fd_t = @intCast(cqe.res);
+        const sock_cfg = SocketConfig{};
+        sock_cfg.apply(fd) catch {
+            platform.closeFd(fd);
+            self.counters.increment(self.counter_ids.connection_errors);
+            return 0;
+        };
+
+        if (self.pending_count >= max_pending) {
+            platform.closeFd(fd);
+            self.counters.increment(self.counter_ids.connection_errors);
+            return 0;
+        }
+
+        self.pending_connections[self.pending_count] = .{
+            .fd = fd,
+            .address = std.mem.zeroes(net.Address),
+            .handshake_buf = std.mem.zeroes([HandshakeFrame.size]u8),
+            .bytes_read = 0,
+        };
+        self.pending_count += 1;
+
+        if (self.iouring_state) |state| {
+            if (!state.accept_armed) {
+                self.armIoUringAccept() catch |err| self.disableIoUringReceiver(err);
+            }
+        }
+
+        return 1;
+    }
+
+    fn handleIoUringRecvCqe(self: *Self, cqe: linux.io_uring_cqe, node_id: u8, generation: u8) u32 {
+        const peer = self.peers.get(node_id) orelse return 0;
+        if (generation != peer.io_generation) return 0;
+
+        if ((cqe.flags & linux.IORING_CQE_F_MORE) == 0) {
+            peer.io_recv_armed = false;
+        }
+
+        if (cqe.res <= 0) {
+            if (cqe.res < 0) {
+                self.counters.increment(self.counter_ids.iouring_errors);
+            }
+            self.disconnectPeer(peer);
+            return 0;
+        }
+
+        var state = if (self.iouring_state) |*s| s else return 0;
+        const data = state.recv_group.get(cqe) catch |err| {
+            self.counters.increment(self.counter_ids.iouring_errors);
+            self.disableIoUringReceiver(err);
+            return 0;
+        };
+        defer state.recv_group.put(cqe) catch {
+            self.counters.increment(self.counter_ids.iouring_errors);
+        };
+
+        self.counters.add(self.counter_ids.iouring_recv_bytes, @intCast(data.len));
+        const completed = self.processPeerBytes(peer, data);
+
+        if (self.iouring_state != null and peer.connected and !peer.io_recv_armed) {
+            self.armIoUringRecv(peer) catch |err| self.disableIoUringReceiver(err);
+        }
+
+        return completed;
     }
 
     // ── Pending Handshake Processing ─────────────────────────────────
@@ -369,6 +682,13 @@ pub const ReceiverEventLoop = struct {
                     self.counters.increment(self.counter_ids.connection_errors);
                     continue;
                 };
+                if (self.iouring_state != null) {
+                    if (self.peers.get(frame.source_node_id)) |peer| {
+                        self.armIoUringRecv(peer) catch |err| {
+                            self.disableIoUringReceiver(err);
+                        };
+                    }
+                }
 
                 self.removePendingAt(i);
                 completed += 1;
@@ -401,6 +721,10 @@ pub const ReceiverEventLoop = struct {
             // This amortizes syscall overhead across many frames.
             var got_new_data = false;
             if (peer.fillRecvBuffer()) |n| {
+                if (n > 0) {
+                    self.counters.increment(self.counter_ids.sync_read_calls);
+                    self.counters.add(self.counter_ids.sync_read_bytes, @intCast(n));
+                }
                 if (n == 0 and peer.recvBufAvailable() == 0) {
                     // EOF with no buffered data.
                     self.disconnectPeer(peer);
@@ -425,6 +749,30 @@ pub const ReceiverEventLoop = struct {
                     if (!read_result.progress) break;
                     work_count += read_result.frames_completed;
                 }
+            }
+        }
+
+        return work_count;
+    }
+
+    fn processPeerBytes(self: *Self, peer: *PeerReceiver, data: []const u8) u32 {
+        var offset: usize = 0;
+        var work_count: u32 = 0;
+
+        while (offset < data.len) {
+            const copied = peer.appendRecvData(data[offset..]);
+            if (copied == 0) {
+                self.disconnectPeer(peer);
+                self.counters.increment(self.counter_ids.connection_errors);
+                break;
+            }
+            offset += copied;
+
+            var budget: u32 = constants.read_budget_per_peer;
+            while (budget > 0) : (budget -= 1) {
+                const read_result = self.readOnePeerStep(peer);
+                if (!read_result.progress) break;
+                work_count += read_result.frames_completed;
             }
         }
 

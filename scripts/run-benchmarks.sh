@@ -16,6 +16,11 @@
 #
 # Prerequisites:
 #   zig build install && zig build test-bins
+#
+# io_uring receiver variants:
+#   RINGLOOM_BENCH_IOURING_RECEIVER=true ./scripts/run-benchmarks.sh --remote-only
+#   Optional tuning: RINGLOOM_BENCH_IOURING_RECV_BUFFER_SIZE,
+#   RINGLOOM_BENCH_IOURING_RECV_BUFFER_COUNT, RINGLOOM_BENCH_IOURING_CQ_DEPTH
 
 set -euo pipefail
 
@@ -27,6 +32,10 @@ BIN="$PROJECT_ROOT/zig-out/bin"
 RUN_LOCAL=true
 RUN_REMOTE=true
 RESULTS_DIR="/tmp/ringloom-bench-results"
+IOURING_RECEIVER_ENABLED="${RINGLOOM_BENCH_IOURING_RECEIVER:-false}"
+IOURING_RECV_BUFFER_SIZE="${RINGLOOM_BENCH_IOURING_RECV_BUFFER_SIZE:-16384}"
+IOURING_RECV_BUFFER_COUNT="${RINGLOOM_BENCH_IOURING_RECV_BUFFER_COUNT:-256}"
+IOURING_CQ_DEPTH="${RINGLOOM_BENCH_IOURING_CQ_DEPTH:-1024}"
 
 # ── Parse arguments ───────────────────────────────────────────────────
 
@@ -130,6 +139,10 @@ broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
 broker.receiver.cpu.affinity=3
 broker.io.uring.sqpoll=true
+broker.io.uring.receiver.enabled=$IOURING_RECEIVER_ENABLED
+broker.io.uring.cq.depth=$IOURING_CQ_DEPTH
+broker.io.uring.recv.buffer.size=$IOURING_RECV_BUFFER_SIZE
+broker.io.uring.recv.buffer.count=$IOURING_RECV_BUFFER_COUNT
 broker.benchmark.latency.tracing.enabled=true
 EOF
 
@@ -196,6 +209,10 @@ broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
 broker.receiver.cpu.affinity=3
 broker.io.uring.sqpoll=true
+broker.io.uring.receiver.enabled=$IOURING_RECEIVER_ENABLED
+broker.io.uring.cq.depth=$IOURING_CQ_DEPTH
+broker.io.uring.recv.buffer.size=$IOURING_RECV_BUFFER_SIZE
+broker.io.uring.recv.buffer.count=$IOURING_RECV_BUFFER_COUNT
 broker.benchmark.latency.tracing.enabled=true
 EOF
 
@@ -212,6 +229,10 @@ broker.idle.strategy=yielding
 broker.sender.cpu.affinity=4
 broker.receiver.cpu.affinity=5
 broker.io.uring.sqpoll=true
+broker.io.uring.receiver.enabled=$IOURING_RECEIVER_ENABLED
+broker.io.uring.cq.depth=$IOURING_CQ_DEPTH
+broker.io.uring.recv.buffer.size=$IOURING_RECV_BUFFER_SIZE
+broker.io.uring.recv.buffer.count=$IOURING_RECV_BUFFER_COUNT
 broker.benchmark.latency.tracing.enabled=true
 EOF
 }

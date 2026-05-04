@@ -134,6 +134,16 @@ pub const ConfigGen = struct {
         if (spec.receiver_cpu_affinity) |core| {
             try writer.writer.print("broker.receiver.cpu.affinity={d}\n", .{core});
         }
+        if (spec.io_uring_sqpoll) {
+            try writer.writer.writeAll("broker.io.uring.sqpoll=true\n");
+        }
+        if (spec.io_uring_receiver_enabled) {
+            try writer.writer.writeAll("broker.io.uring.receiver.enabled=true\n");
+        }
+        try writer.writer.print("broker.io.uring.queue.depth={d}\n", .{spec.io_uring_queue_depth});
+        try writer.writer.print("broker.io.uring.cq.depth={d}\n", .{spec.io_uring_cq_depth});
+        try writer.writer.print("broker.io.uring.recv.buffer.size={d}\n", .{spec.io_uring_recv_buffer_size});
+        try writer.writer.print("broker.io.uring.recv.buffer.count={d}\n", .{spec.io_uring_recv_buffer_count});
         if (spec.benchmark_latency_tracing_enabled) {
             try writer.writer.writeAll("broker.benchmark.latency.tracing.enabled=true\n");
         }

@@ -88,6 +88,12 @@ pub const PeerReceiver = struct {
     /// Whether this peer is actively connected.
     connected: bool,
 
+    /// Generation counter for async receive completions from old sockets.
+    io_generation: u8,
+
+    /// Whether a multishot receive is currently armed for this peer.
+    io_recv_armed: bool,
+
     /// Read-ahead buffer for batched TCP reads.
     /// One large read() fills this buffer, then frames are parsed from it
     /// without additional syscalls, reducing per-frame overhead dramatically.
@@ -116,6 +122,8 @@ pub const PeerReceiver = struct {
             .liveness = .alive,
             .address = address,
             .connected = true,
+            .io_generation = 0,
+            .io_recv_armed = false,
             .recv_buf = recv_buf,
             .recv_len = 0,
             .recv_pos = 0,
@@ -141,6 +149,19 @@ pub const PeerReceiver = struct {
         if (n > 0) {
             @memcpy(dest[0..n], self.recv_buf[self.recv_pos..][0..n]);
             self.recv_pos += n;
+        }
+        return n;
+    }
+
+    /// Append externally received bytes into the read-ahead buffer.
+    /// Returns the number of bytes copied after compacting consumed data.
+    pub fn appendRecvData(self: *Self, data: []const u8) usize {
+        self.compactRecvBuf();
+        const space = self.recv_buf[self.recv_len..];
+        const n = @min(space.len, data.len);
+        if (n > 0) {
+            @memcpy(space[0..n], data[0..n]);
+            self.recv_len += n;
         }
         return n;
     }
@@ -199,6 +220,8 @@ pub const PeerReceiver = struct {
         self.last_recv_ns = Clock.monotonicNanos();
         self.liveness = .alive;
         self.connected = true;
+        self.io_generation +%= 1;
+        self.io_recv_armed = false;
         self.resetRecvBuf();
     }
 
@@ -209,6 +232,8 @@ pub const PeerReceiver = struct {
         }
         self.connected = false;
         self.liveness = .dead;
+        self.io_generation +%= 1;
+        self.io_recv_armed = false;
     }
 };
 

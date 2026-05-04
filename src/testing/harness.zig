@@ -71,6 +71,12 @@ pub const BrokerSpec = struct {
     sender_cpu_affinity: ?u32 = null,
     receiver_cpu_affinity: ?u32 = null,
     benchmark_latency_tracing_enabled: bool = false,
+    io_uring_sqpoll: bool = false,
+    io_uring_receiver_enabled: bool = false,
+    io_uring_queue_depth: u32 = 256,
+    io_uring_cq_depth: u32 = 1024,
+    io_uring_recv_buffer_size: u32 = 16 * 1024,
+    io_uring_recv_buffer_count: u32 = 256,
 };
 
 /// Describes the configuration for a service process to be started by

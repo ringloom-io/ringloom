@@ -100,8 +100,14 @@ pub const BrokerConfig = struct {
 
     // ── io_uring (Linux only) ───────────────────────────────────
     io_uring_queue_depth: u32 = 256,
+    io_uring_cq_depth: u32 = 1024,
     io_uring_sqpoll: bool = false,
+    io_uring_single_issuer: bool = true,
+    io_uring_coop_taskrun: bool = true,
     io_uring_registered_buffers: u32 = 64,
+    io_uring_receiver_enabled: bool = false,
+    io_uring_recv_buffer_size: u32 = 16_384,
+    io_uring_recv_buffer_count: u32 = 256,
     benchmark_latency_tracing_enabled: bool = false,
 
     // ── Computed (set during validation, not from file) ─────────

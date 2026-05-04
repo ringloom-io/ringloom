@@ -18,9 +18,22 @@ pub const IoUringConfig = struct {
     /// Number of SQE slots (must be power of two, max 32768).
     queue_depth: u16 = 256,
 
+    /// Number of CQE slots. Defaults to 4x SQ depth when zero.
+    cq_depth: u32 = 0,
+
     /// Enable SQPOLL mode. Requires CAP_SYS_NICE or appropriate
     /// rlimit_memlock settings.
     sqpoll: bool = false,
+
+    /// Enable SINGLE_ISSUER when available. Each broker event-loop owns its
+    /// ring from one thread, so this is the preferred steady-state mode.
+    single_issuer: bool = true,
+
+    /// Enable COOP_TASKRUN when available to reduce forced task-work wakeups.
+    coop_taskrun: bool = true,
+
+    /// Ask the kernel to continue submitting a batch even if an SQE fails.
+    submit_all: bool = true,
 
     /// SQPOLL kernel thread idle timeout in milliseconds. If no SQEs
     /// are submitted for this duration, the kernel thread goes to sleep.
@@ -30,12 +43,27 @@ pub const IoUringConfig = struct {
     sqpoll_cpu: ?u32 = null,
 };
 
+pub const IoUringCapabilities = struct {
+    requested_flags: u32 = 0,
+    active_flags: u32 = 0,
+    features: u32 = 0,
+    sqpoll_active: bool = false,
+    single_issuer_active: bool = false,
+    coop_taskrun_active: bool = false,
+    submit_all_active: bool = false,
+    accept_supported: bool = false,
+    recv_supported: bool = false,
+    writev_supported: bool = false,
+    provided_buffers_supported: bool = false,
+};
+
 /// Wrapper around the Zig standard library's IoUring.
 ///
 /// Provides ergonomic methods for UDP send/recv, batched submission,
 /// completion polling, and registered buffer management.
 pub const IoUring = struct {
     ring: linux.IoUring,
+    capabilities: IoUringCapabilities,
     pending_submissions: u32 = 0,
     registered_buffers: bool = false,
 
@@ -59,34 +87,101 @@ pub const IoUring = struct {
         });
 
         const ring = try linux.IoUring.init_params(queue_depth, &params);
+        var capabilities = detectCapabilities(&ring, combined_flags);
+        capabilities.requested_flags = combined_flags;
+        capabilities.active_flags = params.flags;
+        capabilities.features = ring.features;
         return .{
             .ring = ring,
+            .capabilities = capabilities,
         };
     }
 
     /// Initialize with a configuration struct, including SQPOLL support.
     pub fn initWithConfig(config: IoUringConfig) !IoUring {
-        var flags: u32 = linux.IORING_SETUP_CQSIZE;
+        var requested_flags: u32 = linux.IORING_SETUP_CQSIZE;
 
         if (config.sqpoll) {
-            flags |= linux.IORING_SETUP_SQPOLL;
+            requested_flags |= linux.IORING_SETUP_SQPOLL;
+        }
+        if (config.single_issuer) {
+            requested_flags |= linux.IORING_SETUP_SINGLE_ISSUER;
+        }
+        if (config.coop_taskrun) {
+            requested_flags |= linux.IORING_SETUP_COOP_TASKRUN;
+        }
+        if (config.submit_all) {
+            requested_flags |= linux.IORING_SETUP_SUBMIT_ALL;
         }
 
-        var params = std.mem.zeroInit(linux.io_uring_params, .{
-            .flags = flags,
-            .cq_entries = @as(u32, config.queue_depth) * 2,
-            .sq_thread_idle = config.sqpoll_idle_ms,
-        });
+        const cq_depth = if (config.cq_depth == 0)
+            @as(u32, config.queue_depth) * 4
+        else
+            config.cq_depth;
 
-        if (config.sqpoll) {
-            if (config.sqpoll_cpu) |cpu| {
-                params.flags |= linux.IORING_SETUP_SQ_AFF;
-                params.sq_thread_cpu = cpu;
+        return initWithFallback(config, requested_flags, cq_depth);
+    }
+
+    fn initWithFallback(config: IoUringConfig, requested_flags: u32, cq_depth: u32) !IoUring {
+        var attempts = [_]u32{
+            requested_flags,
+            requested_flags & ~@as(u32, linux.IORING_SETUP_SQPOLL) & ~@as(u32, linux.IORING_SETUP_SQ_AFF),
+            requested_flags & ~@as(u32, linux.IORING_SETUP_SQPOLL) & ~@as(u32, linux.IORING_SETUP_SQ_AFF) &
+                ~@as(u32, linux.IORING_SETUP_COOP_TASKRUN),
+            linux.IORING_SETUP_CQSIZE,
+        };
+
+        var last_err: anyerror = error.ArgumentsInvalid;
+        for (&attempts) |*flags| {
+            var params = std.mem.zeroInit(linux.io_uring_params, .{
+                .flags = flags.*,
+                .cq_entries = cq_depth,
+                .sq_thread_idle = config.sqpoll_idle_ms,
+            });
+
+            if ((flags.* & linux.IORING_SETUP_SQPOLL) != 0) {
+                if (config.sqpoll_cpu) |cpu| {
+                    params.flags |= linux.IORING_SETUP_SQ_AFF;
+                    params.sq_thread_cpu = cpu;
+                }
             }
+
+            const ring = linux.IoUring.init_params(config.queue_depth, &params) catch |err| {
+                last_err = err;
+                continue;
+            };
+
+            var capabilities = detectCapabilities(&ring, requested_flags);
+            capabilities.requested_flags = requested_flags;
+            capabilities.active_flags = params.flags;
+            capabilities.features = ring.features;
+            return .{
+                .ring = ring,
+                .capabilities = capabilities,
+            };
         }
 
-        const ring = try linux.IoUring.init_params(config.queue_depth, &params);
-        return .{ .ring = ring };
+        return last_err;
+    }
+
+    fn detectCapabilities(ring: *const linux.IoUring, requested_flags: u32) IoUringCapabilities {
+        var capabilities = IoUringCapabilities{
+            .requested_flags = requested_flags,
+            .active_flags = ring.flags,
+            .features = ring.features,
+            .sqpoll_active = (ring.flags & linux.IORING_SETUP_SQPOLL) != 0,
+            .single_issuer_active = (ring.flags & linux.IORING_SETUP_SINGLE_ISSUER) != 0,
+            .coop_taskrun_active = (ring.flags & linux.IORING_SETUP_COOP_TASKRUN) != 0,
+            .submit_all_active = (ring.flags & linux.IORING_SETUP_SUBMIT_ALL) != 0,
+        };
+
+        var mutable_ring = ring.*;
+        const probe = mutable_ring.get_probe() catch return capabilities;
+        capabilities.accept_supported = probe.is_supported(.ACCEPT);
+        capabilities.recv_supported = probe.is_supported(.RECV);
+        capabilities.writev_supported = probe.is_supported(.WRITEV);
+        capabilities.provided_buffers_supported = probe.is_supported(.PROVIDE_BUFFERS);
+        return capabilities;
     }
 
     /// Clean up all io_uring resources.
@@ -188,6 +283,30 @@ pub const IoUring = struct {
     /// flushing SQPOLL.
     pub fn prepareNop(self: *Self, user_data: u64) !void {
         _ = try self.ring.nop(user_data);
+        self.pending_submissions += 1;
+    }
+
+    /// Queue a regular multishot accept operation. Direct descriptors are a
+    /// later optimization; this keeps fallback to existing fd handling simple.
+    pub fn prepareAcceptMultishot(
+        self: *Self,
+        listen_fd: posix.fd_t,
+        user_data: u64,
+        flags: u32,
+    ) !void {
+        _ = try self.ring.accept_multishot(user_data, listen_fd, null, null, flags);
+        self.pending_submissions += 1;
+    }
+
+    /// Queue a multishot recv using a ring-provided buffer group.
+    pub fn prepareRecvMultishot(
+        self: *Self,
+        group: *linux.IoUring.BufferGroup,
+        socket_fd: posix.fd_t,
+        user_data: u64,
+        flags: u32,
+    ) !void {
+        _ = try group.recv_multishot(user_data, socket_fd, flags);
         self.pending_submissions += 1;
     }
 

@@ -223,7 +223,7 @@ pub const BrokerApplication = struct {
             self.sender_loop = null;
         }
 
-        self.receiver_loop = ReceiverEventLoop.initWithGroup(
+        self.receiver_loop = ReceiverEventLoop.initWithGroupAndIoUring(
             &self.routing_registry.?,
             &self.counters.?,
             self.config.node_id,
@@ -231,6 +231,16 @@ pub const BrokerApplication = struct {
             self.config.group_name,
             &self.admin_cmd_queue.?,
             self.config.benchmark_latency_tracing_enabled,
+            .{
+                .enabled = self.config.io_uring_receiver_enabled,
+                .queue_depth = @intCast(self.config.io_uring_queue_depth),
+                .cq_depth = self.config.io_uring_cq_depth,
+                .sqpoll = self.config.io_uring_sqpoll,
+                .single_issuer = self.config.io_uring_single_issuer,
+                .coop_taskrun = self.config.io_uring_coop_taskrun,
+                .recv_buffer_size = self.config.io_uring_recv_buffer_size,
+                .recv_buffer_count = @intCast(self.config.io_uring_recv_buffer_count),
+            },
         );
 
         // Wire up TCP: add peer endpoints to the sender, init listener on receiver.
