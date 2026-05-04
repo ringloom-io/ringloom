@@ -66,6 +66,13 @@ gradle test \
 The integration tests use `scripts/start-test-broker.sh`. Example manual usage:
 
 ```bash
+# Single broker
 ./scripts/start-test-broker.sh --workspace /tmp/ringloom-java-it-demo --daemon
 ./scripts/start-test-broker.sh --workspace /tmp/ringloom-java-it-demo --stop
+
+# Two connected brokers in the same workspace
+./scripts/start-test-broker.sh --workspace /tmp/ringloom-java-it-demo --node-id 1 --port 19001 --peer 2@127.0.0.1:19002 --daemon
+./scripts/start-test-broker.sh --workspace /tmp/ringloom-java-it-demo --node-id 2 --port 19002 --peer 1@127.0.0.1:19001 --daemon
+./scripts/start-test-broker.sh --workspace /tmp/ringloom-java-it-demo --node-id 1 --stop
+./scripts/start-test-broker.sh --workspace /tmp/ringloom-java-it-demo --node-id 2 --stop
 ```

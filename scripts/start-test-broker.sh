@@ -8,6 +8,7 @@ group="ringloom-java-test"
 node_id="1"
 host="127.0.0.1"
 port="19001"
+peer_endpoints=()
 bin_dir="zig-out/bin"
 timeout_sec="10"
 mode=""
@@ -16,12 +17,14 @@ usage() {
     cat <<'EOF'
 Usage:
   ./scripts/start-test-broker.sh [--workspace DIR] [--group NAME] [--node-id N]
-                                 [--host HOST] [--port PORT] [--bin-dir DIR]
+                                 [--host HOST] [--port PORT]
+                                 [--peer NODE@HOST:PORT]... [--bin-dir DIR]
                                  [--timeout SEC] --foreground
   ./scripts/start-test-broker.sh [--workspace DIR] [--group NAME] [--node-id N]
-                                 [--host HOST] [--port PORT] [--bin-dir DIR]
+                                 [--host HOST] [--port PORT]
+                                 [--peer NODE@HOST:PORT]... [--bin-dir DIR]
                                  [--timeout SEC] --daemon
-  ./scripts/start-test-broker.sh --workspace DIR --stop
+  ./scripts/start-test-broker.sh --workspace DIR [--node-id N] --stop
 EOF
 }
 
@@ -45,6 +48,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --port)
             port="$2"
+            shift 2
+            ;;
+        --peer)
+            peer_endpoints+=("$2")
             shift 2
             ;;
         --bin-dir)
@@ -84,6 +91,11 @@ if [[ -z "$mode" ]]; then
     exit 1
 fi
 
+if [[ "$mode" == "stop" && -z "$workspace" ]]; then
+    echo "--workspace is required with --stop" >&2
+    exit 1
+fi
+
 if [[ -z "$workspace" ]]; then
     workspace="$(mktemp -d /tmp/ringloom-java-it-XXXXXX)"
 fi
@@ -91,7 +103,7 @@ fi
 config_dir="$workspace/config"
 logs_dir="$workspace/logs"
 storage_dir="$workspace/storage"
-pid_file="$workspace/broker.pid"
+pid_file="$workspace/broker_${node_id}.pid"
 config_file="$config_dir/broker_${node_id}.properties"
 log_file="$logs_dir/broker_${node_id}.log"
 broker_bin="$bin_dir/ringloom-broker"
@@ -101,25 +113,37 @@ ensure_workspace() {
 }
 
 write_config() {
-    cat >"$config_file" <<EOF
-broker.node.id=$node_id
-broker.local.host.port=$host:$port
-broker.group.name=$group
-broker.storage.path=$storage_dir
-broker.control.buffer.size=65536
-broker.messages.buffer.size=1048576
-broker.threading.mode=dedicated
-broker.idle.strategy=backoff
-EOF
+    local peers_csv=""
+    if (( ${#peer_endpoints[@]} > 0 )); then
+        peers_csv="$(IFS=,; printf '%s' "${peer_endpoints[*]}")"
+    fi
+
+    {
+        printf 'broker.node.id=%s\n' "$node_id"
+        printf 'broker.local.host.port=%s:%s\n' "$host" "$port"
+        if [[ -n "$peers_csv" ]]; then
+            printf 'broker.member.host.ports=%s\n' "$peers_csv"
+        fi
+        printf 'broker.group.name=%s\n' "$group"
+        printf 'broker.storage.path=%s\n' "$storage_dir"
+        printf 'broker.control.buffer.size=65536\n'
+        printf 'broker.messages.buffer.size=1048576\n'
+        printf 'broker.threading.mode=dedicated\n'
+        printf 'broker.idle.strategy=backoff\n'
+    } >"$config_file"
 }
 
 print_env() {
     local pid="$1"
     printf 'RINGLOOM_BROKER_PID=%s\n' "$pid"
+    printf 'RINGLOOM_BROKER_NODE_ID=%s\n' "$node_id"
     printf 'RINGLOOM_BROKER_CONFIG=%s\n' "$config_file"
     printf 'RINGLOOM_BROKER_LOG=%s\n' "$log_file"
     printf 'RINGLOOM_STORAGE_PATH=%s\n' "$storage_dir"
     printf 'RINGLOOM_GROUP=%s\n' "$group"
+    if (( ${#peer_endpoints[@]} > 0 )); then
+        printf 'RINGLOOM_BROKER_PEERS=%s\n' "$(IFS=,; printf '%s' "${peer_endpoints[*]}")"
+    fi
 }
 
 wait_for_ready() {
