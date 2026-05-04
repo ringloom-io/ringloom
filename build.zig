@@ -342,4 +342,96 @@ pub fn build(b: *std.Build) void {
 
     const stat_step = b.step("stat", "Run the ringloom-stat monitoring tool");
     stat_step.dependOn(&stat_run_cmd.step);
+
+    // ── Order-management sample ──────────────────────────────────────
+
+    const order_sample_common = b.addModule("order_management_sample_common", .{
+        .root_source_file = b.path("samples/order-management/src/common/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "ringloom_common", .module = ringloom_common },
+            .{ .name = "ringloom_service", .module = ringloom_service },
+        },
+    });
+
+    const SampleBinEntry = struct {
+        source_name: []const u8,
+        exe_name: []const u8,
+    };
+
+    const sample_bin_entries = [_]SampleBinEntry{
+        .{ .source_name = "order_simulator", .exe_name = "ringloom-sample-order-simulator" },
+        .{ .source_name = "order_gateway", .exe_name = "ringloom-sample-order-gateway" },
+        .{ .source_name = "risk_service", .exe_name = "ringloom-sample-risk-service" },
+        .{ .source_name = "matching_engine", .exe_name = "ringloom-sample-matching-engine" },
+        .{ .source_name = "execution_service", .exe_name = "ringloom-sample-execution-service" },
+        .{ .source_name = "portfolio_service", .exe_name = "ringloom-sample-portfolio-service" },
+    };
+
+    const sample_build_step = b.step("sample-order-management", "Build the order-management sample binaries");
+
+    for (sample_bin_entries) |entry| {
+        const sample_exe = b.addExecutable(.{
+            .name = entry.exe_name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    b.fmt("samples/order-management/src/services/{s}.zig", .{entry.source_name}),
+                ),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "ringloom_common", .module = ringloom_common },
+                    .{ .name = "ringloom_service", .module = ringloom_service },
+                    .{ .name = "order_management_sample_common", .module = order_sample_common },
+                },
+            }),
+        });
+        b.installArtifact(sample_exe);
+        sample_build_step.dependOn(&sample_exe.step);
+    }
+
+    const sample_common_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("samples/order-management/src/common/root.zig"),
+            .target = target,
+            .imports = &.{
+                .{ .name = "ringloom_common", .module = ringloom_common },
+                .{ .name = "ringloom_service", .module = ringloom_service },
+            },
+        }),
+    });
+    const run_sample_common_tests = b.addRunArtifact(sample_common_tests);
+    sample_build_step.dependOn(&run_sample_common_tests.step);
+    sample_build_step.dependOn(&broker_exe.step);
+    sample_build_step.dependOn(&stat_exe.step);
+    sample_build_step.dependOn(b.getInstallStep());
+
+    const run_sample_cmd = b.addSystemCommand(&.{
+        "samples/order-management/scripts/run.sh",
+        "--no-build",
+        "--bin-dir",
+        "zig-out/bin",
+    });
+    run_sample_cmd.step.dependOn(sample_build_step);
+    if (b.args) |args| {
+        run_sample_cmd.addArgs(args);
+    }
+
+    const run_sample_step = b.step("run-sample-order-management", "Run the order-management sample");
+    run_sample_step.dependOn(&run_sample_cmd.step);
+
+    const sample_smoke_cmd = b.addSystemCommand(&.{
+        "samples/order-management/scripts/run.sh",
+        "--no-build",
+        "--bin-dir",
+        "zig-out/bin",
+        "--orders",
+        "32",
+        "--rate-per-sec",
+        "1000",
+    });
+    sample_smoke_cmd.step.dependOn(sample_build_step);
+
+    const sample_smoke_step = b.step("sample-order-management-smoke", "Run a small order-management sample smoke test");
+    sample_smoke_step.dependOn(&sample_smoke_cmd.step);
 }
