@@ -14,18 +14,18 @@ pub const Account = struct {
 };
 
 pub const accounts = [_]Account{
-    .{ .id = 1001, .credit_nanos = 10_000_000_000_000 },
-    .{ .id = 1002, .credit_nanos = 12_500_000_000_000 },
-    .{ .id = 1003, .credit_nanos = 9_500_000_000_000 },
-    .{ .id = 1004, .credit_nanos = 8_000_000_000_000 },
+    .{ .id = 1001, .credit_nanos = 4_000_000_000_000_000_000 },
+    .{ .id = 1002, .credit_nanos = 4_000_000_000_000_000_000 },
+    .{ .id = 1003, .credit_nanos = 4_000_000_000_000_000_000 },
+    .{ .id = 1004, .credit_nanos = 4_000_000_000_000_000_000 },
 };
 
 pub const symbols = [_]protocol.Symbol{ .aapl, .msft, .nvda, .zig };
 pub const symbol_notional_limits = [_]i64{
-    15_000_000_000_000,
-    15_000_000_000_000,
-    20_000_000_000_000,
-    5_000_000_000_000,
+    2_000_000_000_000_000_000,
+    3_000_000_000_000_000_000,
+    5_000_000_000_000_000_000,
+    1_000_000_000_000_000_000,
 };
 
 pub fn accountIndex(account_id: u32) ?usize {

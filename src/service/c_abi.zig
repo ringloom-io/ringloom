@@ -149,9 +149,7 @@ const ServiceHandle = struct {
 
     fn destroyEngine(self: *ServiceHandle) void {
         const engine = self.engine orelse return;
-        self.allocator.destroy(engine.service_meta);
-        self.allocator.destroy(engine.broker_meta);
-        self.allocator.destroy(engine);
+        engine.deinit();
         self.engine = null;
     }
 };
@@ -562,9 +560,7 @@ export fn ringloom_service_start(
     ) catch |err| return mapStartError(err, owned);
     errdefer {
         engine.stop();
-        allocator.destroy(engine.service_meta);
-        allocator.destroy(engine.broker_meta);
-        allocator.destroy(engine);
+        engine.deinit();
     }
 
     const service = allocator.create(ServiceHandle) catch

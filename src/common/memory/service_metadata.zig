@@ -117,6 +117,7 @@ pub const ServiceMetadataFile = struct {
             opts.group,
             opts.service_name,
             opts.service_id,
+            opts.node_id,
         );
 
         try ensureDirectoryExists(path);
@@ -172,6 +173,7 @@ pub const ServiceMetadataFile = struct {
         group: []const u8,
         service_name: []const u8,
         service_id: i32,
+        node_id: i16,
     ) !ServiceMetadataFile {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try buildServicePath(
@@ -180,8 +182,26 @@ pub const ServiceMetadataFile = struct {
             group,
             service_name,
             service_id,
+            node_id,
         );
 
+        return openPath(path) catch |err| switch (err) {
+            error.FileNotFound => {
+                var legacy_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const legacy_path = try buildLegacyServicePath(
+                    &legacy_path_buf,
+                    storage_path,
+                    group,
+                    service_name,
+                    service_id,
+                );
+                return openPath(legacy_path);
+            },
+            else => return err,
+        };
+    }
+
+    fn openPath(path: []const u8) !ServiceMetadataFile {
         const fd = try platform.openFile(path);
         errdefer platform.closeFd(fd);
 
@@ -282,6 +302,23 @@ pub const ServiceMetadataFile = struct {
     }
 
     fn buildServicePath(
+        buf: *[std.fs.max_path_bytes]u8,
+        storage_path: []const u8,
+        group: []const u8,
+        service_name: []const u8,
+        service_id: i32,
+        node_id: i16,
+    ) ![]const u8 {
+        return std.fmt.bufPrint(buf, "{s}/{s}/services/{s}_node{d}_{d}.dat", .{
+            storage_path,
+            group,
+            service_name,
+            node_id,
+            service_id,
+        }) catch return error.PathTooLong;
+    }
+
+    fn buildLegacyServicePath(
         buf: *[std.fs.max_path_bytes]u8,
         storage_path: []const u8,
         group: []const u8,
@@ -412,4 +449,33 @@ test "heartbeat read and write are consistent" {
 
     file.storeHeartbeat(987654321);
     try testing.expectEqual(@as(i64, 987654321), file.loadHeartbeat());
+}
+
+test "service metadata path includes node id" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(storage_path);
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
+
+    var node1 = try ServiceMetadataFile.create(.{
+        .storage_path = storage_path,
+        .group = "test-group",
+        .service_name = "shared",
+        .service_id = 1,
+        .node_id = 1,
+    });
+    defer node1.close();
+
+    var node2 = try ServiceMetadataFile.create(.{
+        .storage_path = storage_path,
+        .group = "test-group",
+        .service_name = "shared",
+        .service_id = 1,
+        .node_id = 2,
+    });
+    defer node2.close();
+
+    try testing.expectEqual(@as(i16, 1), node1.header.node_id);
+    try testing.expectEqual(@as(i16, 2), node2.header.node_id);
 }

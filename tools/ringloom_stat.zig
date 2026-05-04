@@ -1,66 +1,195 @@
-//! ringloom-stat — External monitoring tool for the RingLoom broker.
-//!
-//! Reads the broker's metadata file via mmap (read-only) and prints
-//! counters and error log entries. Zero overhead on the broker process.
+//! ringloom-stat — External metadata inspection tool for RingLoom.
 //!
 //! Usage:
-//!   ringloom-stat [path-to-broker.dat]
-//!
-//! If no path is given, defaults to /dev/shm/ringloom/services/broker_0.dat.
+//!   ringloom-stat --storage-path /dev/shm --group ringloom-default
+//!   ringloom-stat --storage-path /dev/shm --group ringloom-default --broker-node-id 1
+//!   ringloom-stat /dev/shm/ringloom-default/services/broker_1.dat
 
 const std = @import("std");
+const ringloom_common = @import("ringloom_common");
 
-const metadata_header_length: usize = 512;
-const ring_buffer_trailer_length: usize = 768;
-const counter_value_length: usize = 128;
-const counter_metadata_length: usize = 256;
-const entry_header_length: usize = 24;
-const entry_alignment: usize = 8;
+const memory = ringloom_common.memory;
+const platform = ringloom_common.platform;
+const BrokerMetadataFile = memory.BrokerMetadataFile;
+const BrokerMetadataHeader = memory.BrokerMetadataHeader;
+const ServiceMetadataFile = memory.ServiceMetadataFile;
+const ServiceScanner = memory.ServiceScanner;
+const constants = memory.constants;
 
-const BrokerMetadataHeader = extern struct {
-    control_buffer_length: i32,
-    messages_buffer_length: i32,
-    service_id: i32,
-    node_id: i16,
-    _padding0: i16,
-    pid: i64,
-    start_timestamp_ms: i64,
-    _reserved: [224]u8,
-    heartbeat_time_ms: i64, // offset 256
-    _padding1: [24]u8,
-    next_service_id: i32, // offset 288
-    _padding2: [212]u8,
-    // Extended fields:
-    counter_values_buffer_size: i32,
-    error_log_buffer_size: i32,
+const Args = struct {
+    storage_path: []const u8 = constants.default_storage_path,
+    group: []const u8 = "default",
+    broker_node_id: ?i16 = null,
+    broker_path: ?[]const u8 = null,
 };
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-
-    const path = if (args.len > 1) args[1] else "/dev/shm/ringloom/services/broker_0.dat";
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_w.interface;
+    defer stdout.flush() catch {};
+
     var stderr_buf: [4096]u8 = undefined;
     var stderr_w = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_w.interface;
+    defer stderr.flush() catch {};
 
-    // Open and mmap the file read-only.
+    const args = parseArgs(argv, stderr);
+    if (args.broker_path) |path| {
+        try printBrokerPath(io, stdout, path);
+    } else {
+        try printStorage(io, stdout, args);
+    }
+}
+
+fn parseArgs(argv: []const []const u8, stderr: *std.Io.Writer) Args {
+    var args: Args = .{};
+    var i: usize = 1;
+    while (i < argv.len) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            printUsage(stderr) catch {};
+            stderr.flush() catch {};
+            std.process.exit(0);
+        } else if (std.mem.eql(u8, arg, "--storage-path")) {
+            i += 1;
+            if (i >= argv.len) fatal(stderr, "--storage-path requires a value", .{});
+            args.storage_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--group")) {
+            i += 1;
+            if (i >= argv.len) fatal(stderr, "--group requires a value", .{});
+            args.group = argv[i];
+        } else if (std.mem.eql(u8, arg, "--broker-node-id")) {
+            i += 1;
+            if (i >= argv.len) fatal(stderr, "--broker-node-id requires a value", .{});
+            args.broker_node_id = std.fmt.parseInt(i16, argv[i], 10) catch
+                fatal(stderr, "--broker-node-id must be an integer", .{});
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            fatal(stderr, "unknown option: {s}", .{arg});
+        } else if (args.broker_path == null) {
+            args.broker_path = arg;
+        } else {
+            fatal(stderr, "unexpected positional argument: {s}", .{arg});
+        }
+        i += 1;
+    }
+    return args;
+}
+
+fn printUsage(writer: *std.Io.Writer) !void {
+    try writer.writeAll(
+        \\Usage:
+        \\  ringloom-stat --storage-path PATH --group GROUP [--broker-node-id N]
+        \\  ringloom-stat PATH/TO/broker_N.dat
+        \\
+    );
+}
+
+fn printStorage(io: std.Io, stdout: *std.Io.Writer, args: Args) !void {
+    var dir_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = std.fmt.bufPrint(&dir_path_buf, "{s}/{s}/services", .{
+        args.storage_path,
+        args.group,
+    }) catch return error.PathTooLong;
+
+    try stdout.print("=== RingLoom Metadata Status ===\n", .{});
+    try stdout.print("Storage: {s}\n", .{args.storage_path});
+    try stdout.print("Group:   {s}\n", .{args.group});
+    try stdout.print("Dir:     {s}\n\n", .{dir_path});
+
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => {
+            try stdout.print("metadata directory not found\n", .{});
+            return;
+        },
+        else => return err,
+    };
+    defer dir.close(io);
+
+    const now_ms = platform.Clock.epochMillis();
+    try stdout.print("--- Brokers ---\n", .{});
+    var broker_count: usize = 0;
+    var service_count: usize = 0;
+
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!BrokerMetadataFile.isBrokerMetadataFile(entry.name)) continue;
+        const node_id = parseBrokerNodeId(entry.name) orelse continue;
+        if (args.broker_node_id) |wanted| {
+            if (node_id != wanted) continue;
+        }
+        try printBrokerFromStorage(stdout, args.storage_path, args.group, node_id, now_ms);
+        broker_count += 1;
+    }
+    if (broker_count == 0) {
+        try stdout.print("  (none)\n", .{});
+    }
+
+    try stdout.print("\n--- Services ---\n", .{});
+    iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (BrokerMetadataFile.isBrokerMetadataFile(entry.name)) continue;
+        const parsed = ServiceScanner.parseFileName(entry.name) orelse continue;
+        if (args.broker_node_id) |wanted| {
+            if (parsed.node_id != wanted) continue;
+        }
+        try printServiceFromStorage(stdout, args.storage_path, args.group, entry.name, parsed, now_ms);
+        service_count += 1;
+    }
+    if (service_count == 0) {
+        try stdout.print("  (none)\n", .{});
+    }
+
+    try stdout.print("\n--- Done ({d} brokers, {d} services) ---\n", .{ broker_count, service_count });
+}
+
+fn printBrokerFromStorage(
+    stdout: *std.Io.Writer,
+    storage_path: []const u8,
+    group: []const u8,
+    node_id: i16,
+    now_ms: i64,
+) !void {
+    var broker = BrokerMetadataFile.open(storage_path, group, node_id) catch |err| {
+        try stdout.print("  broker node={d}: open failed ({s})\n", .{ node_id, @errorName(err) });
+        return;
+    };
+    defer broker.close();
+
+    try printBrokerSummary(
+        stdout,
+        node_id,
+        broker.header.service_id,
+        broker.header.pid,
+        broker.header.start_timestamp_ms,
+        broker.loadHeartbeat(),
+        broker.loadNextServiceId(),
+        broker.header.control_buffer_length,
+        broker.header.messages_buffer_length,
+        broker.loadFcBufferLength(),
+        broker.loadPeerSendCountersLength(),
+        now_ms,
+    );
+}
+
+fn printBrokerPath(io: std.Io, stdout: *std.Io.Writer, path: []const u8) !void {
     const file = (if (std.fs.path.isAbsolute(path))
         std.Io.Dir.openFileAbsolute(io, path, .{ .mode = .read_only })
     else
         std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only })) catch |err| {
-        try stderr.print("error: cannot open '{s}': {s}\n", .{ path, @errorName(err) });
+        try stdout.print("error: cannot open '{s}': {s}\n", .{ path, @errorName(err) });
         std.process.exit(1);
     };
     defer file.close(io);
 
     const stat = try file.stat(io);
-    if (stat.size < metadata_header_length) {
-        try stderr.print("error: file too small ({d} bytes) — not a valid broker metadata file\n", .{stat.size});
+    if (stat.size < constants.metadata_header_length) {
+        try stdout.print("error: file too small ({d} bytes) - not a valid broker metadata file\n", .{stat.size});
         std.process.exit(1);
     }
 
@@ -74,109 +203,125 @@ pub fn main(init: std.process.Init) !void {
     );
     defer std.posix.munmap(mapped);
 
-    // Read header to find buffer offsets.
     const header: *const BrokerMetadataHeader = @ptrCast(@alignCast(mapped.ptr));
-    const control_buf_size: usize = @intCast(header.control_buffer_length);
-    const send_buf_size: usize = @intCast(header.messages_buffer_length);
-
-    // Calculate offsets (must match broker's layout computation).
-    const control_end = metadata_header_length + control_buf_size + ring_buffer_trailer_length;
-    const send_end = control_end + send_buf_size + ring_buffer_trailer_length;
-
-    // Counter values buffer starts at send_end.
-    const counter_values_offset = send_end;
-    const counter_values_size: usize = @intCast(header.counter_values_buffer_size);
-    const max_counter_id = counter_values_size / counter_value_length;
-    const counter_metadata_offset = counter_values_offset + counter_values_size;
-    const counter_metadata_size = max_counter_id * counter_metadata_length;
-    const error_log_offset = counter_metadata_offset + counter_metadata_size;
-    const error_log_size: usize = @intCast(header.error_log_buffer_size);
-
-    // Validate offsets fit within mapped region.
-    const required_size = error_log_offset + error_log_size;
-    if (required_size > stat.size) {
-        try stderr.print("error: file size ({d}) too small for declared buffers (need {d})\n", .{ stat.size, required_size });
-        std.process.exit(1);
-    }
-
-    // Print header info.
     try stdout.print("=== RingLoom Broker Status ({s}) ===\n", .{path});
-    try stdout.print("Node ID:           {d}\n", .{header.node_id});
-    try stdout.print("Service ID:        {d}\n", .{header.service_id});
-    try stdout.print("PID:               {d}\n", .{header.pid});
-    try stdout.print("Start Timestamp:   {d} ms\n", .{header.start_timestamp_ms});
-    try stdout.print("Heartbeat:         {d} ms\n", .{header.heartbeat_time_ms});
-    try stdout.print("Next Service ID:   {d}\n", .{header.next_service_id});
-    try stdout.print("Control Buffer:    {d} bytes\n", .{control_buf_size});
-    try stdout.print("Send Buffer:       {d} bytes\n", .{send_buf_size});
-    try stdout.print("Counter Values:    {d} bytes ({d} slots)\n", .{ counter_values_size, max_counter_id });
-    try stdout.print("Error Log:         {d} bytes\n", .{error_log_size});
-    try stdout.print("\n", .{});
+    try printBrokerSummary(
+        stdout,
+        header.node_id,
+        header.service_id,
+        header.pid,
+        header.start_timestamp_ms,
+        loadAt(i64, mapped, constants.heartbeat_offset_within_header),
+        loadAt(i32, mapped, constants.next_service_id_offset_within_header),
+        header.control_buffer_length,
+        header.messages_buffer_length,
+        loadAt(i32, mapped, constants.fc_buffer_length_offset),
+        loadAt(i32, mapped, constants.peer_send_counters_length_offset),
+        platform.Clock.epochMillis(),
+    );
+}
 
-    // Print counters.
-    try stdout.print("--- Counters ---\n", .{});
-    const values_buf = mapped[counter_values_offset..][0..counter_values_size];
-    const meta_buf = mapped[counter_metadata_offset..][0..counter_metadata_size];
+fn printBrokerSummary(
+    stdout: *std.Io.Writer,
+    node_id: i16,
+    service_id: i32,
+    pid: i64,
+    start_timestamp_ms: i64,
+    heartbeat_ms: i64,
+    next_service_id: i32,
+    control_buffer_length: i32,
+    send_buffer_length: i32,
+    fc_buffer_length: i32,
+    peer_send_counters_length: i32,
+    now_ms: i64,
+) !void {
+    const alive = platform.isProcessAlive(@intCast(pid));
+    const age_ms = ageMillis(now_ms, heartbeat_ms);
+    try stdout.print(
+        "  node={d} status={s} pid={d} heartbeat_age_ms={d} service_id={d} next_service_id={d}\n" ++
+            "    started_ms={d} control_buffer={d} send_buffer={d} flow_control_bytes={d} peer_send_counter_bytes={d}\n",
+        .{
+            node_id,
+            if (alive) "alive" else "dead",
+            pid,
+            age_ms,
+            service_id,
+            next_service_id,
+            start_timestamp_ms,
+            control_buffer_length,
+            send_buffer_length,
+            fc_buffer_length,
+            peer_send_counters_length,
+        },
+    );
+}
 
-    var counter_count: usize = 0;
-    var id: usize = 0;
-    while (id < max_counter_id) : (id += 1) {
-        const meta_base = id * counter_metadata_length;
-        const state_ptr: *const i32 = @ptrCast(@alignCast(meta_buf.ptr + meta_base));
-        const state = @atomicLoad(i32, state_ptr, .acquire);
+fn printServiceFromStorage(
+    stdout: *std.Io.Writer,
+    storage_path: []const u8,
+    group: []const u8,
+    file_name: []const u8,
+    parsed: ServiceScanner.ParsedFileName,
+    now_ms: i64,
+) !void {
+    var service = ServiceMetadataFile.open(
+        storage_path,
+        group,
+        parsed.name,
+        parsed.id,
+        parsed.node_id,
+    ) catch |err| {
+        try stdout.print("  {s}: open failed ({s})\n", .{ file_name, @errorName(err) });
+        return;
+    };
+    defer service.close();
 
-        if (state == 1) { // allocated
-            const type_id_ptr: *const i32 = @ptrCast(@alignCast(meta_buf.ptr + meta_base + 4));
-            const label_len_ptr: *const i32 = @ptrCast(@alignCast(meta_buf.ptr + meta_base + 8));
-            const label_len: usize = @intCast(label_len_ptr.*);
-            const label_text = meta_buf[meta_base + 12 ..][0..label_len];
+    const heartbeat = service.loadHeartbeat();
+    const timeout_ms: i64 = service.header.heartbeat_timeout_ms;
+    const alive = service.isProcessAlive();
+    const fresh = heartbeat > 0 and ageMillis(now_ms, heartbeat) <= timeout_ms;
+    const status = if (alive and fresh)
+        "live"
+    else if (alive)
+        "stale-heartbeat"
+    else
+        "dead";
 
-            const value_offset = id * counter_value_length;
-            const value_ptr: *const i64 = @ptrCast(@alignCast(values_buf.ptr + value_offset));
-            const value = @atomicLoad(i64, value_ptr, .acquire);
+    try stdout.print(
+        "  node={d} id={d} status={s} pid={d} heartbeat_age_ms={d} timeout_ms={d} control_buffer={d} messages_buffer={d} name={s}\n",
+        .{
+            service.header.node_id,
+            service.header.service_id,
+            status,
+            service.header.pid,
+            ageMillis(now_ms, heartbeat),
+            timeout_ms,
+            service.header.control_buffer_length,
+            service.header.messages_buffer_length,
+            parsed.name,
+        },
+    );
+}
 
-            try stdout.print("  [{d:>3}] type={d:<3} {s:<40} {d}\n", .{ id, type_id_ptr.*, label_text, value });
-            counter_count += 1;
-        }
-    }
+fn parseBrokerNodeId(file_name: []const u8) ?i16 {
+    if (!BrokerMetadataFile.isBrokerMetadataFile(file_name)) return null;
+    const id_text = file_name["broker_".len .. file_name.len - ".dat".len];
+    return std.fmt.parseInt(i16, id_text, 10) catch null;
+}
 
-    if (counter_count == 0) {
-        try stdout.print("  (no counters allocated)\n", .{});
-    }
+fn loadAt(comptime T: type, mapped: []align(std.heap.page_size_min) u8, offset: usize) T {
+    const ptr: *const volatile T = @ptrCast(@alignCast(mapped.ptr + offset));
+    return @atomicLoad(T, ptr, .acquire);
+}
 
-    // Print error log.
-    try stdout.print("\n--- Error Log ---\n", .{});
-    const error_buf = mapped[error_log_offset..][0..error_log_size];
+fn ageMillis(now_ms: i64, heartbeat_ms: i64) i64 {
+    if (heartbeat_ms <= 0 or now_ms <= heartbeat_ms) return 0;
+    return now_ms - heartbeat_ms;
+}
 
-    var error_count: usize = 0;
-    var offset: usize = 0;
-    while (offset < error_log_size) {
-        const len_ptr: *const i32 = @ptrCast(@alignCast(error_buf.ptr + offset));
-        const entry_len = @atomicLoad(i32, len_ptr, .acquire);
-        if (entry_len <= 0) break;
-
-        const base = offset;
-        const obs_ptr: *const i32 = @ptrCast(@alignCast(error_buf.ptr + base + 4));
-        const last_ts_ptr: *const i64 = @ptrCast(@alignCast(error_buf.ptr + base + 8));
-        const first_ts_ptr: *const i64 = @ptrCast(@alignCast(error_buf.ptr + base + 16));
-
-        const obs_count = @atomicLoad(i32, obs_ptr, .acquire);
-        const last_ts = @atomicLoad(i64, last_ts_ptr, .acquire);
-        const first_ts = first_ts_ptr.*;
-
-        const desc_len: usize = @intCast(entry_len - @as(i32, @intCast(entry_header_length)));
-        const description = error_buf[base + entry_header_length ..][0..desc_len];
-
-        try stdout.print("  [{d}x] {s}\n", .{ obs_count, description });
-        try stdout.print("        first={d}  last={d}\n", .{ first_ts, last_ts });
-
-        error_count += 1;
-        offset += std.mem.alignForward(usize, @intCast(entry_len), entry_alignment);
-    }
-
-    if (error_count == 0) {
-        try stdout.print("  (no errors recorded)\n", .{});
-    }
-
-    try stdout.print("\n--- Done ({d} counters, {d} errors) ---\n", .{ counter_count, error_count });
+fn fatal(stderr: *std.Io.Writer, comptime fmt: []const u8, values: anytype) noreturn {
+    stderr.print("error: " ++ fmt ++ "\n", values) catch {};
+    printUsage(stderr) catch {};
+    stderr.flush() catch {};
+    std.process.exit(2);
 }

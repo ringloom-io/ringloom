@@ -170,6 +170,7 @@ pub fn main(init: std.process.Init) !void {
         .broker_node_id = common.broker_node_id,
         .idle_strategy = common.idle_strategy,
     }) catch |err| fatal(io, "risk-service: failed to start engine: {}\n", .{err});
+    defer engine.deinit();
     engine.setMessageHandler(&onMessage);
 
     const matching_client = engine.createClient(names.matching_engine) catch |err|

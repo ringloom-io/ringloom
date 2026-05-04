@@ -330,6 +330,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tools/ringloom_stat.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ringloom_common", .module = ringloom_common },
+            },
         }),
     });
     b.installArtifact(stat_exe);

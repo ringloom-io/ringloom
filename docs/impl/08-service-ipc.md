@@ -117,9 +117,9 @@ Channel layout in memory, with references to doc 02 structures:
 | Channel | Backing File | Buffer Accessor | Default Size |
 |---------|-------------|-----------------|-------------|
 | Service → Broker Control | `broker_0.dat` | `BrokerMetadataFile.getControlBuffer()` | 64 KiB |
-| Broker → Service Control | `<name>_<id>.dat` | `ServiceMetadataFile.getControlBuffer()` | 64 KiB |
+| Broker → Service Control | `<name>_node<node_id>_<id>.dat` | `ServiceMetadataFile.getControlBuffer()` | 64 KiB |
 | Service → Broker Send | `broker_0.dat` | `BrokerMetadataFile.getSendBuffer()` | 1 MiB |
-| Producers → Service Messages | `<name>_<id>.dat` | `ServiceMetadataFile.getMessagesBuffer()` | 1 MiB |
+| Producers → Service Messages | `<name>_node<node_id>_<id>.dat` | `ServiceMetadataFile.getMessagesBuffer()` | 1 MiB |
 
 All four buffers are MPSC ring buffers initialized with `RingBuffer.init(buffer_slice)`
 from doc 03.
@@ -193,7 +193,7 @@ fn createServiceMetadata(config: ServiceConfig) !struct {
     const node_id = broker_meta.header.node_id;
 
     // 4. Create the service's metadata file.
-    //    Path: <storage_path>/<group>/services/<name>_<id>.dat
+    //    Path: <storage_path>/<group>/services/<name>_node<node_id>_<id>.dat
     //
     //    File layout (from doc 02):
     //      [512-byte header]

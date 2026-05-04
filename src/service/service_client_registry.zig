@@ -182,6 +182,7 @@ pub const ServiceClientRegistry = struct {
         if (BuffersProvider.getInstance(
             self.allocator,
             service_id,
+            node_id,
             service_name,
             self.storage_path,
             self.group,

@@ -98,6 +98,7 @@ pub fn main(init: std.process.Init) !void {
     }) catch |err| {
         try fatal(io, "portfolio-service: failed to start engine: {}\n", .{err});
     };
+    defer engine.deinit();
     engine.setMessageHandler(&onMessage);
     try app.printReady(io, common.service_name);
 

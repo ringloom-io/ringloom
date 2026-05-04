@@ -138,6 +138,7 @@ pub fn main(init: std.process.Init) !void {
         try stderr.flush();
         std.process.exit(1);
     };
+    defer engine.deinit();
     defer engine.stop();
 
     // ── Create client for target service ─────────────────────────────

@@ -105,6 +105,7 @@ pub fn main(init: std.process.Init) !void {
         .broker_node_id = common.broker_node_id,
         .idle_strategy = common.idle_strategy,
     }) catch |err| fatal(io, "execution-service: failed to start engine: {}\n", .{err});
+    defer engine.deinit();
     engine.setMessageHandler(&onMessage);
 
     const portfolio_client = engine.createClient(names.portfolio_service) catch |err|

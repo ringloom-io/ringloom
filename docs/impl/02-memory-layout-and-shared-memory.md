@@ -45,7 +45,7 @@ There are three types of memory-mapped regions:
 All files are stored at `<storage_path>/<group>/services/`. The default storage path
 is `/dev/shm` on Linux (tmpfs — backed by RAM, survives across process restarts until
 reboot). The broker file is always named `broker_0.dat`. Service files are named
-`<name>_<id>.dat` (e.g. `pricing_3.dat`).
+`<name>_node<node_id>_<id>.dat` (e.g. `pricing_node1_3.dat`).
 
 ---
 
@@ -795,11 +795,13 @@ pub const ServiceMetadataFile = struct {
         group: []const u8,
         service_name: []const u8,
         service_id: i32,
+        node_id: i16,
     ) ![]const u8 {
-        return std.fmt.bufPrint(buf, "{s}/{s}/services/{s}_{d}.dat", .{
+        return std.fmt.bufPrint(buf, "{s}/{s}/services/{s}_node{d}_{d}.dat", .{
             storage_path,
             group,
             service_name,
+            node_id,
             service_id,
         }) catch return error.PathTooLong;
     }
@@ -1182,7 +1184,7 @@ pub const ServiceScanner = struct {
             // Skip the broker's own file.
             if (std.mem.eql(u8, entry.name, "broker_0.dat")) continue;
 
-            // Parse service name and ID from filename: <name>_<id>.dat
+            // Parse service name, node ID, and service ID from filename.
             const parsed = parseFileName(entry.name) orelse continue;
 
             // Try to open the metadata file.
@@ -1191,6 +1193,7 @@ pub const ServiceScanner = struct {
                 self.group,
                 parsed.name,
                 parsed.id,
+                parsed.node_id,
             ) catch continue;
 
             // Check if the owning process is alive and heartbeat is fresh.
@@ -1233,25 +1236,33 @@ pub const ServiceScanner = struct {
 
     const ParsedFileName = struct {
         name: []const u8,
+        node_id: i16,
         id: i32,
     };
 
-    /// Parse "<name>_<id>.dat" into name and id.
+    /// Parse "<name>_node<node_id>_<id>.dat" into name, node id, and service id.
     fn parseFileName(file_name: []const u8) ?ParsedFileName {
         // Strip ".dat" suffix.
         const without_ext = file_name[0 .. file_name.len - 4];
 
-        // Find the last underscore.
+        // Find the last underscore before the service id.
         const last_underscore = std.mem.lastIndexOfScalar(u8, without_ext, '_') orelse return null;
         if (last_underscore == 0) return null;
 
-        const name = without_ext[0..last_underscore];
+        const name_and_node = without_ext[0..last_underscore];
         const id_str = without_ext[last_underscore + 1 ..];
 
         const id = std.fmt.parseInt(i32, id_str, 10) catch return null;
 
+        const node_marker = "_node";
+        const node_marker_index = std.mem.lastIndexOf(u8, name_and_node, node_marker) orelse return null;
+        if (node_marker_index == 0) return null;
+        const node_str = name_and_node[node_marker_index + node_marker.len ..];
+        const node_id = std.fmt.parseInt(i16, node_str, 10) catch return null;
+
         return .{
-            .name = name,
+            .name = name_and_node[0..node_marker_index],
+            .node_id = node_id,
             .id = id,
         };
     }
@@ -1916,16 +1927,18 @@ const testing = std.testing;
 const ServiceScanner = @import("service_scanner.zig").ServiceScanner;
 
 test "parse valid service filename" {
-    const parsed = ServiceScanner.parseFileName("pricing_3.dat");
+    const parsed = ServiceScanner.parseFileName("pricing_node1_3.dat");
     try testing.expect(parsed != null);
     try testing.expectEqualStrings("pricing", parsed.?.name);
+    try testing.expectEqual(@as(i16, 1), parsed.?.node_id);
     try testing.expectEqual(@as(i32, 3), parsed.?.id);
 }
 
 test "parse filename with underscores in name" {
-    const parsed = ServiceScanner.parseFileName("order_service_12.dat");
+    const parsed = ServiceScanner.parseFileName("order_service_node2_12.dat");
     try testing.expect(parsed != null);
     try testing.expectEqualStrings("order_service", parsed.?.name);
+    try testing.expectEqual(@as(i16, 2), parsed.?.node_id);
     try testing.expectEqual(@as(i32, 12), parsed.?.id);
 }
 

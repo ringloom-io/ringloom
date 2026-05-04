@@ -107,7 +107,7 @@ pub const ServiceScanner = struct {
             // Skip broker metadata files (broker_0.dat, broker_1.dat, etc.).
             if (BrokerMetadataFile.isBrokerMetadataFile(entry.name)) continue;
 
-            // Parse service name and ID from filename: <name>_<id>.dat
+            // Parse service name, node ID, and service ID from filename.
             const parsed = parseFileName(entry.name) orelse continue;
 
             // Try to open the metadata file.
@@ -116,6 +116,7 @@ pub const ServiceScanner = struct {
                 self.group,
                 parsed.name,
                 parsed.id,
+                parsed.node_id,
             ) catch continue;
 
             // Check if the owning process is alive and heartbeat is fresh.
@@ -157,10 +158,13 @@ pub const ServiceScanner = struct {
 
     pub const ParsedFileName = struct {
         name: []const u8,
+        node_id: i16,
         id: i32,
     };
 
-    /// Parse "<name>_<id>.dat" into name and id.
+    /// Parse "<name>_node<node_id>_<id>.dat" into name, node id, and service id.
+    /// Legacy "<name>_<id>.dat" files are still accepted with node_id=0 so
+    /// stale files from older versions can be scanned and cleaned up.
     pub fn parseFileName(file_name: []const u8) ?ParsedFileName {
         // Must end with ".dat"
         if (!std.mem.endsWith(u8, file_name, ".dat")) return null;
@@ -169,17 +173,39 @@ pub const ServiceScanner = struct {
         // Strip ".dat" suffix.
         const without_ext = file_name[0 .. file_name.len - 4];
 
-        // Find the last underscore.
+        // Find the last underscore before the service id.
         const last_underscore = std.mem.lastIndexOfScalar(u8, without_ext, '_') orelse return null;
         if (last_underscore == 0) return null;
 
-        const name = without_ext[0..last_underscore];
+        const name_and_node = without_ext[0..last_underscore];
         const id_str = without_ext[last_underscore + 1 ..];
 
         const id = std.fmt.parseInt(i32, id_str, 10) catch return null;
 
+        const node_marker = "_node";
+        const node_marker_index = std.mem.lastIndexOf(u8, name_and_node, node_marker);
+        if (node_marker_index) |idx| {
+            const node_str = name_and_node[idx + node_marker.len ..];
+            if (node_str.len > 0) {
+                const node_id = std.fmt.parseInt(i16, node_str, 10) catch {
+                    return .{
+                        .name = name_and_node,
+                        .node_id = 0,
+                        .id = id,
+                    };
+                };
+                if (idx == 0) return null;
+                return .{
+                    .name = name_and_node[0..idx],
+                    .node_id = node_id,
+                    .id = id,
+                };
+            }
+        }
+
         return .{
-            .name = name,
+            .name = name_and_node,
+            .node_id = 0,
             .id = id,
         };
     }
@@ -189,17 +215,27 @@ pub const ServiceScanner = struct {
 
 const testing = std.testing;
 
-test "parse valid service filename" {
-    const parsed = ServiceScanner.parseFileName("pricing_3.dat");
+test "parse valid node-scoped service filename" {
+    const parsed = ServiceScanner.parseFileName("pricing_node2_3.dat");
     try testing.expect(parsed != null);
     try testing.expectEqualStrings("pricing", parsed.?.name);
+    try testing.expectEqual(@as(i16, 2), parsed.?.node_id);
     try testing.expectEqual(@as(i32, 3), parsed.?.id);
 }
 
 test "parse filename with underscores in name" {
+    const parsed = ServiceScanner.parseFileName("order_service_node4_12.dat");
+    try testing.expect(parsed != null);
+    try testing.expectEqualStrings("order_service", parsed.?.name);
+    try testing.expectEqual(@as(i16, 4), parsed.?.node_id);
+    try testing.expectEqual(@as(i32, 12), parsed.?.id);
+}
+
+test "parse legacy service filename" {
     const parsed = ServiceScanner.parseFileName("order_service_12.dat");
     try testing.expect(parsed != null);
     try testing.expectEqualStrings("order_service", parsed.?.name);
+    try testing.expectEqual(@as(i16, 0), parsed.?.node_id);
     try testing.expectEqual(@as(i32, 12), parsed.?.id);
 }
 

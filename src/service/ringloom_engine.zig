@@ -192,6 +192,7 @@ pub const RingLoomEngine = struct {
 
     /// Graceful shutdown.
     pub fn stop(self: *Self) void {
+        if (!self.running.load()) return;
         self.running.store(false);
 
         // 1. Stop the message consumer first.
@@ -219,6 +220,19 @@ pub const RingLoomEngine = struct {
             self.message_consumer = null;
         }
         self.allocator.destroy(self.control_agent);
+    }
+
+    /// Release heap allocations owned by the engine handle itself.
+    ///
+    /// `stop()` performs graceful runtime shutdown and closes mapped files.
+    /// `deinit()` releases the handle allocations returned by `start()`.
+    pub fn deinit(self: *Self) void {
+        if (self.running.load()) {
+            self.stop();
+        }
+        self.allocator.destroy(self.service_meta);
+        self.allocator.destroy(self.broker_meta);
+        self.allocator.destroy(self);
     }
 
     // ── Application API ───────────────────────────────────────────────

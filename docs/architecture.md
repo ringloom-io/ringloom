@@ -143,7 +143,7 @@ The **send ring buffer** serves as the single outbound buffer for all cross-host
 
 ### 3.2 Service Metadata File
 
-Located at `<storage_path>/<group>/services/<name>_<id>.dat`.
+Located at `<storage_path>/<group>/services/<name>_node<node_id>_<id>.dat`.
 
 ```
 ┌──────────────────────────────────────────────┐  ← offset 0

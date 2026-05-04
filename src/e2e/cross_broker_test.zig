@@ -52,6 +52,53 @@ test "cross-broker routing works" {
     try harness.stopProcess(broker_a);
 }
 
+test "same service name can register on multiple broker nodes" {
+    // Given — two brokers share the same storage group.
+    const allocator = std.testing.allocator;
+    var harness = try TestHarness.init(allocator, "cross-broker-duplicate-name");
+    errdefer harness.markFailed();
+    defer harness.deinit();
+
+    const broker_a = try harness.startBroker(.{
+        .node_id = 1,
+        .port = 19031,
+        .peers = &.{.{ .node_id = 2, .host = "127.0.0.1", .port = 19032 }},
+    });
+    try harness.waitForBrokerReady(broker_a, 5000);
+
+    const broker_b = try harness.startBroker(.{
+        .node_id = 2,
+        .port = 19032,
+        .peers = &.{.{ .node_id = 1, .host = "127.0.0.1", .port = 19031 }},
+    });
+    try harness.waitForBrokerReady(broker_b, 5000);
+
+    // When — both nodes start an instance with the same name as their first
+    // service, causing identical per-broker service IDs.
+    const echo_a = try harness.startService(.{
+        .executable_name = "ringloom-test-echo-service",
+        .service_name = "echo",
+        .broker_node_id = 1,
+    });
+    try harness.waitForServiceReady(echo_a, 5000);
+
+    const echo_b = try harness.startService(.{
+        .executable_name = "ringloom-test-echo-service",
+        .service_name = "echo",
+        .broker_node_id = 2,
+    });
+    try harness.waitForServiceReady(echo_b, 5000);
+
+    // Then — both same-name instances remain alive with distinct metadata files.
+    try std.testing.expect(echo_a.isAlive());
+    try std.testing.expect(echo_b.isAlive());
+
+    try harness.stopProcess(echo_b);
+    try harness.stopProcess(echo_a);
+    try harness.stopProcess(broker_b);
+    try harness.stopProcess(broker_a);
+}
+
 test "cross-broker routing with late broker join" {
     // Given — broker A starts alone
     const allocator = std.testing.allocator;

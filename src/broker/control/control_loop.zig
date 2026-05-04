@@ -90,6 +90,9 @@ pub const ControlLoop = struct {
     /// Next time (monotonic ns) to scan local service buffers for FC updates.
     next_fc_check_ns: i64,
 
+    /// Next time (monotonic ns) to re-broadcast local service discovery.
+    next_service_rebroadcast_ns: i64,
+
     // ── Scratch buffer for message encoding ──────────────────────
     /// Pre-allocated buffer for encoding outbound control messages.
     /// 4096 bytes is more than enough for any single control message
@@ -140,6 +143,7 @@ pub const ControlLoop = struct {
     const TIMEOUT_CHECK_INTERVAL_NS: i64 = constants.control_loop_timeout_check_interval_ns;
     const HEARTBEAT_CHECK_INTERVAL_NS: i64 = constants.service_heartbeat_check_interval_ms * std.time.ns_per_ms;
     const CONTROL_MSG_TYPE: i32 = 1; // ring buffer msg_type_id for control messages
+    const SERVICE_REBROADCAST_INTERVAL_NS: i64 = 1 * std.time.ns_per_s;
 
     // ─────────────────────────────────────────────────────────────
     // Construction
@@ -182,6 +186,7 @@ pub const ControlLoop = struct {
             .next_timeout_check_ns = 0,
             .next_heartbeat_check_ns = 0,
             .next_fc_check_ns = 0,
+            .next_service_rebroadcast_ns = 0,
             .allocator = opts.allocator,
             .admin_cmd_queue = opts.admin_cmd_queue,
             .send_ring_buffer = opts.send_ring_buffer,
@@ -232,6 +237,15 @@ pub const ControlLoop = struct {
 
             // 3b. Cluster protocol tasks (leader election, state sync, broker heartbeats)
             self.cluster_manager.doWork(now_ns);
+
+            // 3c. Reconcile service discovery. ServiceAdded admin messages are
+            // idempotent, so periodic broadcasts repair announcements dropped
+            // during TCP setup or broker startup races.
+            if (self.peer_node_ids.len > 0 and now_ns > self.next_service_rebroadcast_ns) {
+                self.broadcastAllLocalServices();
+                self.broadcastAllLocalCapacities();
+                self.next_service_rebroadcast_ns = now_ns + SERVICE_REBROADCAST_INTERVAL_NS;
+            }
 
             self.next_timeout_check_ns = now_ns + TIMEOUT_CHECK_INTERVAL_NS;
         }
@@ -362,6 +376,7 @@ pub const ControlLoop = struct {
         const buffers = BuffersProvider.getInstance(
             self.allocator,
             data.service_id,
+            self.local_node_id,
             service_name,
             self.storage_path,
             self.group,
@@ -560,6 +575,14 @@ pub const ControlLoop = struct {
         @memcpy(@as(*[@sizeOf(admin.ServiceAddedBody)]u8, @ptrCast(&body)), &data);
 
         const name = admin.trimServiceName(&body.service_name);
+
+        if (self.service_registry.getInstancePtr(
+            @as(i32, @intCast(body.service_id)),
+            body.node_id,
+        ) != null) {
+            self.notifySubscribers(name);
+            return;
+        }
 
         log.info("remote service added: name={s}, id={}, node={}", .{
             name, body.service_id, body.node_id,

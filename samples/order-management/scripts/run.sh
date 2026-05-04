@@ -204,7 +204,7 @@ MATCHING2_PID=$LAST_PID
 
 if [[ "$PROFILE" == "full" ]]; then
     start_service matching-engine-node1 ringloom-sample-matching-engine 1 "$RESULT_DIR/matching-engine-node1.json" \
-        --service-name matching-engine-extra --leader-election
+        --service-name matching-engine --leader-election
 fi
 
 start_service risk-service-node1 ringloom-sample-risk-service 1 "$RESULT_DIR/risk-service-node1.json" \
@@ -212,7 +212,7 @@ start_service risk-service-node1 ringloom-sample-risk-service 1 "$RESULT_DIR/ris
 
 if [[ "$PROFILE" == "full" ]]; then
     start_service risk-service-node2 ringloom-sample-risk-service 2 "$RESULT_DIR/risk-service-node2.json" \
-        --service-name risk-service-extra --leader-routing
+        --service-name risk-service --leader-routing
     RISK2_PID=$LAST_PID
 fi
 
@@ -222,7 +222,7 @@ if [[ "$PROFILE" == "full" ]]; then
     stop_pid risk-service-node2 "$RISK2_PID"
     sleep 0.5
     start_service risk-service-node2-restarted ringloom-sample-risk-service 2 "$RESULT_DIR/risk-service-node2-restarted.json" \
-        --service-name risk-service-extra --leader-routing
+        --service-name risk-service --leader-routing
 fi
 
 start_service order-simulator ringloom-sample-order-simulator 1 "$RESULT_DIR/order-simulator.json" \

@@ -23,7 +23,7 @@ var shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(fal
 var state: State = .{};
 
 const Book = struct {
-    available: [tables.symbol_count]u32 = .{ 1_000_000, 1_000_000, 1_000_000, 1_000_000 },
+    available: [tables.symbol_count]u32 = .{ 10_000_000, 10_000_000, 10_000_000, 10_000_000 },
 
     fn matchOrder(self: *Book, order: protocol.NewOrder) ?protocol.Fill {
         const idx = tables.symbolIndex(order.symbol) orelse return null;
@@ -126,6 +126,7 @@ pub fn main(init: std.process.Init) !void {
         .leader_election_enabled = leader_election,
         .idle_strategy = common.idle_strategy,
     }) catch |err| fatal(io, "matching-engine: failed to start engine: {}\n", .{err});
+    defer engine.deinit();
     engine.setMessageHandler(&onMessage);
 
     const execution_client = engine.createClient(names.execution_service) catch |err|

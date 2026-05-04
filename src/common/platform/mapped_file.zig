@@ -243,15 +243,20 @@ pub fn isProcessAlive(pid: i64) bool {
 
 /// Build the full path to a service metadata file.
 ///
-/// Format: `{storage_path}/{group}/services/{name}_{id}.dat`
+/// Format: `{storage_path}/{group}/services/{name}_node{node_id}_{id}.dat`
 pub fn serviceMetadataPath(
     allocator: std.mem.Allocator,
     storage_path: []const u8,
     group: []const u8,
     service_name: []const u8,
     service_id: i32,
+    node_id: i16,
 ) ![]const u8 {
-    const file_name = try std.fmt.allocPrint(allocator, "{s}_{d}.dat", .{ service_name, service_id });
+    const file_name = try std.fmt.allocPrint(allocator, "{s}_node{d}_{d}.dat", .{
+        service_name,
+        node_id,
+        service_id,
+    });
     defer allocator.free(file_name);
 
     return std.fs.path.join(allocator, &.{

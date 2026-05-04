@@ -220,6 +220,7 @@ pub fn main(init: std.process.Init) !void {
         .broker_node_id = common.broker_node_id,
         .idle_strategy = common.idle_strategy,
     }) catch |err| fatal(io, "order-gateway: failed to start engine: {}\n", .{err});
+    defer engine.deinit();
     engine.setMessageHandler(&onMessage);
 
     const risk_client = engine.createClient(names.risk_service) catch |err|

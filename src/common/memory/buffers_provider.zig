@@ -13,6 +13,7 @@ const platform = @import("../platform.zig");
 pub const BuffersProvider = struct {
     service_file: ServiceMetadataFile,
     service_id: i32,
+    node_id: i16,
     service_name: []const u8,
 
     const Self = @This();
@@ -25,11 +26,13 @@ pub const BuffersProvider = struct {
     pub fn getInstance(
         allocator: std.mem.Allocator,
         service_id: i32,
+        node_id: i16,
         service_name: []const u8,
         storage_path: []const u8,
         group: []const u8,
     ) !*BuffersProvider {
-        if (cache.get(service_id)) |existing| {
+        const key = CacheKey{ .service_id = service_id, .node_id = node_id };
+        if (cache.get(key)) |existing| {
             return existing;
         }
 
@@ -42,18 +45,20 @@ pub const BuffersProvider = struct {
                 group,
                 service_name,
                 service_id,
+                node_id,
             ),
             .service_id = service_id,
+            .node_id = node_id,
             .service_name = service_name,
         };
 
-        try cache.put(service_id, provider);
+        try cache.put(key, provider);
         return provider;
     }
 
     /// Get the cached instance for a service, or null if not cached.
-    pub fn getCached(service_id: i32) ?*BuffersProvider {
-        return cache.get(service_id);
+    pub fn getCached(service_id: i32, node_id: i16) ?*BuffersProvider {
+        return cache.get(.{ .service_id = service_id, .node_id = node_id });
     }
 
     // ── Buffer Accessors ──────────────────────────────────────────────
@@ -103,7 +108,7 @@ pub const BuffersProvider = struct {
 
     /// Close this provider's mapping and remove it from the cache.
     pub fn close(self: *BuffersProvider, allocator: std.mem.Allocator) void {
-        _ = cache.remove(self.service_id);
+        _ = cache.remove(.{ .service_id = self.service_id, .node_id = self.node_id });
         self.service_file.close();
         allocator.destroy(self);
     }
@@ -119,8 +124,13 @@ pub const BuffersProvider = struct {
     }
 };
 
-/// Module-level cache of service_id → BuffersProvider instances.
-var cache: std.AutoHashMap(i32, *BuffersProvider) = std.AutoHashMap(i32, *BuffersProvider).init(std.heap.page_allocator);
+const CacheKey = struct {
+    service_id: i32,
+    node_id: i16,
+};
+
+/// Module-level cache of (service_id, node_id) → BuffersProvider instances.
+var cache: std.AutoHashMap(CacheKey, *BuffersProvider) = std.AutoHashMap(CacheKey, *BuffersProvider).init(std.heap.page_allocator);
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
@@ -139,7 +149,7 @@ test "BuffersProvider cache returns same instance" {
         .group = "test-group",
         .service_name = "test-svc",
         .service_id = 1,
-        .node_id = 0,
+        .node_id = 1,
     });
     // Don't close yet — keep the file on disk for BuffersProvider to open.
     svc_file.close();
@@ -147,6 +157,7 @@ test "BuffersProvider cache returns same instance" {
     // Get via BuffersProvider.
     const provider1 = try BuffersProvider.getInstance(
         testing.allocator,
+        1,
         1,
         "test-svc",
         storage_path,
@@ -156,6 +167,7 @@ test "BuffersProvider cache returns same instance" {
     // Getting again should return the same pointer.
     const provider2 = try BuffersProvider.getInstance(
         testing.allocator,
+        1,
         1,
         "test-svc",
         storage_path,

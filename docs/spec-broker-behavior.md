@@ -129,7 +129,7 @@ Registration establishes the communication channel between a service and the bro
 
 2. **Create metadata file** (if no reusable file found):
    - Allocate the next service ID from the broker's metadata file (`NEXT_SERVICE_ID_OFFSET`, atomic increment).
-   - Create the file at `<storage_path>/<broker_group_name>/services/<name>_<id>.dat`.
+   - Create the file at `<storage_path>/<broker_group_name>/services/<name>_node<node_id>_<id>.dat`.
    - Populate the metadata header (buffer sizes, blocking flags, timeouts, service ID, PID, timestamp).
    - If at-rest encryption is enabled, write the encrypted service-name marker.
 

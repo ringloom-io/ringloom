@@ -78,6 +78,7 @@ pub fn main(init: std.process.Init) !void {
         .broker_node_id = common.broker_node_id,
         .idle_strategy = common.idle_strategy,
     }) catch |err| fatal(io, "order-simulator: failed to start engine: {}\n", .{err});
+    defer engine.deinit();
     engine.setMessageHandler(&onMessage);
 
     const gateway_client = engine.createClient(names.order_gateway) catch |err|
@@ -112,7 +113,7 @@ fn runScenario(orders: u64, rate_per_sec: u64, burst_size: u16, duration_sec: u6
         pace(&next_deadline, interval_ns);
 
         if (seq % 53 == 0 and burst_size > 1) {
-            const sent = sendBulk(seq, @min(@as(u16, @intCast(orders - seq + 1)), burst_size));
+            const sent = sendBulk(seq, bulkOrderCount(orders - seq + 1, burst_size));
             seq += sent;
         } else if (seq % 17 == 0) {
             sendCancel(seq);
@@ -122,6 +123,10 @@ fn runScenario(orders: u64, rate_per_sec: u64, burst_size: u16, duration_sec: u6
             seq += 1;
         }
     }
+}
+
+fn bulkOrderCount(remaining_orders: u64, burst_size: u16) u16 {
+    return @intCast(@min(remaining_orders, @as(u64, burst_size)));
 }
 
 fn pace(next_deadline: *u64, interval_ns: u64) void {
@@ -185,8 +190,8 @@ fn sendBody(comptime T: type, template: protocol.TemplateId, correlation_id: u64
 }
 
 fn deterministicOrder(seq: u64) protocol.NewOrder {
-    const account = tables.accounts[seq % tables.accounts.len];
-    const symbol = tables.symbols[seq % tables.symbols.len];
+    const account = tables.accounts[(seq * 7 + seq / 13) % tables.accounts.len];
+    const symbol = tables.symbols[(seq * 5 + seq / 17) % tables.symbols.len];
     const quantity: u32 = if (seq % 29 == 0) 0 else @intCast((seq % 250) + 1);
     const price = if (seq % 31 == 0)
         tables.max_price_nanos + 1_000_000_000
@@ -227,4 +232,10 @@ fn fatal(io: std.Io, comptime fmt: []const u8, values: anytype) noreturn {
     stderr.print(fmt, values) catch {};
     stderr.flush() catch {};
     std.process.exit(1);
+}
+
+test "bulk order count clamps before narrowing" {
+    try std.testing.expectEqual(@as(u16, 4), bulkOrderCount(100_000, 4));
+    try std.testing.expectEqual(@as(u16, 3), bulkOrderCount(3, 4));
+    try std.testing.expectEqual(@as(u16, 0), bulkOrderCount(0, 4));
 }

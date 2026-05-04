@@ -37,6 +37,6 @@ The script prints the workspace, logs, results, storage path, and a
 Application payloads are fixed `extern struct` messages with a 32-byte domain
 envelope. Normal service-to-service sends use `ServiceClient.tryClaim` so the
 payload is written directly into RingLoom claim memory. The full profile enables
-leader election on matching services, starts optional node-2 risk and node-1
-matching processes, and restarts the optional risk process so lifecycle behavior
-is visible in process logs.
+leader election on same-name matching service instances, starts an additional
+same-name risk service on node 2, and restarts the optional risk process so
+lifecycle behavior and duplicate-service discovery are visible in process logs.
