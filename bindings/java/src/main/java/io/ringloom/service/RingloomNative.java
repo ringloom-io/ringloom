@@ -15,7 +15,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 final class RingloomNative {
-    static final int ABI_VERSION = 1;
+    static final int ABI_VERSION = 2;
+    private static final String LIBRARY_BASE_NAME = "ringloom_service";
+    private static final String CLASSPATH_LIBRARY_ROOT = "/io/ringloom/service/native";
 
     static final Linker LINKER = Linker.nativeLinker();
     static final Arena LIBRARY_ARENA = Arena.ofShared();
@@ -53,7 +55,8 @@ final class RingloomNative {
     static final long BUFFER_CLAIM_PAYLOAD_LEN_OFFSET = 8L;
     static final long BUFFER_CLAIM_ACTIVE_OFFSET = 36L;
     static final long CLIENT_TARGET_SERVICE_ID_OFFSET = 0L;
-    static final long CLIENT_TARGET_IS_LEADER_OFFSET = 4L;
+    static final long CLIENT_TARGET_NODE_ID_OFFSET = 4L;
+    static final long CLIENT_TARGET_IS_LEADER_OFFSET = 6L;
     static final long LIFECYCLE_EVENT_TYPE_OFFSET = 0L;
     static final long LIFECYCLE_EVENT_SERVICE_ID_OFFSET = 4L;
     static final long LIFECYCLE_EVENT_NODE_ID_OFFSET = 8L;
@@ -106,7 +109,7 @@ final class RingloomNative {
             DESTROY_CLIENT_HANDLE = downcall("ringloom_client_destroy", FunctionDescriptor.ofVoid(ADDRESS));
             CLIENT_SET_LIFECYCLE_HANDLE = downcall("ringloom_client_set_lifecycle_handler", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
             CLIENT_SEND_HANDLE = downcall("ringloom_client_send", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG));
-            CLIENT_SEND_TO_HANDLE = downcall("ringloom_client_send_to", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_LONG));
+            CLIENT_SEND_TO_HANDLE = downcall("ringloom_client_send_to", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_LONG));
             CLIENT_SEND_TO_LEADER_HANDLE = downcall("ringloom_client_send_to_leader", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG));
             CLIENT_LIST_TARGETS_HANDLE = downcall("ringloom_client_list_targets", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
             CLIENT_TRY_CLAIM_HANDLE = downcall("ringloom_client_try_claim", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ADDRESS));
@@ -130,16 +133,80 @@ final class RingloomNative {
     }
 
     static Path nativeLibraryPath() {
-        String libDir = System.getProperty("ringloom.nativeLibDir");
-        if (libDir == null || libDir.isBlank()) {
-            throw new IllegalStateException("ringloom.nativeLibDir system property is required");
+        String libPath = System.getProperty("ringloom.nativeLibPath");
+        if (libPath != null && !libPath.isBlank()) {
+            return requireExistingLibrary(Path.of(libPath));
         }
 
-        Path path = Path.of(libDir).resolve(System.mapLibraryName("ringloom_service"));
+        String libDir = System.getProperty("ringloom.nativeLibDir");
+        if (libDir != null && !libDir.isBlank()) {
+            return requireExistingLibrary(Path.of(libDir).resolve(System.mapLibraryName(LIBRARY_BASE_NAME)));
+        }
+
+        return extractClasspathLibrary();
+    }
+
+    private static Path requireExistingLibrary(Path path) {
         if (!Files.exists(path)) {
             throw new IllegalStateException("Native library not found at " + path);
         }
         return path;
+    }
+
+    private static Path extractClasspathLibrary() {
+        String mappedLibraryName = System.mapLibraryName(LIBRARY_BASE_NAME);
+        String resourcePath = CLASSPATH_LIBRARY_ROOT
+            + "/"
+            + platformIdentifier()
+            + "/"
+            + mappedLibraryName;
+
+        try (var libraryStream = RingloomNative.class.getResourceAsStream(resourcePath)) {
+            if (libraryStream == null) {
+                throw new IllegalStateException(
+                    "Embedded native library resource not found at " + resourcePath
+                        + "; set ringloom.nativeLibPath or ringloom.nativeLibDir to load an external build"
+                );
+            }
+
+            Path tempDir = Files.createTempDirectory("ringloom-native-");
+            Path extractedLibrary = tempDir.resolve(mappedLibraryName);
+            Files.copy(libraryStream, extractedLibrary);
+            extractedLibrary.toFile().deleteOnExit();
+            tempDir.toFile().deleteOnExit();
+            return extractedLibrary;
+        } catch (RuntimeException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            throw new IllegalStateException("Failed to extract embedded RingLoom native library", ex);
+        }
+    }
+
+    private static String platformIdentifier() {
+        return normalizeOsName(System.getProperty("os.name"))
+            + "-"
+            + normalizeArchName(System.getProperty("os.arch"));
+    }
+
+    private static String normalizeOsName(String osName) {
+        String normalized = osName.toLowerCase();
+        if (normalized.startsWith("linux")) {
+            return "linux";
+        }
+        if (normalized.startsWith("mac os") || normalized.startsWith("darwin")) {
+            return "macos";
+        }
+        throw new IllegalStateException("Unsupported operating system for embedded RingLoom native library: " + osName);
+    }
+
+    private static String normalizeArchName(String archName) {
+        return switch (archName.toLowerCase()) {
+            case "x86_64", "amd64" -> "x86_64";
+            case "aarch64", "arm64" -> "aarch64";
+            default -> throw new IllegalStateException(
+                "Unsupported architecture for embedded RingLoom native library: " + archName
+            );
+        };
     }
 
     static int abiVersion() {
@@ -260,9 +327,15 @@ final class RingloomNative {
         }
     }
 
-    static int clientSendTo(MemorySegment client, int targetServiceId, MemorySegment payload, long payloadLen) {
+    static int clientSendTo(
+        MemorySegment client,
+        short targetNodeId,
+        int targetServiceId,
+        MemorySegment payload,
+        long payloadLen
+    ) {
         try {
-            return (int) CLIENT_SEND_TO_HANDLE.invokeExact(client, targetServiceId, payload, payloadLen);
+            return (int) CLIENT_SEND_TO_HANDLE.invokeExact(client, targetNodeId, targetServiceId, payload, payloadLen);
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_send_to", throwable);
         }

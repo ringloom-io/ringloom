@@ -51,6 +51,10 @@ final class RingloomServiceLifecycleIT {
                 );
                 assertEquals("java-observed", available.serviceName());
                 assertEquals(1, available.nodeId());
+                assertTrue(client.targetServices().stream().anyMatch(target ->
+                    target.targetNodeId() == available.nodeId()
+                        && target.targetServiceId() == available.serviceId()
+                ));
             } finally {
                 observed.close();
             }
@@ -64,6 +68,10 @@ final class RingloomServiceLifecycleIT {
             );
             assertEquals("java-observed", unavailable.serviceName());
             assertEquals(1, unavailable.nodeId());
+            assertTrue(client.targetServices().stream().noneMatch(target ->
+                target.targetNodeId() == unavailable.nodeId()
+                    && target.targetServiceId() == unavailable.serviceId()
+            ));
             success = true;
         } finally {
             TestSupport.cleanupWorkspace(workspace, success);

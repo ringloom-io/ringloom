@@ -13,6 +13,13 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * Client-side proxy for sending messages to instances of one named RingLoom service.
+ *
+ * <p>The client keeps a cached, immutable target list updated by native service lifecycle
+ * callbacks. Applications drive those callbacks by polling the owning {@link RingloomService}
+ * control plane.</p>
+ */
 public final class RingloomClient implements AutoCloseable {
     private static final FunctionDescriptor LIFECYCLE_HANDLER_DESCRIPTOR =
         FunctionDescriptor.ofVoid(RingloomNative.ADDRESS, RingloomNative.ADDRESS);
@@ -22,12 +29,14 @@ public final class RingloomClient implements AutoCloseable {
     private final Arena callbackArena;
     private final AtomicBoolean closed;
 
+    private volatile List<TargetService> targetServices;
     private volatile ServiceLifecycleHandler lifecycleHandler;
 
     RingloomClient(MemorySegment nativeHandle) {
         this.nativeHandle = nativeHandle;
         this.callbackArena = Arena.ofShared();
         this.closed = new AtomicBoolean(false);
+        this.targetServices = List.of();
 
         try {
             MethodHandle dispatch = MethodHandles.lookup()
@@ -43,15 +52,45 @@ public final class RingloomClient implements AutoCloseable {
                 callbackArena
             );
         } catch (NoSuchMethodException | IllegalAccessException ex) {
+            callbackArena.close();
+            RingloomNative.destroyClient(nativeHandle);
             throw new IllegalStateException("Failed to create RingLoom lifecycle callback", ex);
+        }
+
+        int status = RingloomNative.clientSetLifecycleHandler(
+            nativeHandle,
+            lifecycleUpcallStub,
+            MemorySegment.NULL
+        );
+        try {
+            RingloomNative.throwForStatus("ringloom_client_set_lifecycle_handler", status);
+            targetServices = loadTargetServicesSnapshot();
+        } catch (RuntimeException | Error ex) {
+            RingloomNative.clientSetLifecycleHandler(nativeHandle, MemorySegment.NULL, MemorySegment.NULL);
+            RingloomNative.destroyClient(nativeHandle);
+            callbackArena.close();
+            throw ex;
         }
     }
 
+    /**
+     * Creates a reusable zero-copy send claim holder.
+     *
+     * @return a claim object that can be reused with {@link #tryClaim(int, long, BufferClaim)}
+     */
     public BufferClaim newClaim() {
         ensureOpen();
         return new BufferClaim();
     }
 
+    /**
+     * Attempts to claim writable memory for a load-balanced send.
+     *
+     * @param templateId application template id to write into the message header
+     * @param payloadLength number of payload bytes the caller will write
+     * @param claim caller-owned reusable claim object to populate
+     * @return a {@link RingloomStatus} integer
+     */
     public int tryClaim(int templateId, long payloadLength, BufferClaim claim) {
         ensureOpen();
         Objects.requireNonNull(claim, "claim");
@@ -60,9 +99,122 @@ public final class RingloomClient implements AutoCloseable {
         return status;
     }
 
+    /**
+     * Returns the current cached target instances for this client.
+     *
+     * <p>The returned list is immutable and reused until a service lifecycle callback changes the
+     * target set. This method does not poll the control plane; call
+     * {@link RingloomService#pollControl(int)} from an application thread to keep discovery fresh.</p>
+     *
+     * @return immutable cached target list
+     */
     public List<TargetService> targetServices() {
         ensureOpen();
+        return targetServices;
+    }
 
+    /**
+     * Registers a user lifecycle handler.
+     *
+     * <p>The client always keeps its internal lifecycle subscription active for target cache
+     * maintenance. This handler is invoked after the internal cache has been updated.</p>
+     *
+     * @param handler callback invoked synchronously on the thread polling the control plane
+     */
+    public void onLifecycle(ServiceLifecycleHandler handler) {
+        ensureOpen();
+        lifecycleHandler = Objects.requireNonNull(handler, "handler");
+    }
+
+    /**
+     * Clears the user lifecycle handler without disabling the client's internal target cache
+     * subscription.
+     */
+    public void clearLifecycleHandler() {
+        ensureOpen();
+        lifecycleHandler = null;
+    }
+
+    /**
+     * Sends a payload to one discovered instance selected by the native load balancer.
+     *
+     * @param payload borrowed payload segment, or {@code null} for an empty payload
+     * @return a {@link RingloomStatus} integer
+     */
+    public int send(MemorySegment payload) {
+        ensureOpen();
+        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
+        return RingloomNative.clientSend(nativeHandle, RingloomNative.payloadPointer(segment), segment.byteSize());
+    }
+
+    /**
+     * Sends a payload to a specific target instance.
+     *
+     * @param targetNodeId node id from {@link TargetService#targetNodeId()}
+     * @param targetServiceId service id from {@link TargetService#targetServiceId()}
+     * @param payload borrowed payload segment, or {@code null} for an empty payload
+     * @return a {@link RingloomStatus} integer
+     */
+    public int sendTo(short targetNodeId, int targetServiceId, MemorySegment payload) {
+        ensureOpen();
+        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
+        return RingloomNative.clientSendTo(
+            nativeHandle,
+            targetNodeId,
+            targetServiceId,
+            RingloomNative.payloadPointer(segment),
+            segment.byteSize()
+        );
+    }
+
+    /**
+     * Sends a payload to the currently discovered leader instance.
+     *
+     * @param payload borrowed payload segment, or {@code null} for an empty payload
+     * @return a {@link RingloomStatus} integer
+     */
+    public int sendToLeader(MemorySegment payload) {
+        ensureOpen();
+        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
+        return RingloomNative.clientSendToLeader(nativeHandle, RingloomNative.payloadPointer(segment), segment.byteSize());
+    }
+
+    /**
+     * Convenience wrapper that copies a byte array into native memory and throws on failure.
+     *
+     * @param payload payload bytes to send
+     */
+    public void sendOrThrow(byte[] payload) {
+        Objects.requireNonNull(payload, "payload");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment segment = arena.allocateFrom(ValueLayout.JAVA_BYTE, payload);
+            sendOrThrow(segment);
+        }
+    }
+
+    /**
+     * Convenience wrapper around {@link #send(MemorySegment)} that throws on non-OK status.
+     *
+     * @param payload borrowed payload segment, or {@code null} for an empty payload
+     */
+    public void sendOrThrow(MemorySegment payload) {
+        int status = send(payload);
+        RingloomNative.throwForStatus("ringloom_client_send", status);
+    }
+
+    @Override
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        lifecycleHandler = null;
+        targetServices = List.of();
+        RingloomNative.clientSetLifecycleHandler(nativeHandle, MemorySegment.NULL, MemorySegment.NULL);
+        RingloomNative.destroyClient(nativeHandle);
+        callbackArena.close();
+    }
+
+    private List<TargetService> loadTargetServicesSnapshot() {
         long capacity = 0L;
         while (true) {
             try (Arena arena = Arena.ofConfined()) {
@@ -91,6 +243,7 @@ public final class RingloomClient implements AutoCloseable {
                     long offset = i * RingloomNative.CLIENT_TARGET_SIZE;
                     targets.add(new TargetService(
                         nativeTargets.get(ValueLayout.JAVA_INT, offset + RingloomNative.CLIENT_TARGET_SERVICE_ID_OFFSET),
+                        nativeTargets.get(ValueLayout.JAVA_SHORT, offset + RingloomNative.CLIENT_TARGET_NODE_ID_OFFSET),
                         nativeTargets.get(ValueLayout.JAVA_BYTE, offset + RingloomNative.CLIENT_TARGET_IS_LEADER_OFFSET) != 0
                     ));
                 }
@@ -99,77 +252,9 @@ public final class RingloomClient implements AutoCloseable {
         }
     }
 
-    public void onLifecycle(ServiceLifecycleHandler handler) {
-        ensureOpen();
-        ServiceLifecycleHandler nonNullHandler = Objects.requireNonNull(handler, "handler");
-        int status = RingloomNative.clientSetLifecycleHandler(
-            nativeHandle,
-            lifecycleUpcallStub,
-            MemorySegment.NULL
-        );
-        RingloomNative.throwForStatus("ringloom_client_set_lifecycle_handler", status);
-        lifecycleHandler = nonNullHandler;
-    }
-
-    public void clearLifecycleHandler() {
-        ensureOpen();
-        lifecycleHandler = null;
-        int status = RingloomNative.clientSetLifecycleHandler(
-            nativeHandle,
-            MemorySegment.NULL,
-            MemorySegment.NULL
-        );
-        RingloomNative.throwForStatus("ringloom_client_set_lifecycle_handler", status);
-    }
-
-    public int send(MemorySegment payload) {
-        ensureOpen();
-        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
-        return RingloomNative.clientSend(nativeHandle, RingloomNative.payloadPointer(segment), segment.byteSize());
-    }
-
-    public int sendTo(int targetServiceId, MemorySegment payload) {
-        ensureOpen();
-        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
-        return RingloomNative.clientSendTo(nativeHandle, targetServiceId, RingloomNative.payloadPointer(segment), segment.byteSize());
-    }
-
-    public int sendToLeader(MemorySegment payload) {
-        ensureOpen();
-        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
-        return RingloomNative.clientSendToLeader(nativeHandle, RingloomNative.payloadPointer(segment), segment.byteSize());
-    }
-
-    public void sendOrThrow(byte[] payload) {
-        Objects.requireNonNull(payload, "payload");
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment segment = arena.allocateFrom(ValueLayout.JAVA_BYTE, payload);
-            sendOrThrow(segment);
-        }
-    }
-
-    public void sendOrThrow(MemorySegment payload) {
-        int status = send(payload);
-        RingloomNative.throwForStatus("ringloom_client_send", status);
-    }
-
-    @Override
-    public void close() {
-        if (!closed.compareAndSet(false, true)) {
-            return;
-        }
-        RingloomNative.clientSetLifecycleHandler(nativeHandle, MemorySegment.NULL, MemorySegment.NULL);
-        RingloomNative.destroyClient(nativeHandle);
-        callbackArena.close();
-    }
-
     private void dispatchLifecycle(MemorySegment userData, MemorySegment nativeEvent) {
         @SuppressWarnings("unused")
         MemorySegment ignored = userData;
-        ServiceLifecycleHandler handler = lifecycleHandler;
-        if (handler == null) {
-            return;
-        }
 
         MemorySegment event = nativeEvent.reinterpret(RingloomNative.LIFECYCLE_EVENT_SIZE);
         int type = event.get(ValueLayout.JAVA_INT, RingloomNative.LIFECYCLE_EVENT_TYPE_OFFSET);
@@ -183,13 +268,52 @@ public final class RingloomClient implements AutoCloseable {
         long serviceNameLength = event.get(ValueLayout.JAVA_LONG, RingloomNative.LIFECYCLE_EVENT_SERVICE_NAME_LEN_OFFSET);
         String serviceName = readUtf8(serviceNameAddress, serviceNameLength);
 
-        handler.onServiceLifecycle(new ServiceLifecycleEvent(
+        ServiceLifecycleEvent lifecycleEvent = new ServiceLifecycleEvent(
             ServiceLifecycleEventType.fromNative(type),
             serviceName,
             serviceId,
             nodeId,
             leader
-        ));
+        );
+        updateTargetServices(lifecycleEvent);
+
+        ServiceLifecycleHandler handler = lifecycleHandler;
+        if (handler != null) {
+            handler.onServiceLifecycle(lifecycleEvent);
+        }
+    }
+
+    private synchronized void updateTargetServices(ServiceLifecycleEvent event) {
+        TargetService target = new TargetService(event.serviceId(), event.nodeId(), event.leader());
+        ArrayList<TargetService> updated = new ArrayList<>(targetServices);
+        int index = indexOfTarget(updated, target.targetNodeId(), target.targetServiceId());
+
+        if (event.type() == ServiceLifecycleEventType.AVAILABLE) {
+            if (index >= 0) {
+                if (updated.get(index).equals(target)) {
+                    return;
+                }
+                updated.set(index, target);
+            } else {
+                updated.add(target);
+            }
+        } else if (index >= 0) {
+            updated.remove(index);
+        } else {
+            return;
+        }
+
+        targetServices = List.copyOf(updated);
+    }
+
+    private static int indexOfTarget(List<TargetService> targets, short targetNodeId, int targetServiceId) {
+        for (int i = 0; i < targets.size(); i++) {
+            TargetService target = targets.get(i);
+            if (target.targetNodeId() == targetNodeId && target.targetServiceId() == targetServiceId) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static String readUtf8(MemorySegment address, long length) {

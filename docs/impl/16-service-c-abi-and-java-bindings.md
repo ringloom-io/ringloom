@@ -259,7 +259,7 @@ Header skeleton:
 extern "C" {
 #endif
 
-#define RINGLOOM_SERVICE_ABI_VERSION 1u
+#define RINGLOOM_SERVICE_ABI_VERSION 2u
 
 typedef struct ringloom_service ringloom_service_t;
 typedef struct ringloom_client ringloom_client_t;
@@ -315,6 +315,12 @@ typedef struct ringloom_buffer_claim {
     int32_t _record_length;
     uint8_t _active;
 } ringloom_buffer_claim_t;
+
+typedef struct ringloom_client_target {
+    int32_t target_service_id;
+    int16_t target_node_id;
+    bool is_leader;
+} ringloom_client_target_t;
 
 typedef void (*ringloom_message_handler_t)(
     void *user_data,
@@ -388,6 +394,7 @@ ringloom_status_t ringloom_buffer_claim_abort(
 
 ringloom_status_t ringloom_client_send_to(
     ringloom_client_t *client,
+    int16_t target_node_id,
     int32_t target_service_id,
     const uint8_t *payload,
     size_t payload_len
@@ -581,7 +588,9 @@ not the preferred hot-path API for Java.
 
 #### `ringloom_client_send_to`
 
-Sends bytes to a specific service id.
+Sends bytes to a specific service instance identified by `(target_node_id,
+target_service_id)`. Both fields are required because service ids are only unique
+within a broker node; two different nodes may expose the same service id.
 
 This maps to `ServiceClient.sendTo`.
 
@@ -1072,8 +1081,11 @@ public final class RingloomClient implements AutoCloseable {
     public BufferClaim newClaim();
     public int tryClaim(int templateId, long payloadLength, BufferClaim claim);
     public int send(MemorySegment payload);
-    public int sendTo(int targetServiceId, MemorySegment payload);
+    public int sendTo(short targetNodeId, int targetServiceId, MemorySegment payload);
     public int sendToLeader(MemorySegment payload);
+    public List<TargetService> targetServices();
+    public void onLifecycle(ServiceLifecycleHandler handler);
+    public void clearLifecycleHandler();
 
     // Convenience wrappers; not hot-path APIs.
     public void sendOrThrow(byte[] payload);
@@ -1085,6 +1097,12 @@ public final class RingloomClient implements AutoCloseable {
 `newClaim()` allocates once and is intended for setup. The returned claim object
 is reusable across sends. The hot path calls `tryClaim(..., claim)` with a
 pre-created claim object and receives a `RingloomStatus` integer.
+
+`targetServices()` returns an immutable cached list maintained by service
+lifecycle callbacks; it must not allocate or call the native list function on
+each invocation. Applications keep the cache current by polling the owning
+`RingloomService` control plane. Use both `TargetService.targetNodeId()` and
+`TargetService.targetServiceId()` when calling `sendTo(...)`.
 
 `tryClaim(...)` is the preferred zero-copy send API. It must not allocate or
 copy payload bytes. It fills the caller-provided `BufferClaim` with a borrowed
@@ -1242,9 +1260,13 @@ zig-out/lib/libringloom_service.so    # Linux
 zig-out/lib/libringloom_service.dylib # macOS
 ```
 
-The Java binding should load the library from `ringloom.nativeLibDir` in tests
-and allow production users to configure the path explicitly. It should not rely
-on a static archive or JNI shim.
+The Java binding should package the shared library inside the Gradle jar and
+load that classpath copy by default. The packaged resource should live under a
+platform-qualified classpath path such as
+`/io/ringloom/service/native/linux-x86_64/libringloom_service.so`. Production
+and test environments may still override loading with
+`ringloom.nativeLibPath` or `ringloom.nativeLibDir`. It should not rely on a
+static archive or JNI shim.
 
 ### Java Error Handling
 
@@ -1351,7 +1373,7 @@ zig build service-c
 The Java test task must know:
 
 - project root
-- native library directory (`zig-out/lib`)
+- optional native library override directory (`zig-out/lib`)
 - broker executable path (`zig-out/bin/ringloom-broker`)
 - test storage directory
 
@@ -1360,6 +1382,7 @@ Pass these through system properties:
 ```text
 -Dringloom.projectRoot=...
 -Dringloom.nativeLibDir=...
+-Dringloom.nativeLibPath=...
 -Dringloom.brokerBin=...
 ```
 
@@ -1388,7 +1411,7 @@ they should delete it.
 Validates native loading and ABI basics:
 
 1. load native library
-2. assert ABI version equals `1`
+2. assert ABI version equals `2`
 3. assert status strings are non-empty
 4. assert invalid start arguments produce `RINGLOOM_ERR_INVALID_ARGUMENT`
 
@@ -1594,7 +1617,8 @@ process-name based killing.
 
 ### Phase 4 — Java FFM binding
 
-1. Create `bindings/java` Gradle project.
+1. Create `bindings/java` Gradle project with jar packaging for the shared
+   library.
 2. Implement low-level `RingloomNative` symbol bindings.
 3. Implement high-level service/client wrappers.
 4. Implement `BufferClaim` as a reusable object with primitive status-code

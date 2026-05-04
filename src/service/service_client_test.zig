@@ -93,14 +93,14 @@ test "ServiceClient removeInstance removes correct instance" {
     try testing.expectEqual(@as(usize, 2), client.instanceCount());
 
     // When: remove instance 1.
-    client.removeInstance(1);
+    client.removeInstance(1, 1);
 
     // Then: only instance 2 remains.
     try testing.expectEqual(@as(usize, 1), client.instanceCount());
     try testing.expectEqual(@as(i32, 2), client.instances.items[0].service_id);
 }
 
-test "ServiceClient copyTargetInstances returns service ids with leader flags" {
+test "ServiceClient copyTargetInstances returns node and service ids with leader flags" {
     var client = ServiceClient.init(
         testing.allocator,
         "target-list-test",
@@ -128,6 +128,7 @@ test "ServiceClient copyTargetInstances returns service ids with leader flags" {
 
     try testing.expectEqual(@as(usize, 2), total);
     try testing.expectEqual(@as(i32, 11), targets[0].target_service_id);
+    try testing.expectEqual(@as(i16, 1), targets[0].target_node_id);
     try testing.expect(!targets[0].is_leader);
 
     var all_targets: [2]ServiceClient.TargetInstanceInfo = undefined;
@@ -135,7 +136,31 @@ test "ServiceClient copyTargetInstances returns service ids with leader flags" {
 
     try testing.expectEqual(@as(usize, 2), all_total);
     try testing.expectEqual(@as(i32, 11), all_targets[0].target_service_id);
+    try testing.expectEqual(@as(i16, 1), all_targets[0].target_node_id);
     try testing.expect(!all_targets[0].is_leader);
     try testing.expectEqual(@as(i32, 12), all_targets[1].target_service_id);
+    try testing.expectEqual(@as(i16, 2), all_targets[1].target_node_id);
     try testing.expect(all_targets[1].is_leader);
+}
+
+test "ServiceClient tracks duplicate service ids on different nodes" {
+    var client = ServiceClient.init(
+        testing.allocator,
+        "duplicate-id-test",
+        null,
+        1,
+        100,
+    );
+    defer client.deinit();
+
+    try client.addInstance(.{ .service_id = 11, .service_name = "duplicate-id-test", .node_id = 1 });
+    try client.addInstance(.{ .service_id = 11, .service_name = "duplicate-id-test", .node_id = 2 });
+
+    try testing.expect(client.findInstance(1, 11) != null);
+    try testing.expect(client.findInstance(2, 11) != null);
+
+    client.removeInstance(1, 11);
+
+    try testing.expect(client.findInstance(1, 11) == null);
+    try testing.expect(client.findInstance(2, 11) != null);
 }

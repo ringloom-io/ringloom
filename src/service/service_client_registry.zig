@@ -94,8 +94,8 @@ pub const ServiceClientRegistry = struct {
         var i: usize = 0;
         while (i < client.instances.items.len) {
             const current = client.instances.items[i];
-            if (!snapshotContains(entries, current.service_id)) {
-                client.removeInstance(current.service_id);
+            if (!snapshotContains(entries, current.node_id, current.service_id)) {
+                client.removeInstance(current.node_id, current.service_id);
                 continue;
             }
             i += 1;
@@ -114,9 +114,13 @@ pub const ServiceClientRegistry = struct {
         const is_leader = entry.is_leader != 0;
 
         // Check if this instance already exists — update in place if so.
-        if (client.findInstance(entry.service_id)) |existing| {
+        if (client.findInstance(entry.node_id, entry.service_id)) |existing| {
+            const was_leader = existing.is_leader;
             existing.node_id = entry.node_id;
             existing.is_leader = is_leader;
+            if (was_leader != existing.is_leader) {
+                client.emitInstanceAvailable(existing.*);
+            }
             return;
         }
 
@@ -163,10 +167,11 @@ pub const ServiceClientRegistry = struct {
 
     fn snapshotContains(
         entries: []const control_encoding.ServiceInstanceEntry,
+        node_id: i16,
         service_id: i32,
     ) bool {
         for (entries) |entry| {
-            if (entry.service_id == service_id) return true;
+            if (entry.service_id == service_id and entry.node_id == node_id) return true;
         }
         return false;
     }
@@ -174,7 +179,7 @@ pub const ServiceClientRegistry = struct {
     /// Called when the broker notifies that a service instance was removed.
     pub fn removeInstance(self: *Self, service_name: []const u8, service_id: i32) void {
         if (self.clients.get(service_name)) |client| {
-            client.removeInstance(service_id);
+            client.removeInstance(self.local_node_id, service_id);
         }
     }
 

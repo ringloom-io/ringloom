@@ -17,7 +17,7 @@ pub const ringloom_service = opaque {};
 pub const ringloom_client = opaque {};
 pub const ringloom_message_consumer = opaque {};
 
-pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 1;
+pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 2;
 const max_error_message_length = error_state_mod.max_error_message_length;
 
 pub const ringloom_status_t = enum(c_int) {
@@ -815,6 +815,7 @@ export fn ringloom_client_send(
 
 export fn ringloom_client_send_to(
     client: ?*ringloom_client,
+    target_node_id: i16,
     target_service_id: i32,
     payload: ?[*]const u8,
     payload_len: usize,
@@ -826,7 +827,7 @@ export fn ringloom_client_send_to(
     const payload_slice = payloadBytes(payload, payload_len) orelse
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "payload pointer is NULL for non-zero payload length");
 
-    handle.client.sendTo(target_service_id, payload_slice) catch |err|
+    handle.client.sendTo(target_node_id, target_service_id, payload_slice) catch |err|
         return mapRuntimeError(err, "failed to send payload to target service id");
     return .RINGLOOM_OK;
 }
@@ -992,7 +993,8 @@ comptime {
     std.debug.assert(@offsetOf(ringloom_message_t, "payload") == 24);
     std.debug.assert(@offsetOf(ringloom_buffer_claim_t, "_ring_buffer") == 16);
     std.debug.assert(@offsetOf(ringloom_client_target_t, "target_service_id") == 0);
-    std.debug.assert(@offsetOf(ringloom_client_target_t, "is_leader") == 4);
+    std.debug.assert(@offsetOf(ringloom_client_target_t, "target_node_id") == 4);
+    std.debug.assert(@offsetOf(ringloom_client_target_t, "is_leader") == 6);
     std.debug.assert(@sizeOf(ringloom_client_target_t) == 8);
     std.debug.assert(@offsetOf(ringloom_service_lifecycle_event_t, "event_type") == 0);
     std.debug.assert(@offsetOf(ringloom_service_lifecycle_event_t, "service_id") == 4);
@@ -1076,6 +1078,7 @@ test "claim commit rejects inactive claims" {
 
 test "client target layout matches expected offsets" {
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(ringloom_client_target_t, "target_service_id"));
-    try std.testing.expectEqual(@as(usize, 4), @offsetOf(ringloom_client_target_t, "is_leader"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(ringloom_client_target_t, "target_node_id"));
+    try std.testing.expectEqual(@as(usize, 6), @offsetOf(ringloom_client_target_t, "is_leader"));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(ringloom_client_target_t));
 }

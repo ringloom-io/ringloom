@@ -29,6 +29,7 @@ const MessageHeader = message_header.MessageHeader;
 pub const ServiceClient = struct {
     pub const TargetInstanceInfo = extern struct {
         target_service_id: i32,
+        target_node_id: i16,
         is_leader: bool,
     };
 
@@ -170,8 +171,13 @@ pub const ServiceClient = struct {
     }
 
     /// Send a message to a specific instance (bypasses load balancer).
-    pub fn sendTo(self: *Self, target_service_id: i32, payload: []const u8) SendError!void {
-        const instance = self.findInstance(target_service_id) orelse
+    pub fn sendTo(
+        self: *Self,
+        target_node_id: i16,
+        target_service_id: i32,
+        payload: []const u8,
+    ) SendError!void {
+        const instance = self.findInstance(target_node_id, target_service_id) orelse
             return error.NoAvailableInstance;
 
         if (self.fc_config.enabled) {
@@ -233,6 +239,10 @@ pub const ServiceClient = struct {
 
     pub fn addInstance(self: *Self, instance: ServiceInstance) !void {
         try self.instances.append(self.allocator, instance);
+        self.emitInstanceAvailable(instance);
+    }
+
+    pub fn emitInstanceAvailable(self: *Self, instance: ServiceInstance) void {
         self.emitLifecycle(.{
             .event_type = .available,
             .service_name = instance.service_name,
@@ -242,10 +252,12 @@ pub const ServiceClient = struct {
         });
     }
 
-    pub fn removeInstance(self: *Self, service_id: i32) void {
+    pub fn removeInstance(self: *Self, node_id: i16, service_id: i32) void {
         var i: usize = 0;
         while (i < self.instances.items.len) {
-            if (self.instances.items[i].service_id == service_id) {
+            if (self.instances.items[i].service_id == service_id and
+                self.instances.items[i].node_id == node_id)
+            {
                 const removed = self.instances.swapRemove(i);
                 self.emitLifecycle(.{
                     .event_type = .unavailable,
@@ -265,7 +277,17 @@ pub const ServiceClient = struct {
 
     pub fn updateLeader(self: *Self, leader_service_id: i32) void {
         for (self.instances.items) |*inst| {
+            const was_leader = inst.is_leader;
             inst.is_leader = (inst.service_id == leader_service_id);
+            if (was_leader != inst.is_leader) {
+                self.emitLifecycle(.{
+                    .event_type = .available,
+                    .service_name = inst.service_name,
+                    .service_id = inst.service_id,
+                    .node_id = inst.node_id,
+                    .is_leader = inst.is_leader,
+                });
+            }
         }
     }
 
@@ -278,15 +300,16 @@ pub const ServiceClient = struct {
         for (out[0..copy_len], self.instances.items[0..copy_len]) |*slot, inst| {
             slot.* = .{
                 .target_service_id = inst.service_id,
+                .target_node_id = inst.node_id,
                 .is_leader = inst.is_leader,
             };
         }
         return self.instances.items.len;
     }
 
-    pub fn findInstance(self: *const Self, service_id: i32) ?*ServiceInstance {
+    pub fn findInstance(self: *const Self, node_id: i16, service_id: i32) ?*ServiceInstance {
         for (self.instances.items) |*inst| {
-            if (inst.service_id == service_id) return inst;
+            if (inst.service_id == service_id and inst.node_id == node_id) return inst;
         }
         return null;
     }

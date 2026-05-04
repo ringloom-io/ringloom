@@ -6,6 +6,13 @@ import java.lang.foreign.ValueLayout;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * Running RingLoom service connected to a local broker.
+ *
+ * <p>A service owns control-plane progress for clients created from it. Applications should call
+ * {@link #pollControl(int)} regularly to process registration, discovery, lifecycle, and heartbeat
+ * work.</p>
+ */
 public final class RingloomService implements AutoCloseable {
     private final MemorySegment nativeHandle;
     private final AtomicBoolean closed;
@@ -15,6 +22,12 @@ public final class RingloomService implements AutoCloseable {
         this.closed = new AtomicBoolean(false);
     }
 
+    /**
+     * Starts and registers a service with the configured broker.
+     *
+     * @param config service configuration
+     * @return started service handle
+     */
     public static RingloomService start(ServiceConfig config) {
         Objects.requireNonNull(config, "config");
 
@@ -46,6 +59,11 @@ public final class RingloomService implements AutoCloseable {
         }
     }
 
+    /**
+     * Returns the broker-assigned service id.
+     *
+     * @return service id
+     */
     public int serviceId() {
         ensureOpen();
         try (Arena arena = Arena.ofConfined()) {
@@ -56,6 +74,11 @@ public final class RingloomService implements AutoCloseable {
         }
     }
 
+    /**
+     * Returns the broker node id this service registered with.
+     *
+     * @return node id
+     */
     public short nodeId() {
         ensureOpen();
         try (Arena arena = Arena.ofConfined()) {
@@ -66,6 +89,12 @@ public final class RingloomService implements AutoCloseable {
         }
     }
 
+    /**
+     * Creates a client for a logical target service name.
+     *
+     * @param targetServiceName target service name to discover and send to
+     * @return client bound to the target service name
+     */
     public RingloomClient createClient(String targetServiceName) {
         ensureOpen();
         Objects.requireNonNull(targetServiceName, "targetServiceName");
@@ -84,6 +113,15 @@ public final class RingloomService implements AutoCloseable {
         }
     }
 
+    /**
+     * Polls control-plane work for this service.
+     *
+     * <p>This drives service discovery and {@link RingloomClient} lifecycle callbacks. A return
+     * value of {@code 0} means no control messages were processed.</p>
+     *
+     * @param limit maximum number of control messages to process
+     * @return number of processed control messages
+     */
     public int pollControl(int limit) {
         ensureOpen();
         if (limit < 0) {
@@ -98,10 +136,20 @@ public final class RingloomService implements AutoCloseable {
         }
     }
 
+    /**
+     * Polls control-plane work using the default limit.
+     *
+     * @return number of processed control messages
+     */
     public int pollControl() {
         return pollControl(256);
     }
 
+    /**
+     * Creates a message consumer for application messages delivered to this service.
+     *
+     * @return message consumer handle
+     */
     public MessageConsumer messageConsumer() {
         ensureOpen();
         try (Arena arena = Arena.ofConfined()) {
@@ -114,6 +162,9 @@ public final class RingloomService implements AutoCloseable {
         }
     }
 
+    /**
+     * Stops the service registration without destroying the Java wrapper.
+     */
     public void stop() {
         if (closed.get()) {
             return;
@@ -121,6 +172,9 @@ public final class RingloomService implements AutoCloseable {
         RingloomNative.serviceStop(nativeHandle);
     }
 
+    /**
+     * Destroys the native service handle. This method is idempotent.
+     */
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {

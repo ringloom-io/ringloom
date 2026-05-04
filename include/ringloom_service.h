@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define RINGLOOM_SERVICE_ABI_VERSION 1u
+#define RINGLOOM_SERVICE_ABI_VERSION 2u
 
 typedef struct ringloom_service ringloom_service_t;
 typedef struct ringloom_client ringloom_client_t;
@@ -68,6 +68,7 @@ typedef struct ringloom_buffer_claim {
 
 typedef struct ringloom_client_target {
     int32_t target_service_id;
+    int16_t target_node_id;
     bool is_leader;
 } ringloom_client_target_t;
 
@@ -174,6 +175,7 @@ ringloom_status_t ringloom_buffer_claim_abort(
 
 ringloom_status_t ringloom_client_send_to(
     ringloom_client_t *client,
+    int16_t target_node_id,
     int32_t target_service_id,
     const uint8_t *payload,
     size_t payload_len

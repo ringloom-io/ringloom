@@ -285,7 +285,7 @@ pub fn build(b: *std.Build) void {
     const java_bindings_cmd = b.addSystemCommand(&.{
         "sh",
         "-c",
-        "cd bindings/java && gradle --no-daemon classes",
+        "ROOT=$(pwd) && cd bindings/java && gradle --no-daemon classes -Pringloom.embeddedNativeLibDir=\"$ROOT/zig-out/lib\"",
     });
     java_bindings_cmd.step.dependOn(b.getInstallStep());
 
@@ -295,7 +295,7 @@ pub fn build(b: *std.Build) void {
     const java_test_cmd = b.addSystemCommand(&.{
         "sh",
         "-c",
-        "ROOT=$(pwd) && cd bindings/java && gradle --no-daemon test -Dringloom.projectRoot=\"$ROOT\" -Dringloom.nativeLibDir=\"$ROOT/zig-out/lib\" -Dringloom.brokerBin=\"$ROOT/zig-out/bin/ringloom-broker\"",
+        "ROOT=$(pwd) && cd bindings/java && gradle --no-daemon test -Pringloom.embeddedNativeLibDir=\"$ROOT/zig-out/lib\" -Dringloom.projectRoot=\"$ROOT\" -Dringloom.brokerBin=\"$ROOT/zig-out/bin/ringloom-broker\"",
     });
     java_test_cmd.step.dependOn(b.getInstallStep());
 

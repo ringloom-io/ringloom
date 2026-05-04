@@ -7,6 +7,7 @@ import java.util.concurrent.locks.LockSupport;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class RingloomClientTargetsIT {
@@ -21,12 +22,17 @@ final class RingloomClientTargetsIT {
              RingloomService sender = RingloomService.start(TestSupport.serviceConfig("route-sender", broker));
              RingloomClient client = sender.createClient("route-target")) {
 
-            List<TargetService> targets = waitForTargets(client, 2, true);
+            List<TargetService> targets = waitForTargets(sender, client, 2, true);
 
             assertEquals(2, targets.size());
-            assertTrue(targets.stream().anyMatch(target -> target.targetServiceId() == targetOne.serviceId()));
-            assertTrue(targets.stream().anyMatch(target -> target.targetServiceId() == targetTwo.serviceId()));
+            assertTrue(targets.stream().anyMatch(target ->
+                target.targetNodeId() == targetOne.nodeId() && target.targetServiceId() == targetOne.serviceId()
+            ));
+            assertTrue(targets.stream().anyMatch(target ->
+                target.targetNodeId() == targetTwo.nodeId() && target.targetServiceId() == targetTwo.serviceId()
+            ));
             assertEquals(1L, targets.stream().filter(TargetService::leader).count());
+            assertSame(targets, client.targetServices());
             success = true;
         } finally {
             TestSupport.cleanupWorkspace(workspace, success);
@@ -47,11 +53,17 @@ final class RingloomClientTargetsIT {
         );
     }
 
-    private static List<TargetService> waitForTargets(RingloomClient client, int expectedCount, boolean requireLeader) {
+    private static List<TargetService> waitForTargets(
+        RingloomService service,
+        RingloomClient client,
+        int expectedCount,
+        boolean requireLeader
+    ) {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         List<TargetService> lastSeen = List.of();
 
         while (System.nanoTime() < deadline) {
+            service.pollControl(256);
             lastSeen = client.targetServices();
             boolean hasExpectedCount = lastSeen.size() == expectedCount;
             boolean hasLeader = !requireLeader || lastSeen.stream().anyMatch(TargetService::leader);
