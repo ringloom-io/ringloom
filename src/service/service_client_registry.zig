@@ -91,22 +91,45 @@ pub const ServiceClientRegistry = struct {
     ) void {
         const client = self.clients.get(service_name) orelse return;
 
+        client.lockInstances();
+        defer client.unlockInstances();
+
         var i: usize = 0;
         while (i < client.instances.items.len) {
             const current = client.instances.items[i];
             if (!snapshotContains(entries, current.node_id, current.service_id)) {
-                client.removeInstance(current.node_id, current.service_id);
+                const removed = client.instances.swapRemove(i);
+                if (removed.ipc_producer) |producer| {
+                    self.allocator.destroy(producer);
+                }
+                client.emitLifecycle(.{
+                    .event_type = .unavailable,
+                    .service_name = removed.service_name,
+                    .service_id = removed.service_id,
+                    .node_id = removed.node_id,
+                    .is_leader = removed.is_leader,
+                });
                 continue;
             }
             i += 1;
         }
 
         for (entries) |entry| {
-            self.addOrUpdateClientInstance(client, entry);
+            self.addOrUpdateClientInstanceLocked(client, entry);
         }
     }
 
     fn addOrUpdateClientInstance(
+        self: *Self,
+        client: *ServiceClient,
+        entry: control_encoding.ServiceInstanceEntry,
+    ) void {
+        client.lockInstances();
+        defer client.unlockInstances();
+        self.addOrUpdateClientInstanceLocked(client, entry);
+    }
+
+    fn addOrUpdateClientInstanceLocked(
         self: *Self,
         client: *ServiceClient,
         entry: control_encoding.ServiceInstanceEntry,
@@ -118,6 +141,9 @@ pub const ServiceClientRegistry = struct {
             const was_leader = existing.is_leader;
             existing.node_id = entry.node_id;
             existing.is_leader = is_leader;
+            existing.fc_slot_id = entry.fc_slot_id;
+            existing.fc_slot_generation = entry.fc_slot_generation;
+            existing.messages_buffer_capacity = entry.messages_buffer_capacity;
             if (was_leader != existing.is_leader) {
                 client.emitInstanceAvailable(existing.*);
             }
@@ -128,13 +154,21 @@ pub const ServiceClientRegistry = struct {
         // and create an IpcProducer for direct shared-memory writes.
         const ipc_producer = self.createIpcProducer(entry.service_id, entry.node_id, client.service_name);
 
-        client.addInstance(.{
+        const instance = ServiceInstance{
             .service_id = entry.service_id,
             .service_name = client.service_name,
             .node_id = entry.node_id,
             .is_leader = is_leader,
             .ipc_producer = ipc_producer,
-        }) catch {};
+            .fc_slot_id = entry.fc_slot_id,
+            .fc_slot_generation = entry.fc_slot_generation,
+            .messages_buffer_capacity = entry.messages_buffer_capacity,
+        };
+        client.instances.append(self.allocator, instance) catch {
+            if (ipc_producer) |producer| self.allocator.destroy(producer);
+            return;
+        };
+        client.emitInstanceAvailable(instance);
     }
 
     fn createIpcProducer(

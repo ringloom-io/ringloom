@@ -173,7 +173,20 @@ pub const ServiceInstanceEntry = extern struct {
     node_id: i16 align(1),
     is_leader: u8,
     _padding: u8 = 0,
+    fc_slot_id: i32 align(1) = -1,
+    fc_slot_generation: u16 align(1) = 0,
+    _padding2: u16 = 0,
+    messages_buffer_capacity: u32 align(1) = 0,
 };
+
+const LegacyServiceInstanceEntry = extern struct {
+    service_id: i32 align(1),
+    node_id: i16 align(1),
+    is_leader: u8,
+    _padding: u8 = 0,
+};
+
+threadlocal var legacy_service_instance_decode_buf: [256]ServiceInstanceEntry = undefined;
 
 pub const ServiceInstancesData = struct {
     service_name: []const u8,
@@ -226,10 +239,53 @@ pub fn decodeServiceInstances(payload: []const u8) ServiceInstancesData {
     const service_name = payload[offset..][0..name_len];
     offset += name_len;
 
-    const entries_ptr: [*]const ServiceInstanceEntry = @ptrCast(payload[offset..].ptr);
+    const remaining = payload.len - offset;
+    const new_entries_size = instance_count * @sizeOf(ServiceInstanceEntry);
+    if (remaining >= new_entries_size) {
+        if (instance_count > legacy_service_instance_decode_buf.len) {
+            return .{ .service_name = service_name, .entries = &.{} };
+        }
+        for (0..instance_count) |i| {
+            const entry_offset = offset + i * @sizeOf(ServiceInstanceEntry);
+            const raw = payload[entry_offset..][0..@sizeOf(ServiceInstanceEntry)];
+            legacy_service_instance_decode_buf[i] = .{
+                .service_id = std.mem.readInt(i32, raw[0..4], .little),
+                .node_id = std.mem.readInt(i16, raw[4..6], .little),
+                .is_leader = raw[6],
+                .fc_slot_id = std.mem.readInt(i32, raw[8..12], .little),
+                .fc_slot_generation = std.mem.readInt(u16, raw[12..14], .little),
+                .messages_buffer_capacity = std.mem.readInt(u32, raw[16..20], .little),
+            };
+        }
+        return .{
+            .service_name = service_name,
+            .entries = legacy_service_instance_decode_buf[0..instance_count],
+        };
+    }
+
+    const legacy_entries_size = instance_count * @sizeOf(LegacyServiceInstanceEntry);
+    if (remaining >= legacy_entries_size and instance_count <= legacy_service_instance_decode_buf.len) {
+        for (0..instance_count) |i| {
+            const entry_offset = offset + i * @sizeOf(LegacyServiceInstanceEntry);
+            const raw = payload[entry_offset..][0..@sizeOf(LegacyServiceInstanceEntry)];
+            legacy_service_instance_decode_buf[i] = .{
+                .service_id = std.mem.readInt(i32, raw[0..4], .little),
+                .node_id = std.mem.readInt(i16, raw[4..6], .little),
+                .is_leader = raw[6],
+                .fc_slot_id = -1,
+                .fc_slot_generation = 0,
+                .messages_buffer_capacity = 0,
+            };
+        }
+        return .{
+            .service_name = service_name,
+            .entries = legacy_service_instance_decode_buf[0..instance_count],
+        };
+    }
+
     return .{
         .service_name = service_name,
-        .entries = entries_ptr[0..instance_count],
+        .entries = &.{},
     };
 }
 

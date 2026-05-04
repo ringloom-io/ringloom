@@ -4,10 +4,6 @@
 //! It reads outbound messages, routes them to the correct peer's write queue,
 //! and manages outgoing TCP connections (heartbeats, reconnection with backoff).
 //!
-//! TCP replaces UDP: no retransmit buffer, no message fragmentation, no NAK
-//! handling, no Status Messages. The sender writes complete frames to the TCP
-//! stream and relies on the kernel for segmentation, retransmission, and flow
-//! control.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,6 +16,7 @@ const platform = ringloom_common.platform;
 
 const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const CountersManager = ringloom_common.concurrent.counters.CountersManager;
+const PeerSendCountersRegion = ringloom_common.memory.PeerSendCountersRegion;
 
 const frame_parser = ringloom_common.protocol.frame_parser;
 const TcpFrameHeader = frame_parser.TcpFrameHeader;
@@ -174,6 +171,9 @@ pub const SenderEventLoop = struct {
     /// io_uring ring for batched async TCP sends (Linux only).
     io_ring: ?linux.IoUring,
 
+    /// Optional shared-memory per-peer counters published for ServiceClients.
+    peer_send_counters: ?PeerSendCountersRegion,
+
     /// CQE harvest buffer.
     cqe_buf: [max_cqe_batch]linux.io_uring_cqe = undefined,
 
@@ -218,7 +218,12 @@ pub const SenderEventLoop = struct {
             .group_name_hash = HandshakeFrame.hashGroupName(group_name),
             .benchmark_latency_tracing_enabled = benchmark_latency_tracing_enabled,
             .io_ring = io_ring,
+            .peer_send_counters = null,
         };
+    }
+
+    pub fn setPeerSendCountersRegion(self: *Self, region: ?PeerSendCountersRegion) void {
+        self.peer_send_counters = region;
     }
 
     pub fn deinit(self: *Self) void {
@@ -299,6 +304,8 @@ pub const SenderEventLoop = struct {
 
         work_count += self.pending_send_count;
 
+        self.publishPeerSendCounters(now_ns);
+
         return work_count;
     }
 
@@ -324,6 +331,7 @@ pub const SenderEventLoop = struct {
 
         const header: *const TcpFrameHeader = @ptrCast(@alignCast(payload.ptr));
         const target_node_id = header.target_node_id;
+        self.subtractPeerRingPending(target_node_id, ringCost(payload.len));
 
         // Look up peer
         const peer = self.peers.get(target_node_id) orelse {
@@ -334,6 +342,7 @@ pub const SenderEventLoop = struct {
         // Must be connected
         if (peer.state != .connected) {
             self.counters.increment(self.counter_ids.peer_not_connected_drops);
+            peer.total_bytes_dropped += payload.len;
             return;
         }
 
@@ -346,7 +355,8 @@ pub const SenderEventLoop = struct {
 
         // Enqueue into peer's write queue (drop-oldest on overflow)
         peer.write_queue.enqueue(payload) catch {
-            _ = peer.write_queue.dropOldest();
+            const dropped_len = peer.write_queue.dropOldest();
+            peer.total_bytes_dropped += dropped_len;
             self.counters.increment(self.counter_ids.peer_queue_overflow_drops);
             peer.write_queue.enqueue(payload) catch unreachable;
         };
@@ -545,6 +555,7 @@ pub const SenderEventLoop = struct {
 
             peer.in_flight_frames -|= frames_completed;
             peer.in_flight_bytes -|= (written - bytes_remaining);
+            peer.total_bytes_sent += written - bytes_remaining;
 
             if (frames_completed > 0) {
                 peer.last_send_ns = Clock.monotonicNanos();
@@ -598,6 +609,7 @@ pub const SenderEventLoop = struct {
                         },
                     }
                 };
+                peer.total_bytes_sent += written;
 
                 // Walk iovecs to determine which frames were fully written.
                 var remaining = written;
@@ -740,6 +752,7 @@ pub const SenderEventLoop = struct {
         peer.in_flight_frames = 0;
         peer.in_flight_bytes = 0;
         self.counters.increment(self.counter_ids.peers_connected);
+        self.publishPeerCounter(peer, Clock.monotonicNanos());
     }
 
     fn disconnectPeer(self: *Self, peer: *PeerSender) void {
@@ -757,6 +770,7 @@ pub const SenderEventLoop = struct {
         peer.in_flight_bytes = 0;
         peer.advanceBackoff(Clock.monotonicNanos());
         self.counters.increment(self.counter_ids.peers_disconnected);
+        self.publishPeerCounter(peer, Clock.monotonicNanos());
     }
 
     // ── Peer Lifecycle Management ─────────────────────────────────────
@@ -771,10 +785,14 @@ pub const SenderEventLoop = struct {
         errdefer peer.deinit(self.allocator);
 
         self.peers.put(node_id, peer);
+        self.publishPeerCounter(peer, Clock.monotonicNanos());
     }
 
     pub fn removePeer(self: *Self, node_id: u8) void {
         if (self.peers.remove(node_id)) |peer| {
+            if (self.peer_send_counters) |region| {
+                region.freePeer(node_id);
+            }
             peer.deinit(self.allocator);
             self.allocator.destroy(peer);
             self.counters.increment(self.counter_ids.peers_disconnected);
@@ -806,6 +824,40 @@ pub const SenderEventLoop = struct {
         tls_self = self;
         defer tls_self = null;
         return self.send_ring_buffer.read(onOutboundMessageThunk, limit);
+    }
+
+    fn publishPeerSendCounters(self: *Self, now_ns: i64) void {
+        if (self.peer_send_counters == null) return;
+        var peer_iter = self.peers.iterator();
+        while (peer_iter.next()) |peer| {
+            self.publishPeerCounter(peer, now_ns);
+        }
+    }
+
+    fn publishPeerCounter(self: *Self, peer: *PeerSender, now_ns: i64) void {
+        const region = self.peer_send_counters orelse return;
+        const queue_capacity_bytes = @as(u64, peer.write_queue.capacity) *
+            @as(u64, peer.write_queue.max_frame_size);
+        const entry = region.findOrAllocPeer(peer.node_id, queue_capacity_bytes) orelse return;
+        entry.storeConnectionState(peer.state == .connected);
+        entry.storeQueueBytesPending(peer.write_queue.byteSize());
+        entry.storeTotalBytesSent(peer.total_bytes_sent);
+        entry.storeTotalBytesDropped(peer.total_bytes_dropped);
+        entry.storeLastUpdateNs(@intCast(@max(now_ns, 0)));
+    }
+
+    fn subtractPeerRingPending(self: *Self, node_id: u8, bytes: usize) void {
+        const region = self.peer_send_counters orelse return;
+        const entry = region.findPeer(node_id) orelse return;
+        entry.subtractRingBytesPending(@intCast(bytes));
+    }
+
+    fn ringCost(payload_len: usize) usize {
+        return alignUp(8 + payload_len, 8);
+    }
+
+    fn alignUp(value: usize, alignment: usize) usize {
+        return (value + alignment - 1) & ~(alignment - 1);
     }
 };
 

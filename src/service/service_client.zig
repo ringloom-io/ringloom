@@ -16,6 +16,7 @@ const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const FlowControlRegion = memory.FlowControlRegion;
 const FlowControlEntry = memory.FlowControlEntry;
 const PeerSendCountersRegion = memory.PeerSendCountersRegion;
+const PeerEntry = memory.PeerEntry;
 const fc_config_mod = @import("flow_control_config.zig");
 const FlowControlConfig = fc_config_mod.FlowControlConfig;
 const BackpressureStrategy = fc_config_mod.BackpressureStrategy;
@@ -53,6 +54,7 @@ pub const ServiceClient = struct {
 
     service_name: []const u8,
     instances: std.ArrayList(ServiceInstance),
+    instances_lock: std.atomic.Mutex = .unlocked,
     allocator: std.mem.Allocator,
     balancer: load_balancer.ClientLoadBalancer,
     owns_service_name: bool = false,
@@ -90,9 +92,14 @@ pub const ServiceClient = struct {
     pub const SendClaim = struct {
         claim: RingBuffer.Claim,
         payload: []u8,
+        peer_counter_entry: ?*volatile PeerEntry = null,
+        peer_ring_cost: u64 = 0,
 
         pub fn commit(self: *SendClaim) void {
             self.claim.commit();
+            if (self.peer_counter_entry) |entry| {
+                entry.addRingBytesPending(self.peer_ring_cost);
+            }
         }
 
         pub fn abort(self: *SendClaim) void {
@@ -116,6 +123,8 @@ pub const ServiceClient = struct {
             .broker_send_ring_buffer = initBrokerSendRingBuffer(broker_meta),
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
+            .fc_region = initFlowControlRegion(broker_meta),
+            .peer_send_counters = initPeerSendCountersRegion(broker_meta),
         };
     }
 
@@ -148,6 +157,9 @@ pub const ServiceClient = struct {
     /// Send a message to one instance of this service, selected by the
     /// load balancer.
     pub fn send(self: *Self, payload: []const u8) SendError!void {
+        self.lockInstances();
+        defer self.unlockInstances();
+
         const instance = self.balancer.next(self.instances.items) orelse
             return error.NoAvailableInstance;
 
@@ -177,6 +189,9 @@ pub const ServiceClient = struct {
         target_service_id: i32,
         payload: []const u8,
     ) SendError!void {
+        self.lockInstances();
+        defer self.unlockInstances();
+
         const instance = self.findInstance(target_node_id, target_service_id) orelse
             return error.NoAvailableInstance;
 
@@ -199,6 +214,9 @@ pub const ServiceClient = struct {
 
     /// Send to the leader instance only.
     pub fn sendToLeader(self: *Self, payload: []const u8) SendError!void {
+        self.lockInstances();
+        defer self.unlockInstances();
+
         for (self.instances.items) |*inst| {
             if (inst.is_leader) {
                 if (self.fc_config.enabled) {
@@ -225,6 +243,9 @@ pub const ServiceClient = struct {
     /// Claim writable ring-buffer memory for a zero-copy send on the
     /// load-balanced path.
     pub fn tryClaim(self: *Self, template_id: u16, payload_len: usize) SendError!SendClaim {
+        self.lockInstances();
+        defer self.unlockInstances();
+
         const instance = self.balancer.next(self.instances.items) orelse
             return error.NoAvailableInstance;
 
@@ -238,6 +259,8 @@ pub const ServiceClient = struct {
     // ── Instance Management ───────────────────────────────────────────
 
     pub fn addInstance(self: *Self, instance: ServiceInstance) !void {
+        self.lockInstances();
+        defer self.unlockInstances();
         try self.instances.append(self.allocator, instance);
         self.emitInstanceAvailable(instance);
     }
@@ -253,6 +276,8 @@ pub const ServiceClient = struct {
     }
 
     pub fn removeInstance(self: *Self, node_id: i16, service_id: i32) void {
+        self.lockInstances();
+        defer self.unlockInstances();
         var i: usize = 0;
         while (i < self.instances.items.len) {
             if (self.instances.items[i].service_id == service_id and
@@ -276,6 +301,8 @@ pub const ServiceClient = struct {
     }
 
     pub fn updateLeader(self: *Self, leader_service_id: i32) void {
+        self.lockInstances();
+        defer self.unlockInstances();
         for (self.instances.items) |*inst| {
             const was_leader = inst.is_leader;
             inst.is_leader = (inst.service_id == leader_service_id);
@@ -292,10 +319,14 @@ pub const ServiceClient = struct {
     }
 
     pub fn instanceCount(self: *const Self) usize {
+        self.lockInstances();
+        defer self.unlockInstances();
         return self.instances.items.len;
     }
 
     pub fn copyTargetInstances(self: *const Self, out: []TargetInstanceInfo) usize {
+        self.lockInstances();
+        defer self.unlockInstances();
         const copy_len = @min(out.len, self.instances.items.len);
         for (out[0..copy_len], self.instances.items[0..copy_len]) |*slot, inst| {
             slot.* = .{
@@ -335,10 +366,21 @@ pub const ServiceClient = struct {
         }
     }
 
-    fn emitLifecycle(self: *Self, event: LifecycleEvent) void {
+    pub fn emitLifecycle(self: *Self, event: LifecycleEvent) void {
         if (self.lifecycle_handler) |handler| {
             handler(self.lifecycle_context, event);
         }
+    }
+
+    pub fn lockInstances(self: *const Self) void {
+        const lock = @constCast(&self.instances_lock);
+        while (!lock.tryLock()) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn unlockInstances(self: *const Self) void {
+        @constCast(&self.instances_lock).unlock();
     }
 
     // ── Flow Control API ─────────────────────────────────────────────
@@ -346,15 +388,15 @@ pub const ServiceClient = struct {
     /// Returns the estimated remaining bytes in the target's buffer.
     /// For local instances: exact (from ring buffer via IpcProducer).
     /// For remote instances: advisory (from propagated counter in FC region).
-    pub fn remainingBytes(self: *const Self, instance: *const ServiceInstance) usize {
-        if (instance.fc_slot_id < 0) {
+    pub fn remainingBytes(self: *const Self, instance: *const ServiceInstance) ?usize {
+        if (instance.node_id == self.local_node_id) {
             // Local instance — read ring buffer directly.
             const producer = instance.ipc_producer orelse return 0;
             return producer.remainingCapacity();
-        } else {
-            // Remote instance — read from flow control counters region.
-            return self.readFcCounter(instance);
         }
+
+        // Remote instance — read from flow control counters region if assigned.
+        return self.readFcCounter(instance);
     }
 
     /// Returns the estimated remaining bytes in the broker's send ring buffer.
@@ -389,17 +431,18 @@ pub const ServiceClient = struct {
     /// Pre-send flow control check for all five paths.
     fn applyFlowControl(self: *Self, instance: *const ServiceInstance, payload_len: usize) SendError!void {
         // Path 1/3: Target service remaining capacity.
-        const remaining = self.remainingBytes(instance);
-        const required = ringCost(payload_len);
-        const threshold = @max(required, self.fc_config.min_remaining_bytes);
+        const required = conservativeRingCost(payload_len);
+        if (self.remainingBytes(instance)) |remaining| {
+            const threshold = @max(required, self.fc_config.min_remaining_bytes);
 
-        if (remaining < threshold) {
-            try self.applyStrategy(remaining, required);
+            if (remaining < threshold) {
+                try self.applyStrategy(.target_buffer, remaining, required, instance);
+            }
         }
 
         // Paths 2/4/5: Only apply to remote instances.
         if (instance.node_id != self.local_node_id) {
-            const send_cost = ringCost(TcpFrameHeader.size + payload_len);
+            const send_cost = conservativeRingCost(TcpFrameHeader.size + payload_len);
 
             // Path 5: Peer connectivity (cheapest — single byte read).
             if (self.fc_config.check_peer_connectivity) {
@@ -412,7 +455,7 @@ pub const ServiceClient = struct {
             if (self.fc_config.per_peer_pending_threshold > 0) {
                 if (self.peerSendPending(instance.node_id)) |pending| {
                     if (pending + send_cost > self.fc_config.per_peer_pending_threshold) {
-                        return error.PeerCongested;
+                        try self.applyStrategy(.peer_congestion, 0, send_cost, instance);
                     }
                 }
             }
@@ -420,30 +463,49 @@ pub const ServiceClient = struct {
             // Path 2: Global send ring buffer remaining.
             const send_remaining = self.sendBufferRemaining();
             if (send_remaining < send_cost) {
-                try self.applyStrategy(send_remaining, send_cost);
+                try self.applyStrategy(.send_buffer, send_remaining, send_cost, instance);
             }
         }
     }
 
+    const BackpressurePath = enum {
+        target_buffer,
+        send_buffer,
+        peer_congestion,
+    };
+
     /// Apply the configured backpressure strategy.
-    fn applyStrategy(self: *Self, remaining: usize, required: usize) SendError!void {
+    fn applyStrategy(
+        self: *Self,
+        path: BackpressurePath,
+        remaining: usize,
+        required: usize,
+        instance: *const ServiceInstance,
+    ) SendError!void {
         switch (self.fc_config.strategy) {
-            .drop => return error.BackPressure,
-            .spin => try self.spinUntilCapacity(remaining, required),
+            .drop => switch (path) {
+                .peer_congestion => return error.PeerCongested,
+                else => return error.BackPressure,
+            },
+            .spin => try self.spinUntilCapacity(path, remaining, required, instance),
         }
     }
 
     /// Spin-wait until capacity is available or timeout expires.
-    fn spinUntilCapacity(self: *Self, initial_remaining: usize, required: usize) SendError!void {
+    fn spinUntilCapacity(
+        self: *Self,
+        path: BackpressurePath,
+        initial_remaining: usize,
+        required: usize,
+        instance: *const ServiceInstance,
+    ) SendError!void {
         _ = initial_remaining;
         const timeout_ns: u64 = @as(u64, self.fc_config.spin_timeout_ms) * 1_000_000;
         const start = Clock.monotonicNanos();
         const deadline_ns: i64 = @intCast(timeout_ns);
 
         while (true) {
-            // Re-read remaining capacity (may have changed).
-            const send_remaining = self.sendBufferRemaining();
-            if (send_remaining >= required) return;
+            if (self.pathHasCapacity(path, instance, required)) return;
 
             const elapsed = Clock.monotonicNanos() - start;
             if (elapsed >= deadline_ns) {
@@ -454,15 +516,37 @@ pub const ServiceClient = struct {
         }
     }
 
+    fn pathHasCapacity(
+        self: *Self,
+        path: BackpressurePath,
+        instance: *const ServiceInstance,
+        required: usize,
+    ) bool {
+        return switch (path) {
+            .target_buffer => if (self.remainingBytes(instance)) |remaining|
+                remaining >= @max(required, self.fc_config.min_remaining_bytes)
+            else
+                true,
+            .send_buffer => self.sendBufferRemaining() >= required,
+            .peer_congestion => blk: {
+                const threshold = self.fc_config.per_peer_pending_threshold;
+                if (threshold == 0) break :blk true;
+                const pending = self.peerSendPending(instance.node_id) orelse break :blk true;
+                break :blk pending + required <= threshold;
+            },
+        };
+    }
+
     /// Read the FC counter for a remote instance, validating generation.
-    fn readFcCounter(self: *const Self, instance: *const ServiceInstance) usize {
-        const region = self.fc_region orelse return 0;
-        const slot_id: u32 = if (instance.fc_slot_id >= 0) @intCast(instance.fc_slot_id) else return 0;
-        const entry = region.getEntry(slot_id) orelse return 0;
+    fn readFcCounter(self: *const Self, instance: *const ServiceInstance) ?usize {
+        const region = self.fc_region orelse return null;
+        const slot_id: u32 = if (instance.fc_slot_id >= 0) @intCast(instance.fc_slot_id) else return null;
+        const entry = region.getEntry(slot_id) orelse return null;
 
         // Validate generation atomically to detect stale slot references.
-        if (entry.loadGeneration() != instance.fc_slot_generation) return 0;
-        if (entry.loadState() != .allocated) return 0;
+        if (entry.loadState() != .allocated) return null;
+        if (entry.loadGeneration() != instance.fc_slot_generation) return null;
+        if (entry.capacity == 0) return null;
 
         return entry.loadRemainingBytes();
     }
@@ -471,6 +555,10 @@ pub const ServiceClient = struct {
     fn ringCost(payload_len: usize) usize {
         // Ring buffer record: 8-byte header + payload, aligned to 8 bytes.
         return alignUp(8 + payload_len, 8);
+    }
+
+    fn conservativeRingCost(payload_len: usize) usize {
+        return ringCost(payload_len) * 2;
     }
 
     fn alignUp(value: usize, alignment: usize) usize {
@@ -567,6 +655,8 @@ pub const ServiceClient = struct {
         return .{
             .claim = claim,
             .payload = claim.buffer[TcpFrameHeader.size..][0..payload_len],
+            .peer_counter_entry = self.peerCounterEntry(target_node_id),
+            .peer_ring_cost = @intCast(ringCost(total_len)),
         };
     }
 
@@ -583,5 +673,20 @@ pub const ServiceClient = struct {
             null,
             null,
         ) catch null;
+    }
+
+    fn initFlowControlRegion(broker_meta: ?*BrokerMetadataFile) ?FlowControlRegion {
+        const broker = broker_meta orelse return null;
+        return broker.getFlowControlRegion();
+    }
+
+    fn initPeerSendCountersRegion(broker_meta: ?*BrokerMetadataFile) ?PeerSendCountersRegion {
+        const broker = broker_meta orelse return null;
+        return broker.getPeerSendCountersRegion();
+    }
+
+    fn peerCounterEntry(self: *const Self, node_id: i16) ?*volatile PeerEntry {
+        const region = self.peer_send_counters orelse return null;
+        return region.findPeer(node_id);
     }
 };

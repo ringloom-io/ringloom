@@ -11,7 +11,7 @@ channels that connect every service to its local broker, the same-host direct pa
 bypasses the broker entirely, and the cross-host routed path that hands messages off to
 the broker's TCP transport layer.
 
-All code targets **Zig 0.15.x** stable.
+All code targets **Zig 0.16.x** stable.
 
 ---
 

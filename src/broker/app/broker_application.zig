@@ -208,6 +208,13 @@ pub const BrokerApplication = struct {
             .send_ring_buffer = &self.send_ring_buffer.?,
             .peer_node_ids = self.peer_node_ids orelse &.{},
             .routing_registry = &self.routing_registry.?,
+            .fc_region = self.broker_metadata.?.getFlowControlRegion(),
+            .fc_enabled = self.config.fc_enabled,
+            .fc_low_watermark_pct = self.config.fc_low_watermark_pct,
+            .fc_high_watermark_pct = self.config.fc_high_watermark_pct,
+            .fc_check_interval_ms = self.config.fc_check_interval_ms,
+            .fc_refresh_interval_ms = self.config.fc_refresh_interval_ms,
+            .fc_normal_refresh_interval_ms = self.config.fc_normal_refresh_interval_ms,
         });
 
         self.sender_loop = try SenderEventLoop.initWithGroup(
@@ -218,6 +225,11 @@ pub const BrokerApplication = struct {
             self.config.group_name,
             self.config.benchmark_latency_tracing_enabled,
         );
+        if (self.config.fc_peer_send_counters_enabled) {
+            self.sender_loop.?.setPeerSendCountersRegion(
+                self.broker_metadata.?.getPeerSendCountersRegion(),
+            );
+        }
         errdefer {
             self.sender_loop.?.deinit();
             self.sender_loop = null;
@@ -296,12 +308,19 @@ pub const BrokerApplication = struct {
     /// deferred to `start()` so that `self` is at its final address and
     /// internal pointers (e.g. `&self.control_ring_buffer.?`) remain valid.
     fn bootstrap(self: *Self) !void {
-        var broker_metadata = try BrokerMetadataFile.create(
+        var broker_metadata = try BrokerMetadataFile.createWithFlowControl(
             self.config.storage_path,
             self.config.group_name,
             self.config.node_id,
             self.config.control_buffer_size,
             self.config.messages_buffer_size,
+            .{
+                .fc_max_entries = if (self.config.fc_enabled) self.config.fc_max_entries else 0,
+                .peer_send_max_peers = if (self.config.fc_peer_send_counters_enabled)
+                    self.config.fc_peer_send_counters_max_peers
+                else
+                    0,
+            },
         );
         errdefer broker_metadata.close();
 

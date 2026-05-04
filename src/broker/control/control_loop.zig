@@ -25,12 +25,16 @@ const ServiceInstance = @import("service_registry.zig").ServiceInstance;
 const ClusterManager = @import("../cluster/cluster_manager.zig").ClusterManager;
 const CountersManager = ringloom_common.concurrent.counters.CountersManager;
 const encoding = ringloom_common.message.control_encoding;
+const fc_messages = ringloom_common.message.flow_control_messages;
+const memory = ringloom_common.memory;
 const admin = @import("../cluster/admin_messages.zig");
 const admin_dispatch = @import("../cluster/admin_dispatch.zig");
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
 const AdminCommand = admin_dispatch.AdminCommand;
 const TcpFrameHeader = ringloom_common.protocol.frame_parser.TcpFrameHeader;
 const RoutingRegistry = @import("../receiver/message_router.zig").ServiceRegistry;
+const FlowControlRegion = memory.FlowControlRegion;
+const PressureState = memory.PressureState;
 const log = std.log.scoped(.control_loop);
 
 // ── File-level state for RingBuffer callback dispatch ─────────────────
@@ -83,6 +87,9 @@ pub const ControlLoop = struct {
     /// Next time (monotonic ns) to check service heartbeats.
     next_heartbeat_check_ns: i64,
 
+    /// Next time (monotonic ns) to scan local service buffers for FC updates.
+    next_fc_check_ns: i64,
+
     // ── Scratch buffer for message encoding ──────────────────────
     /// Pre-allocated buffer for encoding outbound control messages.
     /// 4096 bytes is more than enough for any single control message
@@ -115,6 +122,16 @@ pub const ControlLoop = struct {
     /// receiver thread. All are freed in onClose after the receiver has stopped.
     allocated_routing_rbs: std.AutoHashMap(u16, *RingBuffer),
 
+    /// Flow-control counters region visible to local ServiceClients.
+    fc_region: ?FlowControlRegion,
+
+    fc_enabled: bool,
+    fc_low_watermark_pct: u8,
+    fc_high_watermark_pct: u8,
+    fc_check_interval_ns: i64,
+    fc_refresh_interval_ns: i64,
+    fc_normal_refresh_interval_ns: i64,
+
     const Self = @This();
 
     // ── Timing constants (imported from platform/constants.zig) ──
@@ -141,6 +158,13 @@ pub const ControlLoop = struct {
         send_ring_buffer: ?*RingBuffer = null,
         peer_node_ids: []const u8 = &.{},
         routing_registry: ?*RoutingRegistry = null,
+        fc_region: ?FlowControlRegion = null,
+        fc_enabled: bool = false,
+        fc_low_watermark_pct: u8 = 25,
+        fc_high_watermark_pct: u8 = 50,
+        fc_check_interval_ms: u32 = 1,
+        fc_refresh_interval_ms: u32 = 200,
+        fc_normal_refresh_interval_ms: u32 = 2000,
     };
 
     pub fn init(opts: InitOptions) Self {
@@ -157,12 +181,20 @@ pub const ControlLoop = struct {
             .group = opts.group,
             .next_timeout_check_ns = 0,
             .next_heartbeat_check_ns = 0,
+            .next_fc_check_ns = 0,
             .allocator = opts.allocator,
             .admin_cmd_queue = opts.admin_cmd_queue,
             .send_ring_buffer = opts.send_ring_buffer,
             .peer_node_ids = opts.peer_node_ids,
             .routing_registry = opts.routing_registry,
             .allocated_routing_rbs = std.AutoHashMap(u16, *RingBuffer).init(opts.allocator),
+            .fc_region = opts.fc_region,
+            .fc_enabled = opts.fc_enabled and opts.fc_region != null,
+            .fc_low_watermark_pct = opts.fc_low_watermark_pct,
+            .fc_high_watermark_pct = opts.fc_high_watermark_pct,
+            .fc_check_interval_ns = @as(i64, @intCast(opts.fc_check_interval_ms)) * std.time.ns_per_ms,
+            .fc_refresh_interval_ns = @as(i64, @intCast(opts.fc_refresh_interval_ms)) * std.time.ns_per_ms,
+            .fc_normal_refresh_interval_ns = @as(i64, @intCast(opts.fc_normal_refresh_interval_ms)) * std.time.ns_per_ms,
         };
     }
 
@@ -206,6 +238,11 @@ pub const ControlLoop = struct {
 
         // 4. Update monitoring counters
         self.updateCounters();
+
+        if (self.fc_enabled and now_ns > self.next_fc_check_ns) {
+            work_count += self.updateFlowControlState(now_ns);
+            self.next_fc_check_ns = now_ns + self.fc_check_interval_ns;
+        }
 
         return work_count;
     }
@@ -343,6 +380,15 @@ pub const ControlLoop = struct {
 
         // 3. Associate the BuffersProvider with the service in the registry
         self.service_registry.setLocalBuffers(data.service_id, buffers);
+        const messages_capacity: u32 = @intCast(buffers.service_file.header.messages_buffer_length);
+        self.service_registry.updateFlowControlState(
+            data.service_id,
+            self.local_node_id,
+            messages_capacity,
+            messages_capacity,
+            .unknown,
+            0,
+        );
 
         // 3.5. Register in the receiver's routing registry so incoming TCP
         //      messages for this service can be delivered to its ring buffer.
@@ -370,6 +416,7 @@ pub const ControlLoop = struct {
             service_name,
             data.leader_election_enabled,
         );
+        self.broadcastServiceCapacity(data.service_id, messages_capacity, messages_capacity);
 
         // 7. Notify all local subscribers watching this service name
         self.notifySubscribers(service_name);
@@ -495,6 +542,12 @@ pub const ControlLoop = struct {
                 .service_added => |e| self.handleRemoteServiceAdded(e.data),
                 .service_removed => |e| self.handleRemoteServiceRemoved(e.data),
                 .peer_connected => |e| self.handlePeerConnected(e.node_id),
+                .remaining_bytes_update => |e| self.handleRemainingBytesUpdate(
+                    e.source_node_id,
+                    e.data[0..e.len],
+                ),
+                .flow_control_snapshot => |e| self.handleFlowControlSnapshot(e.data[0..e.len]),
+                .service_capacity_update => |e| self.handleServiceCapacityUpdate(e.data),
                 else => {},
             }
             count += 1;
@@ -522,6 +575,16 @@ pub const ControlLoop = struct {
             log.err("failed to register remote service {s}: {}", .{ name, err });
             return;
         };
+
+        if (self.ensureFcSlot(@intCast(body.service_id), body.node_id, 0)) |slot| {
+            self.service_registry.setFlowControlSlot(
+                @intCast(body.service_id),
+                body.node_id,
+                @intCast(slot.index),
+                slot.generation,
+                0,
+            );
+        }
 
         self.notifySubscribers(name);
     }
@@ -554,6 +617,7 @@ pub const ControlLoop = struct {
             self.service_registry.localServiceCount(),
         });
         self.broadcastAllLocalServices();
+        self.broadcastAllLocalCapacities();
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -581,6 +645,24 @@ pub const ControlLoop = struct {
                 .node_id = self.local_node_id,
                 .service_id = @intCast(service_id),
                 .service_name = admin.padServiceName(service_name),
+            },
+        );
+    }
+
+    fn broadcastServiceCapacity(
+        self: *Self,
+        service_id: i32,
+        capacity: u32,
+        remaining: u32,
+    ) void {
+        self.broadcastAdminMessage(
+            fc_messages.ServiceCapacityUpdatePayload,
+            admin.TEMPLATE_SERVICE_CAPACITY_UPDATE,
+            fc_messages.ServiceCapacityUpdatePayload{
+                .source_node_id = self.local_node_id,
+                .service_id = service_id,
+                .messages_buffer_capacity = capacity,
+                .current_remaining_bytes = remaining,
             },
         );
     }
@@ -622,12 +704,61 @@ pub const ControlLoop = struct {
         }
     }
 
+    fn broadcastAdminPayload(self: *Self, template_id: u16, payload: []const u8) void {
+        const srb = self.send_ring_buffer orelse return;
+        if (self.peer_node_ids.len == 0) return;
+
+        const header_len = @sizeOf(admin.AdminMessageHeader);
+        const admin_payload_len = header_len + payload.len;
+        const header = admin.AdminMessageHeader{
+            .block_length = @intCast(payload.len),
+            .template_id = template_id,
+            .schema_id = admin.SCHEMA_ID,
+            .version = admin.SCHEMA_VERSION,
+        };
+        const header_bytes: *const [header_len]u8 = @ptrCast(&header);
+        @memcpy(self.encode_buf[TcpFrameHeader.size..][0..header_len], header_bytes);
+        @memcpy(self.encode_buf[TcpFrameHeader.size + header_len ..][0..payload.len], payload);
+
+        const frame_length: u32 = @intCast(TcpFrameHeader.size + admin_payload_len);
+        for (self.peer_node_ids) |peer_id| {
+            const tcp_header = TcpFrameHeader{
+                .frame_length = frame_length,
+                .flags = constants.flag_admin,
+                .source_node_id = self.local_node_id,
+                .target_node_id = peer_id,
+                .source_service_id = 0,
+                .target_service_id = 0,
+            };
+            const tcp_header_bytes: *const [TcpFrameHeader.size]u8 = @ptrCast(&tcp_header);
+            @memcpy(self.encode_buf[0..TcpFrameHeader.size], tcp_header_bytes);
+            srb.write(1, self.encode_buf[0..frame_length]) catch {
+                log.warn("send ring buffer full — dropping admin payload {} to node {}", .{
+                    template_id,
+                    peer_id,
+                });
+            };
+        }
+    }
+
     fn broadcastAllLocalServices(self: *Self) void {
         var inst_iter = self.service_registry.instances.valueIterator();
         while (inst_iter.next()) |inst| {
             if (inst.is_local) {
                 self.broadcastServiceAdded(inst.service_id, inst.service_name, inst.leader_election_enabled);
             }
+        }
+    }
+
+    fn broadcastAllLocalCapacities(self: *Self) void {
+        var inst_iter = self.service_registry.instances.valueIterator();
+        while (inst_iter.next()) |inst| {
+            if (!inst.is_local or inst.messages_buffer_capacity == 0) continue;
+            self.broadcastServiceCapacity(
+                inst.service_id,
+                inst.messages_buffer_capacity,
+                inst.last_fc_remaining,
+            );
         }
     }
 
@@ -702,6 +833,9 @@ pub const ControlLoop = struct {
                 .service_id = inst.service_id,
                 .node_id = @intCast(inst.node_id),
                 .is_leader = if (is_leader) 1 else 0,
+                .fc_slot_id = inst.fc_slot_id,
+                .fc_slot_generation = inst.fc_slot_generation,
+                .messages_buffer_capacity = inst.messages_buffer_capacity,
             };
         }
 
@@ -880,6 +1014,163 @@ pub const ControlLoop = struct {
     }
 
     // ─────────────────────────────────────────────────────────────
+    // Flow Control
+    // ─────────────────────────────────────────────────────────────
+
+    const FcSlot = struct {
+        index: u32,
+        generation: u16,
+    };
+
+    fn updateFlowControlState(self: *Self, now_ns: i64) u32 {
+        var entries: [constants.default_max_services]fc_messages.RemainingBytesUpdateEntry = undefined;
+        var entry_count: usize = 0;
+
+        var inst_iter = self.service_registry.instances.valueIterator();
+        while (inst_iter.next()) |inst| {
+            if (!inst.is_local) continue;
+            if (inst.service_id < 0 or inst.service_id >= constants.default_max_services) continue;
+
+            const rb = self.allocated_routing_rbs.get(@intCast(inst.service_id)) orelse continue;
+            const capacity: u32 = @intCast(rb.getCapacity());
+            const remaining_usize = rb.getCapacity() - rb.size();
+            const remaining: u32 = @intCast(@min(remaining_usize, std.math.maxInt(u32)));
+            const new_state = self.nextPressureState(inst.fc_pressure_state, remaining, capacity);
+
+            const should_broadcast =
+                inst.fc_pressure_state == .unknown or
+                (inst.fc_pressure_state == .normal and new_state == .pressured) or
+                (inst.fc_pressure_state == .pressured and new_state == .normal) or
+                (new_state == .pressured and now_ns - inst.last_fc_broadcast_ns >= self.fc_refresh_interval_ns) or
+                (new_state == .normal and now_ns - inst.last_fc_broadcast_ns >= self.fc_normal_refresh_interval_ns);
+
+            inst.messages_buffer_capacity = capacity;
+            inst.last_fc_remaining = remaining;
+            inst.fc_pressure_state = new_state;
+
+            if (!should_broadcast) continue;
+            inst.last_fc_broadcast_ns = now_ns;
+            entries[entry_count] = .{
+                .service_id = inst.service_id,
+                .remaining_bytes = remaining,
+                .capacity = capacity,
+            };
+            entry_count += 1;
+        }
+
+        if (entry_count == 0) return 0;
+
+        var body_buf: [4 + constants.default_max_services * @sizeOf(fc_messages.RemainingBytesUpdateEntry)]u8 align(4) = undefined;
+        const body_len = fc_messages.encodeRemainingBytesUpdate(&body_buf, entries[0..entry_count]) orelse return 0;
+        self.broadcastAdminPayload(admin.TEMPLATE_REMAINING_BYTES_UPDATE, body_buf[0..body_len]);
+        return 1;
+    }
+
+    fn handleRemainingBytesUpdate(self: *Self, source_node_id: u8, payload: []const u8) void {
+        const update = fc_messages.decodeRemainingBytesUpdate(payload) orelse return;
+        for (update.entries) |entry| {
+            self.updateRemoteFcEntry(
+                source_node_id,
+                entry.service_id,
+                entry.capacity,
+                entry.remaining_bytes,
+            );
+        }
+    }
+
+    fn handleFlowControlSnapshot(self: *Self, payload: []const u8) void {
+        const snapshot = fc_messages.decodeFlowControlSnapshot(payload) orelse return;
+        for (snapshot.entries) |entry| {
+            self.updateRemoteFcEntry(
+                snapshot.source_node_id,
+                entry.service_id,
+                entry.messages_buffer_capacity,
+                entry.current_remaining_bytes,
+            );
+        }
+    }
+
+    fn handleServiceCapacityUpdate(
+        self: *Self,
+        data: [@sizeOf(fc_messages.ServiceCapacityUpdatePayload)]u8,
+    ) void {
+        const update: fc_messages.ServiceCapacityUpdatePayload = @bitCast(data);
+        self.updateRemoteFcEntry(
+            update.source_node_id,
+            update.service_id,
+            update.messages_buffer_capacity,
+            update.current_remaining_bytes,
+        );
+    }
+
+    fn updateRemoteFcEntry(
+        self: *Self,
+        source_node_id: u8,
+        service_id: i32,
+        capacity: u32,
+        remaining: u32,
+    ) void {
+        const slot = self.ensureFcSlot(service_id, source_node_id, capacity) orelse return;
+        const region = self.fc_region orelse return;
+        const entry = region.getEntry(slot.index) orelse return;
+
+        if (capacity > 0) entry.capacity = capacity;
+        entry.storeRemainingBytes(remaining);
+        const prev_pressure_state = entry.loadPressureState();
+        const pressure_state = self.nextPressureState(prev_pressure_state, remaining, entry.capacity);
+        entry.storePressureState(pressure_state);
+        entry.storeLastUpdateNs(platform.Clock.monotonicNanos());
+
+        self.service_registry.setFlowControlSlot(
+            service_id,
+            source_node_id,
+            @intCast(slot.index),
+            slot.generation,
+            capacity,
+        );
+        self.service_registry.updateFlowControlState(
+            service_id,
+            source_node_id,
+            remaining,
+            capacity,
+            pressure_state,
+            platform.Clock.monotonicNanos(),
+        );
+
+        if (self.service_registry.getInstancePtr(service_id, source_node_id)) |inst| {
+            self.notifySubscribers(inst.service_name);
+        }
+    }
+
+    fn ensureFcSlot(self: *Self, service_id: i32, node_id: u8, capacity: u32) ?FcSlot {
+        const region = self.fc_region orelse return null;
+        if (region.findByService(service_id, node_id)) |found| {
+            if (capacity > 0) found.entry.capacity = capacity;
+            return .{ .index = found.index, .generation = found.generation };
+        }
+
+        const slot_index = region.allocateSlot(service_id, node_id, capacity) orelse return null;
+        const entry = region.getEntry(slot_index) orelse return null;
+        return .{ .index = slot_index, .generation = entry.loadGeneration() };
+    }
+
+    fn nextPressureState(
+        self: *const Self,
+        previous: PressureState,
+        remaining: u32,
+        capacity: u32,
+    ) PressureState {
+        if (capacity == 0) return .unknown;
+        const low = (@as(u64, capacity) * self.fc_low_watermark_pct) / 100;
+        const high = (@as(u64, capacity) * self.fc_high_watermark_pct) / 100;
+        return switch (previous) {
+            .pressured => if (remaining >= high) .normal else .pressured,
+            .normal => if (remaining < low) .pressured else .normal,
+            .unknown => if (remaining < low) .pressured else .normal,
+        };
+    }
+
+    // ─────────────────────────────────────────────────────────────
     // Public accessors (for commands and cluster integration)
     // ─────────────────────────────────────────────────────────────
 
@@ -898,7 +1189,7 @@ pub const ControlLoop = struct {
 // ── Tests ─────────────────────────────────────────────────────────────
 //
 // Note: Tests that exercise code paths producing log.warn or log.err output
-// are intentionally omitted here because the Zig 0.15 test runner retries
+// are intentionally omitted here because the Zig 0.16 test runner retries
 // tests with unexpected log output, causing hangs. Those code paths are
 // tested indirectly via the service_registry, control_messages, heartbeat
 // checker, and leader election unit tests.

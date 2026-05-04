@@ -9,7 +9,7 @@ same-host IPC. It covers the three region types — broker metadata, service met
 and receive log buffers — along with the file discovery, singleton management, and
 per-service caching layers that sit on top.
 
-All code targets **Zig 0.15.x** stable.
+All code targets **Zig 0.16.x** stable.
 
 ---
 

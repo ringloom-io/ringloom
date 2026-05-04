@@ -15,7 +15,7 @@ well-known counter IDs, cycle-time tracking, and a monitoring snapshot interface
 external tools. Hot-path error handling follows the zero-allocation, no-exception patterns
 established throughout the codebase.
 
-All code targets **Zig 0.15.x** stable.
+All code targets **Zig 0.16.x** stable.
 
 ---
 

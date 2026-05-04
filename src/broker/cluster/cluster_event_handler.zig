@@ -136,6 +136,12 @@ pub const ClusterEventHandler = struct {
                 .peer_connected => {
                     // Handled by the control loop, not the event handler.
                 },
+                .remaining_bytes_update,
+                .flow_control_snapshot,
+                .service_capacity_update,
+                => {
+                    // Handled by the control loop, not the event handler.
+                },
             }
             work_count += 1;
         }

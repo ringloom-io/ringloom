@@ -24,6 +24,9 @@ pub const TEMPLATE_CLUSTER_STATE_SNAPSHOT: u16 = 2;
 pub const TEMPLATE_SERVICE_ADDED: u16 = 3;
 pub const TEMPLATE_SERVICE_REMOVED: u16 = 4;
 pub const TEMPLATE_SERVICE_LEADER_DESIGNATED: u16 = 5;
+pub const TEMPLATE_REMAINING_BYTES_UPDATE: u16 = 9;
+pub const TEMPLATE_FLOW_CONTROL_SNAPSHOT: u16 = 10;
+pub const TEMPLATE_SERVICE_CAPACITY_UPDATE: u16 = 11;
 
 // ── Admin Message Header ──────────────────────────────────────────────
 

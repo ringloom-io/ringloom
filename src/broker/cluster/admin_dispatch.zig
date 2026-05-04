@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const admin = @import("admin_messages.zig");
+const fc_messages = @import("ringloom_common").message.flow_control_messages;
 
 // ── Admin Command ─────────────────────────────────────────────────────
 
@@ -34,10 +35,23 @@ pub const AdminCommand = union(enum) {
     peer_connected: struct {
         node_id: u8,
     },
+    remaining_bytes_update: struct {
+        source_node_id: u8,
+        data: [max_fc_update_data_len]u8,
+        len: u16,
+    },
+    flow_control_snapshot: struct {
+        data: [max_fc_update_data_len]u8,
+        len: u16,
+    },
+    service_capacity_update: struct {
+        data: [@sizeOf(fc_messages.ServiceCapacityUpdatePayload)]u8,
+    },
 
     /// Maximum snapshot payload (body after header): 1 byte node_id +
     /// 4 bytes group header + 256 entries × 35 bytes = 8965 bytes.
     const max_snapshot_data_len: usize = 1 + @sizeOf(admin.GroupHeader) + 256 * @sizeOf(admin.SnapshotEntry);
+    const max_fc_update_data_len: usize = 4 + 256 * @sizeOf(fc_messages.RemainingBytesUpdateEntry);
 };
 
 // ── Admin Command Queue ───────────────────────────────────────────────
@@ -97,6 +111,7 @@ pub fn dispatchAdminMessage(
     payload: []const u8,
     cmd_queue: anytype,
     now_ns: i64,
+    source_node_id: u8,
 ) void {
     if (payload.len < @sizeOf(admin.AdminMessageHeader)) return;
 
@@ -151,6 +166,37 @@ pub fn dispatchAdminMessage(
                 .service_leader_designated = .{ .data = undefined },
             };
             @memcpy(&cmd.service_leader_designated.data, body[0..@sizeOf(admin.ServiceLeaderDesignatedBody)]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        admin.TEMPLATE_REMAINING_BYTES_UPDATE => {
+            const copy_len = @min(body.len, AdminCommand.max_fc_update_data_len);
+            var cmd = AdminCommand{
+                .remaining_bytes_update = .{
+                    .source_node_id = source_node_id,
+                    .data = undefined,
+                    .len = @intCast(copy_len),
+                },
+            };
+            @memcpy(cmd.remaining_bytes_update.data[0..copy_len], body[0..copy_len]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        admin.TEMPLATE_FLOW_CONTROL_SNAPSHOT => {
+            const copy_len = @min(body.len, AdminCommand.max_fc_update_data_len);
+            var cmd = AdminCommand{
+                .flow_control_snapshot = .{
+                    .data = undefined,
+                    .len = @intCast(copy_len),
+                },
+            };
+            @memcpy(cmd.flow_control_snapshot.data[0..copy_len], body[0..copy_len]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        admin.TEMPLATE_SERVICE_CAPACITY_UPDATE => {
+            if (body.len < @sizeOf(fc_messages.ServiceCapacityUpdatePayload)) return;
+            var cmd = AdminCommand{
+                .service_capacity_update = .{ .data = undefined },
+            };
+            @memcpy(&cmd.service_capacity_update.data, body[0..@sizeOf(fc_messages.ServiceCapacityUpdatePayload)]);
             _ = cmd_queue.enqueue(cmd);
         },
         else => {}, // unknown templateId — silently drop
@@ -219,7 +265,7 @@ test "dispatchAdminMessage dispatches BrokerHeartbeat" {
     );
 
     // When
-    dispatchAdminMessage(buf[0..len], &queue, 999);
+    dispatchAdminMessage(buf[0..len], &queue, 999, 5);
 
     // Then
     const cmd = queue.dequeue().?;
@@ -244,7 +290,7 @@ test "dispatchAdminMessage dispatches ServiceAdded" {
     );
 
     // When
-    dispatchAdminMessage(buf[0..len], &queue, 0);
+    dispatchAdminMessage(buf[0..len], &queue, 0, 2);
 
     // Then
     const cmd = queue.dequeue().?;
@@ -268,7 +314,7 @@ test "dispatchAdminMessage ignores unknown templateId" {
     @memcpy(buf[0..8], header_bytes);
 
     // When
-    dispatchAdminMessage(buf[0..8], &queue, 0);
+    dispatchAdminMessage(buf[0..8], &queue, 0, 1);
 
     // Then
     try testing.expect(queue.dequeue() == null);
@@ -280,7 +326,7 @@ test "dispatchAdminMessage ignores short payload" {
     const buf = [_]u8{ 0, 1, 2 };
 
     // When
-    dispatchAdminMessage(&buf, &queue, 0);
+    dispatchAdminMessage(&buf, &queue, 0, 1);
 
     // Then
     try testing.expect(queue.dequeue() == null);

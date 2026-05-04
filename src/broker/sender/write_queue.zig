@@ -178,6 +178,16 @@ pub const WriteQueue = struct {
         return self.count >= self.capacity;
     }
 
+    pub fn byteSize(self: *const Self) u64 {
+        var total: u64 = 0;
+        var i: u32 = 0;
+        while (i < self.count) : (i += 1) {
+            const slot_index = (self.head +% i) & self.mask;
+            total += self.lengths[slot_index];
+        }
+        return total;
+    }
+
     /// Clear all entries without freeing memory.
     pub fn clear(self: *Self) void {
         self.head = 0;

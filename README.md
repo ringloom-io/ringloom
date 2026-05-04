@@ -32,7 +32,6 @@ general-purpose middleware features.
 
 - More operational tooling and monitoring views
 - Broader failure-recovery and long-running soak coverage
-- Further hardening of back-pressure and flow-control behavior
 - Packaging and deployment refinements for production use
 
 ## Build and test

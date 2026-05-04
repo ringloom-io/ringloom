@@ -99,12 +99,19 @@ pub const BrokerRuntime = struct {
         };
         errdefer self.deinit();
 
-        const broker_metadata = try BrokerMetadataFile.create(
+        const broker_metadata = try BrokerMetadataFile.createWithFlowControl(
             config.storage_path,
             config.group_name,
             config.node_id,
             config.control_buffer_size,
             config.messages_buffer_size,
+            .{
+                .fc_max_entries = if (config.fc_enabled) config.fc_max_entries else 0,
+                .peer_send_max_peers = if (config.fc_peer_send_counters_enabled)
+                    config.fc_peer_send_counters_max_peers
+                else
+                    0,
+            },
         );
         self.broker_metadata = broker_metadata;
 
@@ -176,6 +183,13 @@ pub const BrokerRuntime = struct {
             .group = self.config.group_name,
             .allocator = self.allocator,
             .routing_registry = &self.routing_registry.?,
+            .fc_region = self.broker_metadata.?.getFlowControlRegion(),
+            .fc_enabled = self.config.fc_enabled,
+            .fc_low_watermark_pct = self.config.fc_low_watermark_pct,
+            .fc_high_watermark_pct = self.config.fc_high_watermark_pct,
+            .fc_check_interval_ms = self.config.fc_check_interval_ms,
+            .fc_refresh_interval_ms = self.config.fc_refresh_interval_ms,
+            .fc_normal_refresh_interval_ms = self.config.fc_normal_refresh_interval_ms,
         });
 
         self.sender_loop = try SenderEventLoop.init(
@@ -184,6 +198,11 @@ pub const BrokerRuntime = struct {
             self.config.node_id,
             self.allocator,
         );
+        if (self.config.fc_peer_send_counters_enabled) {
+            self.sender_loop.?.setPeerSendCountersRegion(
+                self.broker_metadata.?.getPeerSendCountersRegion(),
+            );
+        }
 
         self.receiver_loop = ReceiverEventLoop.init(
             &self.routing_registry.?,

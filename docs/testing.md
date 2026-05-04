@@ -12,7 +12,7 @@ Intended for developers working on the library and for automated agents.
 
 | Tool | Version |
 |------|---------|
-| Zig  | 0.15.x  |
+| Zig  | 0.16.x  |
 | OS   | Linux (shared-memory IPC requires `/dev/shm`) |
 
 No external dependencies are required — everything is built from source via the

@@ -4,9 +4,6 @@
 //! brokers and the TCP listener socket. It runs as a duty-cycle event loop
 //! following the standard RingLoom pattern.
 //!
-//! TCP provides reliable ordered delivery, so the receiver is free from several
-//! complexities that would exist in a UDP design: no receive log buffer, no gap
-//! detection, no NAK generation, no fragment reassembly.
 
 const std = @import("std");
 const ringloom_common = @import("ringloom_common");
@@ -573,9 +570,13 @@ pub const ReceiverEventLoop = struct {
         };
 
         // Validate source_node_id from TCP header matches admin payload
-        admin_dispatch.dispatchAdminMessage(payload, queue, Clock.monotonicNanos());
+        admin_dispatch.dispatchAdminMessage(
+            payload,
+            queue,
+            Clock.monotonicNanos(),
+            header.source_node_id,
+        );
 
-        _ = header;
         self.counters.increment(self.counter_ids.admin_messages_received);
     }
 

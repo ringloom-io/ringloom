@@ -56,6 +56,22 @@ pub const PeerEntry = extern struct {
         @atomicStore(u64, &self.ring_bytes_pending, value, .release);
     }
 
+    pub fn addRingBytesPending(self: *volatile PeerEntry, value: u64) void {
+        _ = @atomicRmw(u64, &self.ring_bytes_pending, .Add, value, .acq_rel);
+    }
+
+    pub fn subtractRingBytesPending(self: *volatile PeerEntry, value: u64) void {
+        var current = self.loadRingBytesPending();
+        while (true) {
+            const next = current -| value;
+            if (@cmpxchgWeak(u64, &self.ring_bytes_pending, current, next, .acq_rel, .acquire)) |actual| {
+                current = actual;
+                continue;
+            }
+            return;
+        }
+    }
+
     pub fn loadQueueBytesPending(self: *const volatile PeerEntry) u64 {
         return @atomicLoad(u64, &self.queue_bytes_pending, .acquire);
     }
@@ -86,6 +102,14 @@ pub const PeerEntry = extern struct {
 
     pub fn storeLastUpdateNs(self: *volatile PeerEntry, value: u64) void {
         @atomicStore(u64, &self.last_update_ns, value, .release);
+    }
+
+    pub fn loadState(self: *const volatile PeerEntry) u8 {
+        return @atomicLoad(u8, &self.state, .acquire);
+    }
+
+    pub fn storeState(self: *volatile PeerEntry, value: u8) void {
+        @atomicStore(u8, &self.state, value, .release);
     }
 };
 
@@ -171,7 +195,7 @@ pub const PeerSendCountersRegion = struct {
     pub fn findPeer(self: *const PeerSendCountersRegion, node_id: i16) ?*volatile PeerEntry {
         for (0..self.entry_count) |i| {
             const entry = &self.entries[i];
-            if (entry.state == 1 and entry.node_id == node_id) {
+            if (entry.loadState() == 1 and entry.node_id == node_id) {
                 return entry;
             }
         }
@@ -184,7 +208,7 @@ pub const PeerSendCountersRegion = struct {
         // First pass: look for existing.
         for (0..self.entry_count) |i| {
             const entry = &self.entries[i];
-            if (entry.state == 1 and entry.node_id == node_id) {
+            if (entry.loadState() == 1 and entry.node_id == node_id) {
                 return entry;
             }
         }
@@ -192,10 +216,13 @@ pub const PeerSendCountersRegion = struct {
         // Second pass: allocate a free slot.
         for (0..self.entry_count) |i| {
             const entry = &self.entries[i];
-            if (entry.state == 0) {
+            if (entry.loadState() == 0) {
                 entry.node_id = node_id;
                 entry.queue_capacity = queue_capacity;
-                entry.state = 1; // active
+                entry.storeRingBytesPending(0);
+                entry.storeQueueBytesPending(0);
+                entry.storeConnectionState(false);
+                entry.storeState(1); // active
                 return entry;
             }
         }
@@ -207,8 +234,11 @@ pub const PeerSendCountersRegion = struct {
     pub fn freePeer(self: *const PeerSendCountersRegion, node_id: i16) void {
         for (0..self.entry_count) |i| {
             const entry = &self.entries[i];
-            if (entry.state == 1 and entry.node_id == node_id) {
-                entry.state = 0;
+            if (entry.loadState() == 1 and entry.node_id == node_id) {
+                entry.storeConnectionState(false);
+                entry.storeRingBytesPending(0);
+                entry.storeQueueBytesPending(0);
+                entry.storeState(0);
                 entry.node_id = 0;
                 return;
             }

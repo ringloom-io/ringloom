@@ -823,7 +823,7 @@ The ABI layer should use a native allocator owned by the library. For debug
 builds use `std.heap.DebugAllocator(.{}) = .init`; for release builds use an
 allocator strategy already accepted in the project.
 
-Exported functions should use C-compatible signatures. In Zig 0.15.x, prefer:
+Exported functions should use C-compatible signatures. In Zig 0.16.x, prefer:
 
 ```zig
 export fn ringloom_service_abi_version() u32 {
@@ -867,7 +867,7 @@ block if the ABI tests live there.
 
 ## 7. Build System Specification
 
-Update `build.zig` to add a shared library artifact using Zig 0.15.x build APIs.
+Update `build.zig` to add a shared library artifact using Zig 0.16.x build APIs.
 
 Recommended structure:
 

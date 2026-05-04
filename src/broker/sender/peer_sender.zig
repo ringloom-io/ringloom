@@ -71,6 +71,12 @@ pub const PeerSender = struct {
     /// Must remain valid from SQE submission until CQE harvest.
     send_iovecs: [max_send_batch]std.posix.iovec_const,
 
+    /// Lifetime bytes successfully written to this peer's socket.
+    total_bytes_sent: u64,
+
+    /// Lifetime bytes dropped before reaching this peer's socket.
+    total_bytes_dropped: u64,
+
     pub const max_send_batch = 64;
 
     const Self = @This();
@@ -100,6 +106,8 @@ pub const PeerSender = struct {
             .in_flight_bytes = 0,
             .io_generation = 0,
             .send_iovecs = undefined,
+            .total_bytes_sent = 0,
+            .total_bytes_dropped = 0,
         };
     }
 

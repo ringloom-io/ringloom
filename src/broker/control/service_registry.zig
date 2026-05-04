@@ -5,7 +5,9 @@
 //! control thread — no locking required.
 
 const std = @import("std");
-const BuffersProvider = @import("ringloom_common").memory.buffers_provider.BuffersProvider;
+const ringloom_common = @import("ringloom_common");
+const BuffersProvider = ringloom_common.memory.buffers_provider.BuffersProvider;
+const PressureState = ringloom_common.memory.PressureState;
 
 /// A single service instance, local or remote.
 pub const ServiceInstance = struct {
@@ -14,6 +16,12 @@ pub const ServiceInstance = struct {
     service_name: []const u8,
     leader_election_enabled: bool,
     is_local: bool,
+    fc_slot_id: i32 = -1,
+    fc_slot_generation: u16 = 0,
+    messages_buffer_capacity: u32 = 0,
+    fc_pressure_state: PressureState = .unknown,
+    last_fc_remaining: u32 = 0,
+    last_fc_broadcast_ns: i64 = 0,
 };
 
 /// Composite key for the instances map: (serviceId, nodeId).
@@ -202,6 +210,10 @@ pub const ServiceRegistry = struct {
         return self.local_buffers.get(service_id);
     }
 
+    pub fn getInstancePtr(self: *Self, service_id: i32, node_id: u8) ?*ServiceInstance {
+        return self.instances.getPtr(.{ .service_id = service_id, .node_id = node_id });
+    }
+
     pub fn getLeader(self: *Self, service_name: []const u8) ?i32 {
         return self.service_leaders.get(service_name);
     }
@@ -218,6 +230,36 @@ pub const ServiceRegistry = struct {
 
     pub fn removeLocalBuffers(self: *Self, service_id: i32) void {
         _ = self.local_buffers.remove(service_id);
+    }
+
+    pub fn setFlowControlSlot(
+        self: *Self,
+        service_id: i32,
+        node_id: u8,
+        slot_id: i32,
+        generation: u16,
+        capacity: u32,
+    ) void {
+        const inst = self.getInstancePtr(service_id, node_id) orelse return;
+        inst.fc_slot_id = slot_id;
+        inst.fc_slot_generation = generation;
+        if (capacity > 0) inst.messages_buffer_capacity = capacity;
+    }
+
+    pub fn updateFlowControlState(
+        self: *Self,
+        service_id: i32,
+        node_id: u8,
+        remaining: u32,
+        capacity: u32,
+        pressure_state: PressureState,
+        broadcast_ns: i64,
+    ) void {
+        const inst = self.getInstancePtr(service_id, node_id) orelse return;
+        if (capacity > 0) inst.messages_buffer_capacity = capacity;
+        inst.last_fc_remaining = remaining;
+        inst.fc_pressure_state = pressure_state;
+        inst.last_fc_broadcast_ns = broadcast_ns;
     }
 
     pub fn addSubscription(self: *Self, service_name: []const u8, subscriber_id: i32) !void {

@@ -180,6 +180,7 @@ pub const FlowControlRegion = struct {
     }
 
     pub const FindResult = struct {
+        index: u32,
         entry: *volatile FlowControlEntry,
         generation: u16,
     };
@@ -198,7 +199,7 @@ pub const FlowControlRegion = struct {
                 // Re-validate state to detect concurrent reclaim between
                 // our initial state check and the generation read.
                 if (entry.loadState() == .allocated) {
-                    return .{ .entry = entry, .generation = gen };
+                    return .{ .index = @intCast(i), .entry = entry, .generation = gen };
                 }
             }
         }
