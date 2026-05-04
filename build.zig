@@ -303,6 +303,44 @@ pub fn build(b: *std.Build) void {
     const test_java_step = b.step("test-java", "Run Java integration tests");
     test_java_step.dependOn(&java_test_cmd.step);
 
+    b.installDirectory(.{
+        .source_dir = b.path("bindings/cpp/include"),
+        .install_dir = .header,
+        .install_subdir = "",
+    });
+
+    const cpp_bindings_cmd = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\ROOT=$(pwd) &&
+        \\mkdir -p "$ROOT/zig-out/bin" &&
+        \\zig c++ -std=c++17 -Wall -Wextra -pedantic \
+        \\  -I"$ROOT/include" \
+        \\  -I"$ROOT/bindings/cpp/include" \
+        \\  "$ROOT/bindings/cpp/test/cpp_bindings_test.cpp" \
+        \\  -L"$ROOT/zig-out/lib" \
+        \\  -lringloom_service \
+        \\  -Wl,-rpath,"$ROOT/zig-out/lib" \
+        \\  -o "$ROOT/zig-out/bin/ringloom-cpp-bindings-test"
+    });
+    cpp_bindings_cmd.step.dependOn(b.getInstallStep());
+
+    const cpp_bindings_step = b.step("cpp-bindings", "Compile the C++ service bindings");
+    cpp_bindings_step.dependOn(&cpp_bindings_cmd.step);
+
+    const cpp_test_cmd = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\ROOT=$(pwd) &&
+        \\RINGLOOM_PROJECT_ROOT="$ROOT" \
+        \\RINGLOOM_BROKER_BIN="$ROOT/zig-out/bin/ringloom-broker" \
+        \\"$ROOT/zig-out/bin/ringloom-cpp-bindings-test"
+    });
+    cpp_test_cmd.step.dependOn(&cpp_bindings_cmd.step);
+
+    const test_cpp_step = b.step("test-cpp", "Run C++ binding integration tests");
+    test_cpp_step.dependOn(&cpp_test_cmd.step);
+
     const node_bindings_cmd = b.addSystemCommand(&.{
         "sh",
         "-c",

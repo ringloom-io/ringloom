@@ -26,7 +26,7 @@ general-purpose middleware features.
 - Service registration, discovery, and heartbeat tracking
 - Cluster membership, leader election, and state synchronization
 - End-to-end and performance test harnesses
-- Java and Node bindings for service integration
+- Java, Node, and C++ bindings for service integration
 
 ## Planned
 
@@ -42,6 +42,7 @@ Requires Zig 0.16.x.
 zig build test
 zig build e2e
 zig build perf
+zig build test-cpp
 ```
 
 ## License
