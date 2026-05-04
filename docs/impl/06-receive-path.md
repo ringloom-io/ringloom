@@ -997,6 +997,10 @@ fn routeToService(
     payload: []const u8,
 ) void {
     const target_service_id = header.target_service_id;
+    const msg_type_id: i32 = if (header.template_id == 0)
+        constants.application_msg_type_id
+    else
+        @intCast(header.template_id);
 
     // ── Look up the service ───────────────────────────────────────────
     const service = self.service_table.get(target_service_id) orelse {
@@ -1005,47 +1009,18 @@ fn routeToService(
     };
 
     // ── Write to the service's ring buffer ────────────────────────────
-    // Build a record: ring buffer record header (8 bytes) + frame header
-    // (24 bytes) + payload.
-    const total_msg_len = frame_header_length + payload.len;
     const ring_buf = service.ring_buffer;
+    ring_buf.write(msg_type_id, payload) catch {
+        // Ring buffer full — DROP the message.
+        // CRITICAL: Never block. The always-read model prevents
+        // head-of-line blocking across services.
+        self.counters.increment(.service_full_drops);
+        service.counters.full_drops += 1;
+        return;
+    };
 
-    const write_result = ring_buf.write(total_msg_len, writeFrameCallback, .{
-        .header = header,
-        .payload = payload,
-    });
-
-    switch (write_result) {
-        .success => {
-            self.counters.increment(.frames_routed);
-        },
-        .insufficient_capacity => {
-            // Ring buffer full — DROP the message.
-            // CRITICAL: Never block. The always-read model prevents
-            // head-of-line blocking across services.
-            self.counters.increment(.service_full_drops);
-            service.counters.full_drops += 1;
-        },
-    }
+    self.counters.increment(.frames_routed);
 }
-
-/// Callback invoked by ring_buffer.write() to copy the frame into the
-/// ring buffer at the allocated position.
-fn writeFrameCallback(dest: []u8, ctx: WriteFrameContext) void {
-    // Copy frame header (24 bytes).
-    const header_bytes: *const [24]u8 = @ptrCast(ctx.header);
-    @memcpy(dest[0..frame_header_length], header_bytes);
-
-    // Copy payload after header.
-    if (ctx.payload.len > 0) {
-        @memcpy(dest[frame_header_length..][0..ctx.payload.len], ctx.payload);
-    }
-}
-
-const WriteFrameContext = struct {
-    header: *const FrameHeader,
-    payload: []const u8,
-};
 ```
 
 ### 6.2 The Always-Read Model
@@ -1090,17 +1065,18 @@ Ring buffer record layout:
 ┌──────────────────────────────────────────────────────────────┐
 │  Record Header (8 bytes)                                     │
 │  +0: length (i32) — total record length including header     │
-│  +4: msg_type_id (i32) — RingLoom message type / template_id     │
+│  +4: msg_type_id (i32) — template_id, or application type if │
+│      the TCP template_id is 0                                │
 ├──────────────────────────────────────────────────────────────┤
-│  Frame Header (24 bytes)                                     │
-│  (copied verbatim from the TCP frame)                        │
-├──────────────────────────────────────────────────────────────┤
-│  Payload (frame_length - 24 bytes)                           │
-│  (message body)                                              │
+│  Application payload (frame_length - 24 bytes)               │
 ├──────────────────────────────────────────────────────────────┤
 │  Padding (to alignment boundary)                             │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+The TCP frame header is not delivered to services. It remains a broker-to-broker
+transport header. The application-visible contract is the same as local IPC:
+handlers receive a `msg_type_id` and an application payload slice.
 
 ---
 

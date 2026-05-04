@@ -537,6 +537,13 @@ Offset  Size  Type    Field
 
 **Total header: 24 bytes**, aligned to 8 bytes.
 
+The TCP frame header is broker-internal on the receive side. Destination brokers
+use it for validation and routing, then write only the application payload into
+the target service ring buffer. The frame `template_id` is preserved as the
+service-visible ring-buffer `msg_type_id` (with `template_id = 0` mapped to the
+generic application message type), so local and remote `ServiceClient.tryClaim`
+deliveries expose the same handler contract.
+
 **Flags field (byte 4):**
 
 | Flag | Bit | Meaning |

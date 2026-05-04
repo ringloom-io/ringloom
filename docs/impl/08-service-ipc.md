@@ -652,16 +652,15 @@ fn onSendBufferMessage(msg_type: i32, payload: []const u8) void {
 
 ### 5.3 Remote Broker Delivery
 
-On the destination host, the broker's `MessageRoutingSubscriber` receives the TCP
-frame (doc 06) and writes the payload into the target service's messages ring buffer:
+On the destination host, the broker's receiver event loop receives the TCP frame
+(doc 06), strips the broker-to-broker transport header, preserves the logical
+template ID as the service-visible ring-buffer message type, and writes the
+application payload into the target service's messages ring buffer:
 
 ```zig
-// src/broker/routing/message_routing_subscriber.zig (sketch)
+// src/broker/receiver/message_router.zig (sketch)
 
-fn onRemoteMessageReceived(payload: []const u8) void {
-    const header = MessageHeader.decode(payload[0..MessageHeader.encoded_length]);
-    const body = payload[MessageHeader.encoded_length..];
-
+fn onRemoteMessageReceived(header: *const TcpFrameHeader, payload: []const u8) void {
     // Look up the target service's BuffersProvider.
     const target = BuffersProvider.getCached(header.target_service_id) orelse {
         // Service not registered locally — drop the message.
@@ -669,9 +668,15 @@ fn onRemoteMessageReceived(payload: []const u8) void {
         return;
     };
 
-    // Write into the target service's messages ring buffer.
+    const msg_type_id: i32 = if (header.template_id == 0)
+        constants.application_msg_type_id
+    else
+        @intCast(header.template_id);
+
+    // Write only the application payload into the target service's messages
+    // ring buffer. The TCP frame header remains broker-internal.
     var messages_rb = RingBuffer.init(target.getMessagesBuffer());
-    messages_rb.write(constants.application_msg_type_id, body) catch {
+    messages_rb.write(msg_type_id, payload) catch {
         // Ring buffer full — the target service is a slow consumer.
         // Back-pressure propagates via the flow control layer (doc 07).
     };

@@ -547,11 +547,13 @@ pub const ReceiverEventLoop = struct {
             latency_trace.stampReceiverIngress(@constCast(payload), @intCast(Clock.monotonicNanosStable()));
         }
 
-        // Route application payload to target service. The TcpFrameHeader is
-        // stripped so the service sees the same payload format as local IPC.
+        // Route application payload to target service. The transport frame
+        // stays broker-internal; the logical template ID is preserved as the
+        // service-visible ring-buffer message type.
         const result = message_router.routeToService(
             self.service_registry,
             header.target_service_id,
+            header.template_id,
             payload,
         );
         switch (result) {
@@ -660,6 +662,18 @@ fn createTestCounters(
         values_buf,
         meta_buf,
     );
+}
+
+var test_received_msg_type: i32 = 0;
+var test_received_payload_len: usize = 0;
+var test_received_payload_buf: [256]u8 = undefined;
+
+fn testCaptureHandler(msg_type_id: i32, payload: []const u8) void {
+    test_received_msg_type = msg_type_id;
+    test_received_payload_len = payload.len;
+    if (payload.len <= test_received_payload_buf.len) {
+        @memcpy(test_received_payload_buf[0..payload.len], payload);
+    }
 }
 
 test "ReceiverEventLoop init and deinit" {
@@ -791,6 +805,14 @@ test "processCompleteFrame routes data to service" {
     recv_loop.processCompleteFrame(2, &header_buf, &payload);
 
     try testing.expectEqual(@as(i64, 1), counters.get(recv_loop.counter_ids.frames_routed));
+
+    test_received_msg_type = 0;
+    test_received_payload_len = 0;
+    const messages_read = rb.read(&testCaptureHandler, 10);
+    try testing.expectEqual(@as(u32, 1), messages_read);
+    try testing.expectEqual(@as(i32, 42), test_received_msg_type);
+    try testing.expectEqual(payload.len, test_received_payload_len);
+    try testing.expectEqualSlices(u8, payload[0..], test_received_payload_buf[0..test_received_payload_len]);
 }
 
 test "doWork returns 0 when no peers connected" {
