@@ -302,6 +302,26 @@ pub fn build(b: *std.Build) void {
     const test_java_step = b.step("test-java", "Run Java integration tests");
     test_java_step.dependOn(&java_test_cmd.step);
 
+    const node_bindings_cmd = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "ROOT=$(pwd) && cd bindings/node && npm ci --ignore-scripts && npm run build",
+    });
+    node_bindings_cmd.step.dependOn(b.getInstallStep());
+
+    const node_bindings_step = b.step("node-bindings", "Compile the Node.js Node-API bindings");
+    node_bindings_step.dependOn(&node_bindings_cmd.step);
+
+    const node_test_cmd = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "ROOT=$(pwd) && cd bindings/node && npm ci --ignore-scripts && npm run build && RINGLOOM_PROJECT_ROOT=\"$ROOT\" RINGLOOM_BROKER_BIN=\"$ROOT/zig-out/bin/ringloom-broker\" npm test",
+    });
+    node_test_cmd.step.dependOn(b.getInstallStep());
+
+    const test_node_step = b.step("test-node", "Run Node.js binding integration tests");
+    test_node_step.dependOn(&node_test_cmd.step);
+
     // ── ringloom-stat utility ─────────────────────────────────────────────
 
     const stat_exe = b.addExecutable(.{

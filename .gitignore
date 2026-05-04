@@ -4,4 +4,5 @@ zig-out
 copilot-instructions.md
 
 build
+node_modules
 .gradle

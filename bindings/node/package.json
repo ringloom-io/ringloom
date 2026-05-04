@@ -1,0 +1,27 @@
+{
+  "name": "@ringloom/service",
+  "version": "0.1.0",
+  "description": "Node.js bindings for the RingLoom service C ABI",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "test": "node --test test/*.test.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "build/Release/ringloom_node.node",
+    "build/Release/libringloom_service.so",
+    "build/Release/libringloom_service.dylib"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.5.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^12.1.0"
+  }
+}

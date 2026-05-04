@@ -26,10 +26,10 @@ general-purpose middleware features.
 - Service registration, discovery, and heartbeat tracking
 - Cluster membership, leader election, and state synchronization
 - End-to-end and performance test harnesses
+- Java and Node bindings for service integration
 
 ## Planned
 
-- Additional kernel-bypass transport backends
 - More operational tooling and monitoring views
 - Broader failure-recovery and long-running soak coverage
 - Further hardening of back-pressure and flow-control behavior
