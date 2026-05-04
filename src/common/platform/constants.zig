@@ -36,6 +36,27 @@ pub const fc_buffer_length_offset: usize = 292;
 /// When 0, per-peer send counters region is absent (disabled).
 pub const peer_send_counters_length_offset: usize = 296;
 
+/// Metadata monitoring layout version. Stored in every broker/service header.
+pub const metadata_monitoring_version: i32 = 1;
+
+/// Generic counter values region length field offset within the metadata header.
+pub const counter_values_length_offset: usize = 300;
+
+/// Generic counter metadata region length field offset within the metadata header.
+pub const counter_metadata_length_offset: usize = 304;
+
+/// Error-log region length field offset within the metadata header.
+pub const error_log_length_offset: usize = 308;
+
+/// Offset of the monitoring tail (counter values, counter metadata, error log).
+pub const monitoring_tail_offset_offset: usize = 320;
+
+/// Total length of the monitoring tail.
+pub const monitoring_tail_length_offset: usize = 328;
+
+/// Metadata monitoring version field offset.
+pub const metadata_monitoring_version_offset: usize = 336;
+
 /// When blocking mode is enabled, three 128-byte cache-line-padded slots are
 /// inserted between the header and the ring buffers.
 pub const blocking_trailer_length: usize = 3 * cache_line_pad; // 384

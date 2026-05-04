@@ -30,6 +30,15 @@ pub const fc_buffer_length_offset: usize = platform_constants.fc_buffer_length_o
 /// Per-peer send counters length field offset within the header (broker only).
 pub const peer_send_counters_length_offset: usize = platform_constants.peer_send_counters_length_offset;
 
+/// Generic monitoring tail fields shared by broker and service metadata files.
+pub const metadata_monitoring_version: i32 = platform_constants.metadata_monitoring_version;
+pub const counter_values_length_offset: usize = platform_constants.counter_values_length_offset;
+pub const counter_metadata_length_offset: usize = platform_constants.counter_metadata_length_offset;
+pub const error_log_length_offset: usize = platform_constants.error_log_length_offset;
+pub const monitoring_tail_offset_offset: usize = platform_constants.monitoring_tail_offset_offset;
+pub const monitoring_tail_length_offset: usize = platform_constants.monitoring_tail_length_offset;
+pub const metadata_monitoring_version_offset: usize = platform_constants.metadata_monitoring_version_offset;
+
 /// When blocking mode is enabled, three 128-byte cache-line-padded slots are
 /// inserted between the header and the ring buffers.
 pub const blocking_trailer_length: usize = platform_constants.blocking_trailer_length;
@@ -47,6 +56,8 @@ pub const ring_buffer_record_header_length: usize = platform_constants.ring_buff
 pub const default_control_buffer_length: usize = platform_constants.default_control_buffer_length;
 pub const default_send_buffer_length: usize = platform_constants.default_send_buffer_length;
 pub const default_messages_buffer_length: usize = platform_constants.default_messages_buffer_length;
+pub const default_counter_values_buffer_length: usize = platform_constants.default_counter_values_buffer_length;
+pub const default_error_log_buffer_length: usize = platform_constants.default_error_log_buffer_length;
 
 /// Broker is always service ID 0.
 pub const broker_service_id: i32 = platform_constants.broker_service_id;

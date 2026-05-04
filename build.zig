@@ -245,6 +245,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
                 .{ .name = "ringloom_testing", .module = ringloom_testing },
+                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
             },
         }),
     });
@@ -345,6 +346,34 @@ pub fn build(b: *std.Build) void {
 
     const stat_step = b.step("stat", "Run the ringloom-stat monitoring tool");
     stat_step.dependOn(&stat_run_cmd.step);
+
+    // ── Prometheus observability utility ───────────────────────────────
+
+    const observability_exe = b.addExecutable(.{
+        .name = "ringloom-observability",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/ringloom_observability.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ringloom_common", .module = ringloom_common },
+                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
+            },
+        }),
+    });
+    b.installArtifact(observability_exe);
+
+    const observability_build_step = b.step("observability", "Build the ringloom-observability Prometheus exporter");
+    observability_build_step.dependOn(&observability_exe.step);
+
+    const observability_run_cmd = b.addRunArtifact(observability_exe);
+    observability_run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        observability_run_cmd.addArgs(args);
+    }
+
+    const observability_run_step = b.step("run-observability", "Run the ringloom-observability Prometheus exporter");
+    observability_run_step.dependOn(&observability_run_cmd.step);
 
     // ── Order-management sample ──────────────────────────────────────
 

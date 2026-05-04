@@ -96,10 +96,13 @@ comptime {
     // Monitoring
     _ = @import("monitoring/system_counter.zig");
     _ = @import("monitoring/system_counters.zig");
+    _ = @import("monitoring/service_counters.zig");
     _ = @import("monitoring/cycle_time.zig");
     _ = @import("monitoring/counter_snapshot.zig");
     _ = @import("monitoring/monitoring.zig");
     _ = @import("monitoring/periodic_dump.zig");
+    _ = @import("monitoring/metadata_reader.zig");
+    _ = @import("monitoring/prometheus.zig");
 
     // Configuration
     _ = @import("config/broker_config.zig");

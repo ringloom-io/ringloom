@@ -21,6 +21,8 @@ const fc_config_mod = @import("flow_control_config.zig");
 const FlowControlConfig = fc_config_mod.FlowControlConfig;
 const BackpressureStrategy = fc_config_mod.BackpressureStrategy;
 const Clock = ringloom_common.platform.Clock;
+const ServiceCounters = ringloom_common.monitoring.ServiceCounters;
+const ServiceCounter = ringloom_common.monitoring.ServiceCounter;
 
 const frame_parser = ringloom_common.protocol.frame_parser;
 const TcpFrameHeader = frame_parser.TcpFrameHeader;
@@ -66,6 +68,7 @@ pub const ServiceClient = struct {
     broker_send_ring_buffer: ?RingBuffer = null,
     local_node_id: i16,
     local_service_id: i32,
+    service_counters: ?*ServiceCounters = null,
 
     /// Flow control configuration.
     fc_config: FlowControlConfig = .{},
@@ -94,11 +97,17 @@ pub const ServiceClient = struct {
         payload: []u8,
         peer_counter_entry: ?*volatile PeerEntry = null,
         peer_ring_cost: u64 = 0,
+        service_counters: ?*ServiceCounters = null,
+        logical_payload_len: usize = 0,
 
         pub fn commit(self: *SendClaim) void {
             self.claim.commit();
             if (self.peer_counter_entry) |entry| {
                 entry.addRingBytesPending(self.peer_ring_cost);
+            }
+            if (self.service_counters) |counters| {
+                counters.increment(.messages_sent);
+                counters.add(.bytes_sent, @intCast(self.logical_payload_len));
             }
         }
 
@@ -113,6 +122,7 @@ pub const ServiceClient = struct {
         broker_meta: ?*BrokerMetadataFile,
         local_node_id: i16,
         local_service_id: i32,
+        service_counters: ?*ServiceCounters,
     ) Self {
         return .{
             .service_name = service_name,
@@ -123,6 +133,7 @@ pub const ServiceClient = struct {
             .broker_send_ring_buffer = initBrokerSendRingBuffer(broker_meta),
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
+            .service_counters = service_counters,
             .fc_region = initFlowControlRegion(broker_meta),
             .peer_send_counters = initPeerSendCountersRegion(broker_meta),
         };
@@ -138,6 +149,7 @@ pub const ServiceClient = struct {
         fc_config: FlowControlConfig,
         fc_region: ?FlowControlRegion,
         peer_send_counters_region: ?PeerSendCountersRegion,
+        service_counters: ?*ServiceCounters,
     ) Self {
         return .{
             .service_name = service_name,
@@ -148,6 +160,7 @@ pub const ServiceClient = struct {
             .broker_send_ring_buffer = initBrokerSendRingBuffer(broker_meta),
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
+            .service_counters = service_counters,
             .fc_config = fc_config,
             .fc_region = fc_region,
             .peer_send_counters = peer_send_counters_region,
@@ -161,24 +174,38 @@ pub const ServiceClient = struct {
         defer self.unlockInstances();
 
         const instance = self.balancer.next(self.instances.items) orelse
-            return error.NoAvailableInstance;
+            {
+                self.recordSendError(error.NoAvailableInstance);
+                return error.NoAvailableInstance;
+            };
 
         if (self.fc_config.enabled) {
-            try self.applyFlowControl(instance, payload.len);
+            self.applyFlowControl(instance, payload.len) catch |err| {
+                self.recordSendError(err);
+                return err;
+            };
         }
 
         if (instance.node_id == self.local_node_id) {
             // Same-host direct path.
             const producer = instance.ipc_producer orelse
                 return error.ProducerNotInitialized;
-            try producer.write(constants.application_msg_type_id, payload);
+            producer.write(constants.application_msg_type_id, payload) catch |err| {
+                self.recordSendError(err);
+                return err;
+            };
+            self.recordSend(payload.len);
         } else {
             // Cross-host routed path.
-            try self.sendToRemoteService(
+            self.sendToRemoteService(
                 instance.node_id,
                 instance.service_id,
                 payload,
-            );
+            ) catch |err| {
+                self.recordSendError(err);
+                return err;
+            };
+            self.recordSend(payload.len);
         }
     }
 
@@ -193,22 +220,36 @@ pub const ServiceClient = struct {
         defer self.unlockInstances();
 
         const instance = self.findInstance(target_node_id, target_service_id) orelse
-            return error.NoAvailableInstance;
+            {
+                self.recordSendError(error.NoAvailableInstance);
+                return error.NoAvailableInstance;
+            };
 
         if (self.fc_config.enabled) {
-            try self.applyFlowControl(instance, payload.len);
+            self.applyFlowControl(instance, payload.len) catch |err| {
+                self.recordSendError(err);
+                return err;
+            };
         }
 
         if (instance.node_id == self.local_node_id) {
             const producer = instance.ipc_producer orelse
                 return error.ProducerNotInitialized;
-            try producer.write(constants.application_msg_type_id, payload);
+            producer.write(constants.application_msg_type_id, payload) catch |err| {
+                self.recordSendError(err);
+                return err;
+            };
+            self.recordSend(payload.len);
         } else {
-            try self.sendToRemoteService(
+            self.sendToRemoteService(
                 instance.node_id,
                 instance.service_id,
                 payload,
-            );
+            ) catch |err| {
+                self.recordSendError(err);
+                return err;
+            };
+            self.recordSend(payload.len);
         }
     }
 
@@ -220,23 +261,35 @@ pub const ServiceClient = struct {
         for (self.instances.items) |*inst| {
             if (inst.is_leader) {
                 if (self.fc_config.enabled) {
-                    try self.applyFlowControl(inst, payload.len);
+                    self.applyFlowControl(inst, payload.len) catch |err| {
+                        self.recordSendError(err);
+                        return err;
+                    };
                 }
 
                 if (inst.node_id == self.local_node_id) {
                     const producer = inst.ipc_producer orelse
                         return error.ProducerNotInitialized;
-                    try producer.write(constants.application_msg_type_id, payload);
+                    producer.write(constants.application_msg_type_id, payload) catch |err| {
+                        self.recordSendError(err);
+                        return err;
+                    };
+                    self.recordSend(payload.len);
                 } else {
-                    try self.sendToRemoteService(
+                    self.sendToRemoteService(
                         inst.node_id,
                         inst.service_id,
                         payload,
-                    );
+                    ) catch |err| {
+                        self.recordSendError(err);
+                        return err;
+                    };
+                    self.recordSend(payload.len);
                 }
                 return;
             }
         }
+        self.recordSendError(error.NoAvailableInstance);
         return error.NoLeaderAvailable;
     }
 
@@ -247,10 +300,16 @@ pub const ServiceClient = struct {
         defer self.unlockInstances();
 
         const instance = self.balancer.next(self.instances.items) orelse
-            return error.NoAvailableInstance;
+            {
+                self.recordSendError(error.NoAvailableInstance);
+                return error.NoAvailableInstance;
+            };
 
         if (self.fc_config.enabled) {
-            try self.applyFlowControl(instance, payload_len);
+            self.applyFlowControl(instance, payload_len) catch |err| {
+                self.recordSendError(err);
+                return err;
+            };
         }
 
         return self.tryClaimToInstance(instance, template_id, payload_len);
@@ -608,10 +667,15 @@ pub const ServiceClient = struct {
             }
 
             const claim = producer.tryClaim(msg_type_id, payload_len) orelse
-                return error.SendBufferFull;
+                {
+                    self.recordSendError(error.SendBufferFull);
+                    return error.SendBufferFull;
+                };
             return .{
                 .claim = claim,
                 .payload = claim.buffer,
+                .service_counters = self.service_counters,
+                .logical_payload_len = payload_len,
             };
         }
 
@@ -638,7 +702,10 @@ pub const ServiceClient = struct {
         }
 
         var claim = send_rb.tryClaim(constants.application_msg_type_id, total_len) orelse
-            return error.SendBufferFull;
+            {
+                self.recordSendError(error.SendBufferFull);
+                return error.SendBufferFull;
+            };
 
         const header: *TcpFrameHeader = @ptrCast(@alignCast(claim.buffer.ptr));
         header.* = .{
@@ -657,7 +724,28 @@ pub const ServiceClient = struct {
             .payload = claim.buffer[TcpFrameHeader.size..][0..payload_len],
             .peer_counter_entry = self.peerCounterEntry(target_node_id),
             .peer_ring_cost = @intCast(ringCost(total_len)),
+            .service_counters = self.service_counters,
+            .logical_payload_len = payload_len,
         };
+    }
+
+    fn recordSend(self: *const Self, payload_len: usize) void {
+        const counters = self.service_counters orelse return;
+        counters.increment(.messages_sent);
+        counters.add(.bytes_sent, @intCast(payload_len));
+    }
+
+    fn recordSendError(self: *const Self, err: anyerror) void {
+        const counters = self.service_counters orelse return;
+        switch (err) {
+            error.SendBufferFull, error.BufferFull => counters.increment(.send_buffer_full),
+            error.BackPressure => counters.increment(.backpressure),
+            error.BackPressureTimeout => counters.increment(.backpressure_timeouts),
+            error.PeerCongested => counters.increment(.peer_congestion),
+            error.PeerDisconnected => counters.increment(.peer_disconnected),
+            error.NoAvailableInstance => counters.increment(.no_available_instance),
+            else => {},
+        }
     }
 
     fn brokerSendRingBuffer(self: *Self) ?*RingBuffer {

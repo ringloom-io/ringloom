@@ -37,6 +37,10 @@ All code targets **Zig 0.16.x** stable.
     2.  [Counter Wiring](#32-counter-wiring)
     3.  [Cycle Time Tracking](#33-cycle-time-tracking)
     4.  [Counter Snapshot](#34-counter-snapshot)
+    5.  [Current Implementation Review](#35-current-implementation-review)
+    6.  [Required Counter Coverage](#36-required-counter-coverage)
+    7.  [Metadata Counter Regions](#37-metadata-counter-regions)
+    8.  [Derived Ring Gauges](#38-derived-ring-gauges)
 4.  [Error Log Wiring](#4-error-log-wiring)
     1.  [Error Categories](#41-error-categories)
     2.  [Error Recording Patterns](#42-error-recording-patterns)
@@ -52,6 +56,7 @@ All code targets **Zig 0.16.x** stable.
     2.  [MonitoringSnapshot](#72-monitoringsnapshot)
     3.  [Periodic Stderr Dump (Optional)](#73-periodic-stderr-dump-optional)
     4.  [External Monitoring Tool](#74-external-monitoring-tool)
+    5.  [Prometheus Observability Process](#75-prometheus-observability-process)
 8.  [Broker Startup Wiring — Putting It All Together](#8-broker-startup-wiring--putting-it-all-together)
 9.  [Constants Reference](#9-constants-reference)
     1.  [Buffer Size Constants](#91-buffer-size-constants)
@@ -1062,6 +1067,237 @@ pub const CounterSnapshot = struct {
 };
 ```
 
+### 3.5 Current Implementation Review
+
+The intended architecture is that every broker and every service metadata file is
+self-describing and contains all counters needed by an external observer. The current
+implementation is only partially there:
+
+| Area | Current state | Gap |
+|---|---|---|
+| Broker generic counters | `BrokerApplication` and `BrokerRuntime` allocate `CountersManager` value/metadata buffers with the process allocator. Sender and receiver loops allocate ad-hoc labels such as `bytes_sent`, `recv_frames_routed`, and `peer_queue_overflow_drops`. | These counters are not inside the broker metadata mmap, so `ringloom-stat` and future observers cannot read them after opening `broker_<node>.dat`. |
+| Broker metadata layout | `BrokerMetadataFile` contains header, control ring, send ring, optional flow-control region, and optional per-peer send-counter region. | No generic counter values region, counter metadata region, or error-log region is appended to the broker metadata file. Header fields only expose flow-control and per-peer region lengths. |
+| Typed counter registry | `src/common/monitoring/system_counter.zig` defines 33 well-known counters including flow-control counters. | Broker event loops mostly bypass `SystemCounters` and allocate their own IDs, so labels/IDs are not consistent across control, sender, receiver, docs, and external tooling. |
+| Control loop counters | `ControlLoop.updateCounters()` is currently a no-op. | Active service count, cumulative registrations/removals, heartbeat timeouts, control messages, subscription count, and flow-control update counters are not consistently recorded. |
+| Service metadata | `ServiceMetadataFile` contains header, optional blocking trailer, control ring, and message ring. | No service-owned counters are present. Service-side sends, receives, handler outcomes, backpressure, and flow-control decisions are invisible unless applications print their own summaries. |
+| Service runtime | `RingLoomEngine`, `ServiceClient`, `IpcProducer`, `MessageConsumer`, and `ControlAgent` return errors or update flow-control shared state but do not own a service `CountersManager`. | Important producer/consumer/client metrics cannot be scraped from service metadata. |
+| Ring occupancy | Ring buffers expose producer/consumer positions and capacities. | Occupancy can be derived by observers, but it is not documented as a first-class monitoring surface. Optional high-water counters are missing. |
+| External tool | `ringloom-stat` scans broker/service metadata and prints process/header state, flow-control byte counts, and peer-send region sizes. | It does not print generic counters or error-log entries because those regions are not in metadata files yet. |
+
+The rest of this section defines the target coverage. The implementation should treat
+metadata-resident counters as the source of truth and use heap-backed counters only in
+tests or temporary standalone components.
+
+### 3.6 Required Counter Coverage
+
+Counters are divided into **broker**, **service runtime**, and **shared derived gauges**.
+Every counter label should use Prometheus-safe snake case in metadata. The exporter may
+add a `ringloom_` prefix, but the stored labels should already be stable and readable.
+
+#### Broker counters
+
+| Counter | Type | Recording point |
+|---|---|---|
+| `broker_bytes_sent_total` | counter | Bytes successfully handed to TCP, including frame header. |
+| `broker_bytes_received_total` | counter | Bytes accepted from TCP, including frame header. |
+| `broker_frames_sent_total` | counter | Application/admin/heartbeat TCP frames sent. |
+| `broker_frames_received_total` | counter | Complete TCP frames received before classification. |
+| `broker_messages_routed_local_total` | counter | Application frames written to a local service messages ring. |
+| `broker_messages_routed_remote_total` | counter | Service-originated frames dequeued from the broker send ring for remote peers. |
+| `broker_admin_messages_sent_total` | counter | Cluster/service-discovery admin frames sent. |
+| `broker_admin_messages_received_total` | counter | Admin frames decoded and dispatched. |
+| `broker_heartbeats_sent_total` | counter | Broker-to-broker heartbeat frames sent. |
+| `broker_heartbeats_received_total` | counter | Broker-to-broker heartbeat frames received. |
+| `broker_tcp_connections_accepted_total` | counter | Incoming peer TCP connections accepted. |
+| `broker_tcp_connections_established_total` | counter | Outgoing or incoming peer connections that complete handshake. |
+| `broker_tcp_connections_closed_total` | counter | Peer connections closed for any reason. |
+| `broker_tcp_connection_errors_total` | counter | Connect/read/write/socket errors. |
+| `broker_tcp_reconnect_attempts_total` | counter | Sender reconnect attempts. |
+| `broker_handshake_failures_total` | counter | Peer handshake validation failures. |
+| `broker_invalid_frames_total` | counter | Malformed frames or frames rejected by node/header validation. |
+| `broker_malformed_messages_dropped_total` | counter | Send-ring records too short to contain a frame header. |
+| `broker_unknown_peer_drops_total` | counter | Frames dropped because target/source peer is unknown. |
+| `broker_peer_not_connected_drops_total` | counter | Frames dropped because target peer is disconnected. |
+| `broker_peer_queue_overflow_drops_total` | counter | Frames dropped because a per-peer write queue overflowed. |
+| `broker_unknown_service_drops_total` | counter | Frames dropped because target service ID is unknown. |
+| `broker_service_full_drops_total` | counter | Frames dropped because target service messages ring is full. |
+| `broker_send_ring_full_total` | counter | Service writes/claims to the broker send ring that failed with `BufferFull`. |
+| `broker_service_control_ring_full_total` | counter | Broker writes to a service control ring that failed with `BufferFull`. |
+| `broker_services_registered_current` | gauge | Active local service count. |
+| `broker_services_registered_total` | counter | Successful local service registrations. |
+| `broker_services_removed_total` | counter | Graceful unregisters plus heartbeat removals. |
+| `broker_service_heartbeat_timeouts_total` | counter | Services removed by heartbeat checker. |
+| `broker_control_messages_received_total` | counter | Valid service-to-broker control messages read. |
+| `broker_control_messages_invalid_total` | counter | Malformed or unknown control messages. |
+| `broker_subscriptions_current` | gauge | Active service discovery subscription entries. |
+| `broker_leader_elections_total` | counter | Service leader election evaluations. |
+| `broker_control_loop_cycle_time_max_ns` | gauge | Rolling max control-loop duty-cycle time. |
+| `broker_sender_cycle_time_max_ns` | gauge | Rolling max sender-loop duty-cycle time. |
+| `broker_receiver_cycle_time_max_ns` | gauge | Rolling max receiver-loop duty-cycle time. |
+
+#### Flow-control and per-peer counters
+
+The existing flow-control and per-peer regions should remain as compact structured state,
+but aggregate events should also be mirrored as generic counters so all observability
+clients can consume them without understanding every specialized region.
+
+| Counter | Type | Recording point |
+|---|---|---|
+| `broker_fc_updates_sent_total` | counter | Remaining-capacity updates or snapshots sent to peers. |
+| `broker_fc_updates_received_total` | counter | Remaining-capacity updates or snapshots received from peers. |
+| `broker_fc_pressure_events_total` | counter | Local service transitions into pressured state. |
+| `broker_fc_recovery_events_total` | counter | Local service transitions back to normal state. |
+| `broker_fc_slot_allocations_total` | counter | Flow-control slots allocated for remote services. |
+| `broker_fc_slot_reclamations_total` | counter | Flow-control slots reclaimed. |
+| `service_fc_client_backpressure_total` | counter | Service sends blocked by target-buffer or send-buffer flow control. |
+| `service_fc_client_spin_timeouts_total` | counter | Service spin strategy timed out. |
+| `service_fc_peer_congestion_total` | counter | Service sends blocked by per-peer pending threshold. |
+| `service_fc_peer_disconnected_avoided_total` | counter | Service sends avoided because peer was known disconnected. |
+
+The structured flow-control entries remain exported as gauges:
+
+| Field | Prometheus interpretation |
+|---|---|
+| `remaining_bytes` | `ringloom_flow_control_remaining_bytes` gauge labeled by `source_node`, `target_node`, `service_id`, `slot`. |
+| `capacity` | `ringloom_flow_control_capacity_bytes` gauge. |
+| `pressure_state` | `ringloom_flow_control_pressure_state` gauge with 0=unknown, 1=normal, 2=pressured. |
+| `last_update_ns` | Used to emit `ringloom_flow_control_update_age_seconds`. |
+
+Per-peer send entries remain exported as gauges/counters:
+
+| Field | Prometheus interpretation |
+|---|---|
+| `ring_bytes_pending` | `ringloom_broker_peer_ring_pending_bytes` gauge. |
+| `queue_bytes_pending` | `ringloom_broker_peer_queue_pending_bytes` gauge. |
+| `queue_capacity` | `ringloom_broker_peer_queue_capacity_bytes` gauge. |
+| `connection_state` | `ringloom_broker_peer_connected` gauge, 1 connected, 0 disconnected. |
+| `total_bytes_sent` | `ringloom_broker_peer_bytes_sent_total` counter. |
+| `total_bytes_dropped` | `ringloom_broker_peer_bytes_dropped_total` counter. |
+| `last_update_ns` | Used to emit `ringloom_broker_peer_counter_update_age_seconds`. |
+
+#### Service runtime counters
+
+Each service metadata file must contain a service-local `CountersManager` initialized by
+`RingLoomEngine.start`. These counters describe what the service runtime did, independent
+of application-domain counters.
+
+| Counter | Type | Recording point |
+|---|---|---|
+| `service_messages_sent_total` | counter | Successful sends through `ServiceClient.send`, `sendTo`, `sendToLeader`, or zero-copy commit. |
+| `service_messages_sent_local_total` | counter | Successful same-host IPC sends. |
+| `service_messages_sent_remote_total` | counter | Successful writes/claims into the broker send ring. |
+| `service_messages_received_total` | counter | Messages read from this service's messages ring. |
+| `service_bytes_sent_total` | counter | Application payload bytes sent by this service. |
+| `service_bytes_received_total` | counter | Application payload bytes delivered to handlers. |
+| `service_send_failures_total` | counter | Send attempts that returned an error. |
+| `service_send_buffer_full_total` | counter | Local target ring or broker send ring returned `BufferFull`. |
+| `service_message_too_long_total` | counter | Send rejected because payload exceeded ring or frame limit. |
+| `service_no_available_instance_total` | counter | Send failed because service discovery had no usable target. |
+| `service_no_leader_available_total` | counter | `sendToLeader` failed because no leader was known. |
+| `service_no_producer_total` | counter | Target instance existed but IPC producer was not initialized. |
+| `service_claims_total` | counter | Successful zero-copy claims. |
+| `service_claim_commits_total` | counter | Zero-copy claims committed. |
+| `service_claim_aborts_total` | counter | Zero-copy claims aborted or dropped before commit. |
+| `service_handler_invocations_total` | counter | Application handler calls. |
+| `service_handler_errors_total` | counter | Handler errors reported via service runtime APIs or thread-local error state. |
+| `service_handler_cycle_time_max_ns` | gauge | Rolling max handler invocation duration when handler timing is enabled. |
+| `service_message_consumer_cycle_time_max_ns` | gauge | Rolling max message-consumer duty-cycle time. |
+| `service_control_agent_cycle_time_max_ns` | gauge | Rolling max control-agent duty-cycle time. |
+| `service_control_messages_received_total` | counter | Broker-to-service control messages processed. |
+| `service_registry_instances_current` | gauge | Current number of known target instances in the service registry. |
+| `service_registry_updates_total` | counter | Service discovery updates applied. |
+| `service_heartbeats_sent_total` | counter | Heartbeat timestamp writes or explicit heartbeat control messages. |
+
+Application-specific counters may also be allocated from the service metadata counter
+region. They should use an application prefix (`orders_generated_total`,
+`risk_rejected_total`, etc.) and must not reuse runtime labels.
+
+### 3.7 Metadata Counter Regions
+
+Both metadata file types must append a generic monitoring tail after their hot-path ring
+buffers. Readers discover the tail from fixed header fields; if the fields are zero, the
+file is treated as an older metadata version without generic counters.
+
+```
+Broker Metadata File:
+┌──────────────────────────────────────────────┐
+│ Metadata Header (512 B)                      │
+├──────────────────────────────────────────────┤
+│ Control Ring Buffer + trailer                │
+├──────────────────────────────────────────────┤
+│ Send Ring Buffer + trailer                   │
+├──────────────────────────────────────────────┤
+│ Flow-Control Region (optional, broker only)  │
+├──────────────────────────────────────────────┤
+│ Per-Peer Send Counter Region (optional)      │
+├──────────────────────────────────────────────┤
+│ Counter Values Buffer (128 B per counter)    │
+├──────────────────────────────────────────────┤
+│ Counter Metadata Buffer (256 B per counter)  │
+├──────────────────────────────────────────────┤
+│ Error Log Buffer                             │
+└──────────────────────────────────────────────┘
+
+Service Metadata File:
+┌──────────────────────────────────────────────┐
+│ Metadata Header (512 B)                      │
+├──────────────────────────────────────────────┤
+│ Blocking Trailer (optional)                  │
+├──────────────────────────────────────────────┤
+│ Control Ring Buffer + trailer                │
+├──────────────────────────────────────────────┤
+│ Messages Ring Buffer + trailer               │
+├──────────────────────────────────────────────┤
+│ Counter Values Buffer (128 B per counter)    │
+├──────────────────────────────────────────────┤
+│ Counter Metadata Buffer (256 B per counter)  │
+├──────────────────────────────────────────────┤
+│ Error Log Buffer                             │
+└──────────────────────────────────────────────┘
+```
+
+Required header additions, stored in the reserved 512-byte metadata header space:
+
+| Field | Type | Applies to | Meaning |
+|---|---|---|---|
+| `metadata_version` | `u16` | broker, service | Incremented when monitoring tail fields are present. |
+| `flags` | `u16` | broker, service | Bitset: counters present, error log present, flow-control present, per-peer present. |
+| `counter_values_buffer_length` | `u32` | broker, service | Byte length of counter values region. Zero means absent. |
+| `counter_metadata_buffer_length` | `u32` | broker, service | Byte length of counter metadata region. |
+| `error_log_buffer_length` | `u32` | broker, service | Byte length of error log region. Zero means absent. |
+| `monitoring_tail_offset` | `u64` | broker, service | Absolute byte offset of counter values region. |
+| `monitoring_tail_length` | `u64` | broker, service | Total bytes from counter values through error log. |
+
+The writer computes all offsets at startup and never changes them afterward. The observer
+validates every offset/length against file size before reading. Counter values remain
+cache-line padded and are updated with atomic operations; counter metadata is written once
+during startup before the counter is used.
+
+### 3.8 Derived Ring Gauges
+
+Ring buffer occupancy should not require hot-path counter increments. The observer can
+derive gauges from each ring buffer's trailer:
+
+```
+used_bytes = producer_position - consumer_position
+free_bytes = capacity - used_bytes
+usage_ratio = used_bytes / capacity
+```
+
+Expose these for:
+
+| Ring | Metric labels |
+|---|---|
+| Broker control ring | `owner_type="broker"`, `ring="control"` |
+| Broker send ring | `owner_type="broker"`, `ring="send"` |
+| Service control ring | `owner_type="service"`, `ring="control"` |
+| Service messages ring | `owner_type="service"`, `ring="messages"` |
+
+The runtime should additionally maintain optional high-water gauges when cheap to update:
+`*_ring_usage_high_water_bytes` and `*_ring_full_total`. High-water updates may use the
+same non-atomic max pattern as cycle-time tracking because they are advisory monitoring
+data; `BufferFull` events must remain exact counters.
+
 ---
 
 ## 4. Error Log Wiring
@@ -1671,6 +1907,30 @@ const BrokerMetadataHeader = extern struct {
     error_log_buffer_size: i32,
 };
 ```
+
+### 7.5 Prometheus Observability Process
+
+The production monitoring path is a separate executable, tentatively named
+`ringloom-observability`, described in [Observability](../observability.md). It does not
+run inside broker or service processes. It scans the metadata storage directory, maps each
+broker and service metadata file read-only, converts metadata-resident counters and
+derived ring-buffer gauges into Prometheus text format, and serves them from `/metrics`
+using Zig's standard-library HTTP server.
+
+Required behavior:
+
+| Requirement | Design |
+|---|---|
+| Input | `--storage-path`, `--group`, `--listen`, `--refresh-ms`, optional `--broker-node-id`, optional service-name filters. |
+| Discovery | Periodically rescan `<storage_path>/<group>/services` for `broker_<node>.dat` and service metadata files. |
+| Safety | Validate metadata version, file size, offsets, lengths, and power-of-two ring capacities before reading any region. Skip invalid files and increment exporter self-counters. |
+| Export model | Emit broker counters, service counters, flow-control entries, per-peer send entries, process liveness gauges, heartbeat age gauges, and ring occupancy gauges. |
+| Hot-path cost | Zero broker/service work beyond existing atomic counter writes. Exporter reads are acquire loads from read-only mmaps. |
+| Compatibility | Files with no monitoring tail still produce liveness/header/ring gauges where possible, but generic counters are absent. |
+
+`ringloom-stat` remains a human CLI inspection tool. `ringloom-observability` is the
+long-running scrape endpoint for Prometheus and should share metadata parsing helpers with
+`ringloom-stat` where practical.
 
 ---
 
@@ -2840,8 +3100,9 @@ periodic_dump.zig                ◄── broker.zig (wired into control loop)
     `validate()`, and `alignToPowerOfTwo()`. Write unit tests for all parsing and
     validation paths.
 
-4.  **Create `src/monitoring/system_counter.zig`.** Define the `SystemCounter`
-    enum with all 22 well-known counter IDs and the `label()` method. No external
+4.  **Create `src/monitoring/system_counter.zig`.** Define the broker and service
+    runtime counter IDs and stable Prometheus-safe labels described in
+    [Required Counter Coverage](#36-required-counter-coverage). No external
     dependencies.
 
 5.  **Create `src/monitoring/system_counters.zig`.** Implement `SystemCounters` wrapping
@@ -2862,30 +3123,50 @@ periodic_dump.zig                ◄── broker.zig (wired into control loop)
     with `doWork()` that periodically dumps a snapshot to stderr. Controlled by
     `RINGLOOM_MONITORING_DUMP` env var.
 
-10. **Wire counters into event loops.** Extend `ControlLoop` (doc 09/10),
+10. **Move counter buffers into broker metadata.** Extend `BrokerMetadataFile` so the
+    generic counter values, counter metadata, and error-log regions are appended after
+    broker ring buffers, flow-control state, and per-peer send counters. Add header fields
+    for monitoring offsets and lengths and keep zero values backward-compatible.
+
+11. **Add counter buffers to service metadata.** Extend `ServiceMetadataFile` so every
+    service owns counter values, counter metadata, and error-log regions after its control
+    and messages rings. Initialize a service `CountersManager` during `RingLoomEngine.start`.
+
+12. **Wire counters into broker event loops.** Extend `ControlLoop` (doc 09/10),
     `SenderEventLoop` (doc 05), and `ReceiverEventLoop` (doc 06) to accept
     `*const SystemCounters` and `*ErrorLog` pointers. Add counter increments at every
     relevant point (bytes sent/received, messages routed, back-pressure events,
     heartbeats).
 
-11. **Wire cycle time tracking into event loops.** Add `CycleTimeTracker` to each event
+13. **Wire counters into service runtime.** Update `ServiceClient`, `IpcProducer`,
+    `MessageConsumer`, and `ControlAgent` to record send, receive, flow-control,
+    backpressure, registry, control-message, and heartbeat counters in the service metadata
+    counter region.
+
+14. **Wire cycle time tracking into event loops.** Add `CycleTimeTracker` to each event
     loop's `doWork()`: call `start()` at the top, `stop()` at the bottom.
 
-12. **Wire `PeriodicMonitoringDump` into control loop.** Add
+15. **Wire `PeriodicMonitoringDump` into control loop.** Add
     `monitoring_dump.doWork()` as the last step in the control loop's `doWork()`.
 
-13. **Update broker startup (`src/broker.zig`).** Load config via `ConfigLoader`,
+16. **Update broker startup (`src/broker.zig`).** Load config via `ConfigLoader`,
     compute total file size including counter + error log regions, allocate and mmap
     the file, slice out regions, initialize `CountersManager`, `SystemCounters`,
     `ErrorLog`, `PeriodicMonitoringDump`, and inject them into all event loops.
 
-14. **Create `tools/ringloom_stat.zig`.** Standalone binary that mmaps the broker's `.dat`
-    file read-only and prints counters + error log. Add it to `build.zig` as a
-    separate executable.
+17. **Update `tools/ringloom_stat.zig`.** Keep it as the human inspection tool, but teach it
+    to read both broker and service counter regions, error logs, ring occupancy, flow-control
+    entries, and per-peer send entries.
 
-15. **Write integration tests.** Multi-threaded counter stress test (4 threads × 100K
+18. **Create `tools/ringloom_observability.zig`.** Implement the Prometheus exporter
+    described in [Observability](../observability.md) and add `zig build observability`
+    plus `zig build run-observability` steps.
+
+19. **Write integration tests.** Multi-threaded counter stress test (4 threads × 100K
     increments). Monitoring snapshot test. Config round-trip test (write properties
-    file, load it, verify all fields). Error log deduplication test.
+    file, load it, verify all fields). Error log deduplication test. Metadata-tail offset
+    tests for broker and service files. Exporter scrape-format tests for broker and service
+    counters.
 
 ---
 

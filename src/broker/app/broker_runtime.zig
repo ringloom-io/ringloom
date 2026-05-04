@@ -41,8 +41,6 @@ pub const BrokerRuntime = struct {
     config: BrokerConfig,
 
     broker_metadata: ?BrokerMetadataFile,
-    counters_values_buffer: ?[]align(platform.constants.cache_line_pad) u8,
-    counters_metadata_buffer: ?[]u8,
     counters: ?CountersManager,
 
     control_cmd_buffer: ?[]Command,
@@ -78,8 +76,6 @@ pub const BrokerRuntime = struct {
             .allocator = allocator,
             .config = config,
             .broker_metadata = null,
-            .counters_values_buffer = null,
-            .counters_metadata_buffer = null,
             .counters = null,
             .control_cmd_buffer = null,
             .sender_cmd_buffer = null,
@@ -111,26 +107,17 @@ pub const BrokerRuntime = struct {
                     config.fc_peer_send_counters_max_peers
                 else
                     0,
+                .counter_values_buffer_length = config.counter_values_buffer_size,
+                .counter_metadata_buffer_length = config.counter_metadata_buffer_size,
+                .error_log_buffer_length = config.error_log_buffer_size,
             },
         );
         self.broker_metadata = broker_metadata;
 
-        const values_buffer = try allocator.alignedAlloc(
-            u8,
-            @enumFromInt(std.math.log2(@as(usize, platform.constants.cache_line_pad))),
-            config.counter_values_buffer_size,
+        self.counters = CountersManager.init(
+            self.broker_metadata.?.getCounterValuesBuffer(),
+            self.broker_metadata.?.getCounterMetadataBuffer(),
         );
-        @memset(values_buffer, 0);
-        self.counters_values_buffer = values_buffer;
-
-        const metadata_buffer = try allocator.alloc(
-            u8,
-            config.counter_metadata_buffer_size,
-        );
-        @memset(metadata_buffer, 0);
-        self.counters_metadata_buffer = metadata_buffer;
-
-        self.counters = CountersManager.init(values_buffer, metadata_buffer);
 
         const control_cmd_buffer = try allocator.alloc(Command, commandQueueCapacity());
         self.control_cmd_buffer = control_cmd_buffer;
@@ -287,16 +274,6 @@ pub const BrokerRuntime = struct {
         self.receiver_cmd_buffer = null;
 
         self.counters = null;
-
-        if (self.counters_metadata_buffer) |buf| {
-            self.allocator.free(buf);
-        }
-        self.counters_metadata_buffer = null;
-
-        if (self.counters_values_buffer) |buf| {
-            self.allocator.free(buf);
-        }
-        self.counters_values_buffer = null;
 
         if (self.broker_metadata) |*meta| {
             meta.close();

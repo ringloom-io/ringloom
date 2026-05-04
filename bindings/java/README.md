@@ -28,7 +28,7 @@ For hot-path sends, allocate a `BufferClaim` during setup with `client.newClaim(
 
 - Java 25+
 - Gradle 9+
-- Zig 0.15.x
+- Zig 0.16.x
 
 ## Build
 

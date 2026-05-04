@@ -9,6 +9,9 @@ const ringloom_common = @import("ringloom_common");
 const platform = ringloom_common.platform;
 const memory = ringloom_common.memory;
 const ring_buffer = ringloom_common.concurrent.ring_buffer;
+const CountersManager = ringloom_common.concurrent.CountersManager;
+const ServiceCounters = ringloom_common.monitoring.ServiceCounters;
+const ServiceCounter = ringloom_common.monitoring.ServiceCounter;
 const constants = ringloom_common.memory.constants;
 const MessageConsumer = @import("message_consumer.zig").MessageConsumer;
 const control_agent_mod = @import("control_agent.zig");
@@ -74,6 +77,10 @@ pub const RingLoomEngine = struct {
     control_agent_runner: ?ThreadRunner,
     message_consumer_mode: MessageConsumerMode,
 
+    // ── Observability ─────────────────────────────────────────────────
+    counters: CountersManager,
+    service_counters: ServiceCounters,
+
     // ── State ─────────────────────────────────────────────────────────
     running: platform.AtomicBool,
 
@@ -108,6 +115,11 @@ pub const RingLoomEngine = struct {
         engine.node_id = meta.node_id;
         engine.config = config;
         engine.allocator = allocator;
+        engine.counters = CountersManager.init(
+            meta.service_meta.getCounterValuesBuffer(),
+            meta.service_meta.getCounterMetadataBuffer(),
+        );
+        engine.service_counters = try ServiceCounters.init(&engine.counters);
         engine.running = platform.AtomicBool.init(true);
         engine.message_consumer = null;
         engine.message_consumer_runner = null;
@@ -121,6 +133,7 @@ pub const RingLoomEngine = struct {
             config.service_name,
             config.leader_election_enabled,
         );
+        engine.service_counters.increment(.registrations_sent);
 
         // Wait for registration response.
         _ = try control_agent_mod.waitForRegistrationResponse(meta.service_meta, 5000);
@@ -136,6 +149,7 @@ pub const RingLoomEngine = struct {
             meta.service_id,
             config.storage_path,
             config.group,
+            &engine.service_counters,
         );
 
         // ── Step 6: Start message consumer thread when requested ──────
@@ -145,6 +159,7 @@ pub const RingLoomEngine = struct {
 
             message_consumer.* = try MessageConsumer.init(
                 @alignCast(meta.service_meta.getMessagesBuffer()),
+                &engine.service_counters,
             );
             engine.message_consumer = message_consumer;
 
@@ -171,6 +186,7 @@ pub const RingLoomEngine = struct {
             meta.service_meta,
             meta.broker_meta,
             &engine.service_registry,
+            &engine.service_counters,
         );
         engine.control_agent = ctrl_agent;
 
@@ -207,6 +223,7 @@ pub const RingLoomEngine = struct {
 
         // 3. Send UnregisterService to the broker.
         control_agent_mod.unregisterFromBroker(self.broker_meta, self.service_id) catch {};
+        self.service_counters.increment(.unregisters_sent);
 
         // 4. Close metadata files and cached BuffersProviders.
         self.service_meta.close();
@@ -247,6 +264,7 @@ pub const RingLoomEngine = struct {
             self.service_id,
             service_name,
         );
+        self.service_counters.increment(.subscriptions_sent);
 
         return client;
     }

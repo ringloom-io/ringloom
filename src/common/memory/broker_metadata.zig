@@ -9,6 +9,7 @@ const constants = @import("constants.zig");
 const platform = @import("../platform.zig");
 const FlowControlRegion = @import("flow_control.zig").FlowControlRegion;
 const PeerSendCountersRegion = @import("peer_send_counters.zig").PeerSendCountersRegion;
+const counters = @import("../concurrent/counters.zig");
 
 /// Overlay for the first 32 bytes of the broker metadata header.
 /// Read/written once at creation; immutable after that (except volatile fields).
@@ -51,6 +52,15 @@ pub const BrokerMetadataFile = struct {
     /// Per-peer send counters region (null if disabled).
     peer_send_counters: ?PeerSendCountersRegion = null,
 
+    /// Generic counter values region, stored in the metadata monitoring tail.
+    counter_values_buffer: []align(constants.cache_line_pad) u8,
+
+    /// Generic counter metadata region, stored in the metadata monitoring tail.
+    counter_metadata_buffer: []u8,
+
+    /// Deduplicating error-log region, stored in the metadata monitoring tail.
+    error_log_buffer: []u8,
+
     /// File descriptor (kept open for the lifetime of the mapping).
     fd: std.posix.fd_t,
 
@@ -62,6 +72,9 @@ pub const BrokerMetadataFile = struct {
     pub const FlowControlOptions = struct {
         fc_max_entries: u32 = 0,
         peer_send_max_peers: u32 = 0,
+        counter_values_buffer_length: usize = constants.default_counter_values_buffer_length,
+        counter_metadata_buffer_length: usize = 0,
+        error_log_buffer_length: usize = constants.default_error_log_buffer_length,
     };
 
     /// Create and initialize a new broker metadata file.
@@ -119,8 +132,19 @@ pub const BrokerMetadataFile = struct {
         else
             0;
 
+        const counter_values_len = alignedCounterValuesLength(fc_options.counter_values_buffer_length);
+        const counter_metadata_len = counterMetadataLength(
+            fc_options.counter_values_buffer_length,
+            fc_options.counter_metadata_buffer_length,
+        );
+        const error_log_len = constants.alignUp(fc_options.error_log_buffer_length, @sizeOf(i64));
+
+        const base_size = constants.metadata_header_length + ctrl_region + msgs_region + fc_buf_len + peer_send_len;
+        const monitoring_tail_offset = constants.alignUp(base_size, constants.cache_line_pad);
+        const monitoring_tail_len = counter_values_len + counter_metadata_len + error_log_len;
+
         const total_size = constants.alignUp(
-            constants.metadata_header_length + ctrl_region + msgs_region + fc_buf_len + peer_send_len,
+            monitoring_tail_offset + monitoring_tail_len,
             constants.page_size,
         );
 
@@ -144,6 +168,9 @@ pub const BrokerMetadataFile = struct {
 
         const fc_region_offset = constants.metadata_header_length + ctrl_region + msgs_region;
         const peer_send_region_offset = fc_region_offset + fc_buf_len;
+        const counter_values_offset = monitoring_tail_offset;
+        const counter_metadata_offset = counter_values_offset + counter_values_len;
+        const error_log_offset = counter_metadata_offset + counter_metadata_len;
 
         // Initialize FC regions if requested.
         var fc_region: ?FlowControlRegion = null;
@@ -167,6 +194,9 @@ pub const BrokerMetadataFile = struct {
             .send_buffer = mapped[constants.metadata_header_length + ctrl_region ..][0..msgs_region],
             .fc_region = fc_region,
             .peer_send_counters = peer_send_counters,
+            .counter_values_buffer = @alignCast(mapped[counter_values_offset..][0..counter_values_len]),
+            .counter_metadata_buffer = mapped[counter_metadata_offset..][0..counter_metadata_len],
+            .error_log_buffer = mapped[error_log_offset..][0..error_log_len],
             .fd = fd,
         };
 
@@ -181,6 +211,12 @@ pub const BrokerMetadataFile = struct {
         // Store FC region sizes in the header (at fixed offsets beyond 32-byte struct).
         self.storeFcBufferLength(@intCast(fc_buf_len));
         self.storePeerSendCountersLength(@intCast(peer_send_len));
+        self.storeMetadataMonitoringVersion(constants.metadata_monitoring_version);
+        self.storeCounterValuesBufferLength(@intCast(counter_values_len));
+        self.storeCounterMetadataBufferLength(@intCast(counter_metadata_len));
+        self.storeErrorLogBufferLength(@intCast(error_log_len));
+        self.storeMonitoringTailOffset(@intCast(monitoring_tail_offset));
+        self.storeMonitoringTailLength(@intCast(monitoring_tail_len));
 
         // Initialize next_service_id to 1 (0 is reserved for broker).
         self.storeNextServiceId(1);
@@ -227,28 +263,45 @@ pub const BrokerMetadataFile = struct {
         const msgs_region = msgs_len + trailer;
 
         const base_size = constants.metadata_header_length + ctrl_region + msgs_region;
-        const expected = constants.alignUp(base_size, constants.page_size);
-        if (file_size < expected)
-            return error.FileSizeMismatch;
 
-        // Read FC region lengths from header (0 = absent, backward compatible).
+        // Read FC/monitoring region lengths from header.
         var self = BrokerMetadataFile{
             .mapped_bytes = mapped,
             .header = header,
             .control_buffer = mapped[constants.metadata_header_length..][0..ctrl_region],
             .send_buffer = mapped[constants.metadata_header_length + ctrl_region ..][0..msgs_region],
+            .counter_values_buffer = undefined,
+            .counter_metadata_buffer = undefined,
+            .error_log_buffer = undefined,
             .fd = fd,
         };
 
         const fc_buf_len: usize = @intCast(self.loadFcBufferLength());
         const peer_send_len: usize = @intCast(self.loadPeerSendCountersLength());
+        const counter_values_len: usize = @intCast(self.loadCounterValuesBufferLength());
+        const counter_metadata_len: usize = @intCast(self.loadCounterMetadataBufferLength());
+        const error_log_len: usize = @intCast(self.loadErrorLogBufferLength());
+        const monitoring_tail_offset: usize = @intCast(self.loadMonitoringTailOffset());
+        const monitoring_tail_len: usize = @intCast(self.loadMonitoringTailLength());
 
         const fc_region_offset = base_size;
         const peer_send_region_offset = fc_region_offset + fc_buf_len;
+        const counter_values_offset = monitoring_tail_offset;
+        const counter_metadata_offset = counter_values_offset + counter_values_len;
+        const error_log_offset = counter_metadata_offset + counter_metadata_len;
 
-        // Validate that the file is large enough for FC regions.
+        if (monitoring_tail_len != counter_values_len + counter_metadata_len + error_log_len)
+            return error.FileSizeMismatch;
+        if (monitoring_tail_offset < peer_send_region_offset + peer_send_len)
+            return error.FileSizeMismatch;
+        if (counter_values_len % counters.counter_value_length != 0)
+            return error.FileSizeMismatch;
+        if (counter_metadata_len % counters.counter_metadata_length != 0)
+            return error.FileSizeMismatch;
+
+        // Validate that the file is large enough for all regions.
         const total_expected = constants.alignUp(
-            base_size + fc_buf_len + peer_send_len,
+            monitoring_tail_offset + monitoring_tail_len,
             constants.page_size,
         );
         if (file_size < total_expected)
@@ -266,6 +319,10 @@ pub const BrokerMetadataFile = struct {
             self.peer_send_counters = PeerSendCountersRegion.initExisting(peer_slice) catch
                 return error.PeerSendCountersInitFailed;
         }
+
+        self.counter_values_buffer = @alignCast(mapped[counter_values_offset..][0..counter_values_len]);
+        self.counter_metadata_buffer = mapped[counter_metadata_offset..][0..counter_metadata_len];
+        self.error_log_buffer = mapped[error_log_offset..][0..error_log_len];
 
         return self;
     }
@@ -329,6 +386,54 @@ pub const BrokerMetadataFile = struct {
         @atomicStore(i32, ptr, value, .release);
     }
 
+    pub fn loadMetadataMonitoringVersion(self: *const BrokerMetadataFile) i32 {
+        return @atomicLoad(i32, self.metadataMonitoringVersionPtr(), .acquire);
+    }
+
+    pub fn storeMetadataMonitoringVersion(self: *BrokerMetadataFile, value: i32) void {
+        @atomicStore(i32, self.metadataMonitoringVersionPtr(), value, .release);
+    }
+
+    pub fn loadCounterValuesBufferLength(self: *const BrokerMetadataFile) i32 {
+        return @atomicLoad(i32, self.counterValuesBufferLengthPtr(), .acquire);
+    }
+
+    pub fn storeCounterValuesBufferLength(self: *BrokerMetadataFile, value: i32) void {
+        @atomicStore(i32, self.counterValuesBufferLengthPtr(), value, .release);
+    }
+
+    pub fn loadCounterMetadataBufferLength(self: *const BrokerMetadataFile) i32 {
+        return @atomicLoad(i32, self.counterMetadataBufferLengthPtr(), .acquire);
+    }
+
+    pub fn storeCounterMetadataBufferLength(self: *BrokerMetadataFile, value: i32) void {
+        @atomicStore(i32, self.counterMetadataBufferLengthPtr(), value, .release);
+    }
+
+    pub fn loadErrorLogBufferLength(self: *const BrokerMetadataFile) i32 {
+        return @atomicLoad(i32, self.errorLogBufferLengthPtr(), .acquire);
+    }
+
+    pub fn storeErrorLogBufferLength(self: *BrokerMetadataFile, value: i32) void {
+        @atomicStore(i32, self.errorLogBufferLengthPtr(), value, .release);
+    }
+
+    pub fn loadMonitoringTailOffset(self: *const BrokerMetadataFile) i64 {
+        return @atomicLoad(i64, self.monitoringTailOffsetPtr(), .acquire);
+    }
+
+    pub fn storeMonitoringTailOffset(self: *BrokerMetadataFile, value: i64) void {
+        @atomicStore(i64, self.monitoringTailOffsetPtr(), value, .release);
+    }
+
+    pub fn loadMonitoringTailLength(self: *const BrokerMetadataFile) i64 {
+        return @atomicLoad(i64, self.monitoringTailLengthPtr(), .acquire);
+    }
+
+    pub fn storeMonitoringTailLength(self: *BrokerMetadataFile, value: i64) void {
+        @atomicStore(i64, self.monitoringTailLengthPtr(), value, .release);
+    }
+
     // ── Flow Control Accessors ───────────────────────────────────────
 
     /// Returns the flow control region, or null if not present.
@@ -351,6 +456,18 @@ pub const BrokerMetadataFile = struct {
     /// Returns the byte slice backing the send ring buffer.
     pub fn getSendBuffer(self: *const BrokerMetadataFile) []u8 {
         return self.send_buffer;
+    }
+
+    pub fn getCounterValuesBuffer(self: *const BrokerMetadataFile) []align(constants.cache_line_pad) u8 {
+        return self.counter_values_buffer;
+    }
+
+    pub fn getCounterMetadataBuffer(self: *const BrokerMetadataFile) []u8 {
+        return self.counter_metadata_buffer;
+    }
+
+    pub fn getErrorLogBuffer(self: *const BrokerMetadataFile) []u8 {
+        return self.error_log_buffer;
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────
@@ -386,6 +503,46 @@ pub const BrokerMetadataFile = struct {
         const base: [*]u8 = self.mapped_bytes.ptr;
         const offset = constants.peer_send_counters_length_offset;
         return @ptrCast(@alignCast(base + offset));
+    }
+
+    fn metadataMonitoringVersionPtr(self: *const BrokerMetadataFile) *volatile i32 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.metadata_monitoring_version_offset));
+    }
+
+    fn counterValuesBufferLengthPtr(self: *const BrokerMetadataFile) *volatile i32 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.counter_values_length_offset));
+    }
+
+    fn counterMetadataBufferLengthPtr(self: *const BrokerMetadataFile) *volatile i32 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.counter_metadata_length_offset));
+    }
+
+    fn errorLogBufferLengthPtr(self: *const BrokerMetadataFile) *volatile i32 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.error_log_length_offset));
+    }
+
+    fn monitoringTailOffsetPtr(self: *const BrokerMetadataFile) *volatile i64 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.monitoring_tail_offset_offset));
+    }
+
+    fn monitoringTailLengthPtr(self: *const BrokerMetadataFile) *volatile i64 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.monitoring_tail_length_offset));
+    }
+
+    fn alignedCounterValuesLength(counter_values_buffer_length: usize) usize {
+        return constants.alignUp(counter_values_buffer_length, constants.cache_line_pad);
+    }
+
+    fn counterMetadataLength(counter_values_buffer_length: usize, explicit_length: usize) usize {
+        if (explicit_length > 0) return constants.alignUp(explicit_length, counters.counter_metadata_length);
+        const slots = @max(@as(usize, 1), alignedCounterValuesLength(counter_values_buffer_length) / counters.counter_value_length);
+        return slots * counters.counter_metadata_length;
     }
 
     fn buildBrokerPath(

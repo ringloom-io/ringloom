@@ -53,8 +53,6 @@ pub const BrokerApplication = struct {
     control_ring_buffer: ?RingBuffer = null,
     send_ring_buffer: ?RingBuffer = null,
 
-    counter_values_buffer: ?[]align(128) u8 = null,
-    counter_metadata_buffer: ?[]u8 = null,
     counters: ?CountersManager = null,
 
     control_command_storage: ?[]Command = null,
@@ -148,16 +146,6 @@ pub const BrokerApplication = struct {
         }
 
         self.counters = null;
-
-        if (self.counter_values_buffer) |buf| {
-            self.allocator.free(buf);
-            self.counter_values_buffer = null;
-        }
-
-        if (self.counter_metadata_buffer) |buf| {
-            self.allocator.free(buf);
-            self.counter_metadata_buffer = null;
-        }
 
         if (self.broker_metadata) |*meta| {
             meta.close();
@@ -320,6 +308,9 @@ pub const BrokerApplication = struct {
                     self.config.fc_peer_send_counters_max_peers
                 else
                     0,
+                .counter_values_buffer_length = self.config.counter_values_buffer_size,
+                .counter_metadata_buffer_length = self.config.counter_metadata_buffer_size,
+                .error_log_buffer_length = self.config.error_log_buffer_size,
             },
         );
         errdefer broker_metadata.close();
@@ -338,21 +329,10 @@ pub const BrokerApplication = struct {
             null,
         );
 
-        const values_len = alignedCounterValuesLength(self.config.counter_values_buffer_size);
-        const values_buffer = try self.allocator.alignedAlloc(
-            u8,
-            @enumFromInt(std.math.log2(@as(usize, 128))),
-            values_len,
+        self.counters = CountersManager.init(
+            broker_metadata.getCounterValuesBuffer(),
+            broker_metadata.getCounterMetadataBuffer(),
         );
-        errdefer self.allocator.free(values_buffer);
-        @memset(values_buffer, 0);
-
-        const metadata_len = counterMetadataLength(self.config.counter_values_buffer_size);
-        const metadata_buffer = try self.allocator.alloc(u8, metadata_len);
-        errdefer self.allocator.free(metadata_buffer);
-        @memset(metadata_buffer, 0);
-
-        self.counters = CountersManager.init(values_buffer, metadata_buffer);
 
         const command_capacity = commandQueueCapacity();
         const command_storage = try self.allocator.alloc(Command, command_capacity);
@@ -375,8 +355,6 @@ pub const BrokerApplication = struct {
         self.cluster_manager = ClusterManager.initSingleNode(self.config.node_id);
 
         self.broker_metadata = broker_metadata;
-        self.counter_values_buffer = values_buffer;
-        self.counter_metadata_buffer = metadata_buffer;
         self.control_command_storage = command_storage;
     }
 
@@ -450,17 +428,6 @@ fn receiverDoWorkFn(ctx: *anyopaque) u32 {
 }
 
 fn receiverOnCloseFn(_: *anyopaque) void {}
-
-fn alignedCounterValuesLength(counter_values_buffer_size: u32) usize {
-    const raw: usize = counter_values_buffer_size;
-    const alignment: usize = 128;
-    return std.mem.alignForward(usize, raw, alignment);
-}
-
-fn counterMetadataLength(counter_values_buffer_size: u32) usize {
-    const slots = @max(@as(usize, 1), @as(usize, counter_values_buffer_size) / 128);
-    return slots * 256;
-}
 
 fn commandQueueCapacity() usize {
     return 128;

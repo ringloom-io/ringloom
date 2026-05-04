@@ -14,6 +14,7 @@ const RingBuffer = ring_buffer.RingBuffer;
 const ServiceMetadataFile = memory.ServiceMetadataFile;
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const Clock = platform.Clock;
+const ServiceCounters = ringloom_common.monitoring.ServiceCounters;
 
 /// Template IDs for control messages (matches the encoding module).
 pub const TemplateId = struct {
@@ -34,6 +35,7 @@ pub const ControlAgent = struct {
     service_meta: *ServiceMetadataFile,
     broker_meta: *BrokerMetadataFile,
     service_registry: *ServiceClientRegistry,
+    service_counters: ?*ServiceCounters,
     last_heartbeat_ns: i64,
 
     const Self = @This();
@@ -42,6 +44,7 @@ pub const ControlAgent = struct {
         service_meta: *ServiceMetadataFile,
         broker_meta: *BrokerMetadataFile,
         service_registry: *ServiceClientRegistry,
+        service_counters: ?*ServiceCounters,
     ) !Self {
         return .{
             .control_rb = try RingBuffer.init(
@@ -53,6 +56,7 @@ pub const ControlAgent = struct {
             .service_meta = service_meta,
             .broker_meta = broker_meta,
             .service_registry = service_registry,
+            .service_counters = service_counters,
             .last_heartbeat_ns = Clock.monotonicNanos(),
         };
     }
@@ -62,7 +66,11 @@ pub const ControlAgent = struct {
         var work_count: u32 = 0;
 
         // 1. Poll control ring buffer for broker messages.
-        work_count += self.pollControlMessages(constants.control_read_limit);
+        const control_messages = self.pollControlMessages(constants.control_read_limit);
+        if (control_messages > 0) {
+            self.addCounter(.control_messages_received, control_messages);
+        }
+        work_count += control_messages;
 
         // 2. Write heartbeat if interval has elapsed.
         if (self.writeHeartbeatIfDue()) {
@@ -76,6 +84,9 @@ pub const ControlAgent = struct {
     /// service heartbeat fresh. Returns only the number of messages processed.
     pub fn poll(self: *Self, limit: u32) u32 {
         const messages_read = self.pollControlMessages(limit);
+        if (messages_read > 0) {
+            self.addCounter(.control_messages_received, messages_read);
+        }
         _ = self.writeHeartbeatIfDue();
         return messages_read;
     }
@@ -140,7 +151,16 @@ pub const ControlAgent = struct {
         if (!self.shouldWriteHeartbeat()) return false;
         self.service_meta.storeHeartbeat(Clock.epochMillis());
         self.last_heartbeat_ns = Clock.monotonicNanos();
+        self.incrementCounter(.heartbeats_sent);
         return true;
+    }
+
+    fn incrementCounter(self: *const Self, counter: ringloom_common.monitoring.ServiceCounter) void {
+        if (self.service_counters) |counters| counters.increment(counter);
+    }
+
+    fn addCounter(self: *const Self, counter: ringloom_common.monitoring.ServiceCounter, delta: u32) void {
+        if (self.service_counters) |counters| counters.add(counter, @intCast(delta));
     }
 };
 

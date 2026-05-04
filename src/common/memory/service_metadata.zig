@@ -9,6 +9,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const platform = @import("../platform.zig");
+const counters = @import("../concurrent/counters.zig");
 
 /// Overlay for the fixed fields of the service metadata header.
 pub const ServiceMetadataHeader = extern struct {
@@ -66,6 +67,9 @@ pub const ServiceMetadataFile = struct {
 
     control_buffer: []u8,
     messages_buffer: []u8,
+    counter_values_buffer: []align(constants.cache_line_pad) u8,
+    counter_metadata_buffer: []u8,
+    error_log_buffer: []u8,
     fd: std.posix.fd_t,
 
     const Self = @This();
@@ -82,6 +86,9 @@ pub const ServiceMetadataFile = struct {
         heartbeat_timeout_ms: i32 = @intCast(constants.default_svc_heartbeat_timeout_ms),
         control_buffer_length: usize = constants.default_control_buffer_length,
         messages_buffer_length: usize = constants.default_messages_buffer_length,
+        counter_values_buffer_length: usize = constants.default_counter_values_buffer_length,
+        counter_metadata_buffer_length: usize = 0,
+        error_log_buffer_length: usize = constants.default_error_log_buffer_length,
     };
 
     /// Create and initialize a new service metadata file.
@@ -101,12 +108,21 @@ pub const ServiceMetadataFile = struct {
         const rb_trailer = constants.ring_buffer_trailer_length;
         const ctrl_region = opts.control_buffer_length + rb_trailer;
         const msgs_region = opts.messages_buffer_length + rb_trailer;
+        const counter_values_len = alignedCounterValuesLength(opts.counter_values_buffer_length);
+        const counter_metadata_len = counterMetadataLength(
+            opts.counter_values_buffer_length,
+            opts.counter_metadata_buffer_length,
+        );
+        const error_log_len = constants.alignUp(opts.error_log_buffer_length, @sizeOf(i64));
+        const base_size = constants.metadata_header_length +
+            blocking_extra +
+            ctrl_region +
+            msgs_region;
+        const monitoring_tail_offset = constants.alignUp(base_size, constants.cache_line_pad);
+        const monitoring_tail_len = counter_values_len + counter_metadata_len + error_log_len;
 
         const total_size = constants.alignUp(
-            constants.metadata_header_length +
-                blocking_extra +
-                ctrl_region +
-                msgs_region,
+            monitoring_tail_offset + monitoring_tail_len,
             constants.page_size,
         );
 
@@ -132,6 +148,9 @@ pub const ServiceMetadataFile = struct {
         @memset(mapped, 0);
 
         const buffers_offset = constants.metadata_header_length + blocking_extra;
+        const counter_values_offset = monitoring_tail_offset;
+        const counter_metadata_offset = counter_values_offset + counter_values_len;
+        const error_log_offset = counter_metadata_offset + counter_metadata_len;
 
         var self = ServiceMetadataFile{
             .mapped_bytes = mapped,
@@ -142,6 +161,9 @@ pub const ServiceMetadataFile = struct {
                 null,
             .control_buffer = mapped[buffers_offset..][0..ctrl_region],
             .messages_buffer = mapped[buffers_offset + ctrl_region ..][0..msgs_region],
+            .counter_values_buffer = @alignCast(mapped[counter_values_offset..][0..counter_values_len]),
+            .counter_metadata_buffer = mapped[counter_metadata_offset..][0..counter_metadata_len],
+            .error_log_buffer = mapped[error_log_offset..][0..error_log_len],
             .fd = fd,
         };
 
@@ -154,6 +176,12 @@ pub const ServiceMetadataFile = struct {
         self.header.pid = platform.getPid();
         self.header.start_timestamp_ms = platform.Clock.epochMillis();
         self.header.heartbeat_timeout_ms = opts.heartbeat_timeout_ms;
+        self.storeMetadataMonitoringVersion(constants.metadata_monitoring_version);
+        self.storeCounterValuesBufferLength(@intCast(counter_values_len));
+        self.storeCounterMetadataBufferLength(@intCast(counter_metadata_len));
+        self.storeErrorLogBufferLength(@intCast(error_log_len));
+        self.storeMonitoringTailOffset(@intCast(monitoring_tail_offset));
+        self.storeMonitoringTailLength(@intCast(monitoring_tail_len));
 
         // Write initial heartbeat.
         self.storeHeartbeat(platform.Clock.epochMillis());
@@ -230,12 +258,31 @@ pub const ServiceMetadataFile = struct {
         const ctrl_region = ctrl_len + trailer;
         const msgs_region = msgs_len + trailer;
 
+        const base_size = buffers_offset + ctrl_region + msgs_region;
+        const counter_values_len: usize = @intCast(loadAt(i32, mapped, constants.counter_values_length_offset));
+        const counter_metadata_len: usize = @intCast(loadAt(i32, mapped, constants.counter_metadata_length_offset));
+        const error_log_len: usize = @intCast(loadAt(i32, mapped, constants.error_log_length_offset));
+        const monitoring_tail_offset: usize = @intCast(loadAt(i64, mapped, constants.monitoring_tail_offset_offset));
+        const monitoring_tail_len: usize = @intCast(loadAt(i64, mapped, constants.monitoring_tail_length_offset));
+        if (monitoring_tail_len != counter_values_len + counter_metadata_len + error_log_len)
+            return error.FileSizeMismatch;
+        if (monitoring_tail_offset < base_size)
+            return error.FileSizeMismatch;
+        if (counter_values_len % counters.counter_value_length != 0)
+            return error.FileSizeMismatch;
+        if (counter_metadata_len % counters.counter_metadata_length != 0)
+            return error.FileSizeMismatch;
+
         const expected = constants.alignUp(
-            buffers_offset + ctrl_region + msgs_region,
+            monitoring_tail_offset + monitoring_tail_len,
             constants.page_size,
         );
         if (file_size < expected)
             return error.FileSizeMismatch;
+
+        const counter_values_offset = monitoring_tail_offset;
+        const counter_metadata_offset = counter_values_offset + counter_values_len;
+        const error_log_offset = counter_metadata_offset + counter_metadata_len;
 
         return ServiceMetadataFile{
             .mapped_bytes = mapped,
@@ -246,6 +293,9 @@ pub const ServiceMetadataFile = struct {
                 null,
             .control_buffer = mapped[buffers_offset..][0..ctrl_region],
             .messages_buffer = mapped[buffers_offset + ctrl_region ..][0..msgs_region],
+            .counter_values_buffer = @alignCast(mapped[counter_values_offset..][0..counter_values_len]),
+            .counter_metadata_buffer = mapped[counter_metadata_offset..][0..counter_metadata_len],
+            .error_log_buffer = mapped[error_log_offset..][0..error_log_len],
             .fd = fd,
         };
     }
@@ -260,6 +310,54 @@ pub const ServiceMetadataFile = struct {
     pub fn storeHeartbeat(self: *ServiceMetadataFile, time_ms: i64) void {
         const ptr = self.heartbeatPtr();
         @atomicStore(i64, ptr, time_ms, .release);
+    }
+
+    pub fn loadMetadataMonitoringVersion(self: *const ServiceMetadataFile) i32 {
+        return @atomicLoad(i32, self.metadataMonitoringVersionPtr(), .acquire);
+    }
+
+    pub fn storeMetadataMonitoringVersion(self: *ServiceMetadataFile, value: i32) void {
+        @atomicStore(i32, self.metadataMonitoringVersionPtr(), value, .release);
+    }
+
+    pub fn loadCounterValuesBufferLength(self: *const ServiceMetadataFile) i32 {
+        return @atomicLoad(i32, self.counterValuesBufferLengthPtr(), .acquire);
+    }
+
+    pub fn storeCounterValuesBufferLength(self: *ServiceMetadataFile, value: i32) void {
+        @atomicStore(i32, self.counterValuesBufferLengthPtr(), value, .release);
+    }
+
+    pub fn loadCounterMetadataBufferLength(self: *const ServiceMetadataFile) i32 {
+        return @atomicLoad(i32, self.counterMetadataBufferLengthPtr(), .acquire);
+    }
+
+    pub fn storeCounterMetadataBufferLength(self: *ServiceMetadataFile, value: i32) void {
+        @atomicStore(i32, self.counterMetadataBufferLengthPtr(), value, .release);
+    }
+
+    pub fn loadErrorLogBufferLength(self: *const ServiceMetadataFile) i32 {
+        return @atomicLoad(i32, self.errorLogBufferLengthPtr(), .acquire);
+    }
+
+    pub fn storeErrorLogBufferLength(self: *ServiceMetadataFile, value: i32) void {
+        @atomicStore(i32, self.errorLogBufferLengthPtr(), value, .release);
+    }
+
+    pub fn loadMonitoringTailOffset(self: *const ServiceMetadataFile) i64 {
+        return @atomicLoad(i64, self.monitoringTailOffsetPtr(), .acquire);
+    }
+
+    pub fn storeMonitoringTailOffset(self: *ServiceMetadataFile, value: i64) void {
+        @atomicStore(i64, self.monitoringTailOffsetPtr(), value, .release);
+    }
+
+    pub fn loadMonitoringTailLength(self: *const ServiceMetadataFile) i64 {
+        return @atomicLoad(i64, self.monitoringTailLengthPtr(), .acquire);
+    }
+
+    pub fn storeMonitoringTailLength(self: *ServiceMetadataFile, value: i64) void {
+        @atomicStore(i64, self.monitoringTailLengthPtr(), value, .release);
     }
 
     /// Returns true if this service's process is still alive.
@@ -282,6 +380,18 @@ pub const ServiceMetadataFile = struct {
         return self.messages_buffer;
     }
 
+    pub fn getCounterValuesBuffer(self: *const ServiceMetadataFile) []align(constants.cache_line_pad) u8 {
+        return self.counter_values_buffer;
+    }
+
+    pub fn getCounterMetadataBuffer(self: *const ServiceMetadataFile) []u8 {
+        return self.counter_metadata_buffer;
+    }
+
+    pub fn getErrorLogBuffer(self: *const ServiceMetadataFile) []u8 {
+        return self.error_log_buffer;
+    }
+
     pub fn getBlockingTrailer(self: *const ServiceMetadataFile) ?*BlockingTrailer {
         return self.blocking_trailer;
     }
@@ -299,6 +409,51 @@ pub const ServiceMetadataFile = struct {
     fn heartbeatPtr(self: *const ServiceMetadataFile) *volatile i64 {
         const base: [*]u8 = self.mapped_bytes.ptr;
         return @ptrCast(@alignCast(base + constants.heartbeat_offset_within_header));
+    }
+
+    fn metadataMonitoringVersionPtr(self: *const ServiceMetadataFile) *volatile i32 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.metadata_monitoring_version_offset));
+    }
+
+    fn counterValuesBufferLengthPtr(self: *const ServiceMetadataFile) *volatile i32 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.counter_values_length_offset));
+    }
+
+    fn counterMetadataBufferLengthPtr(self: *const ServiceMetadataFile) *volatile i32 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.counter_metadata_length_offset));
+    }
+
+    fn errorLogBufferLengthPtr(self: *const ServiceMetadataFile) *volatile i32 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.error_log_length_offset));
+    }
+
+    fn monitoringTailOffsetPtr(self: *const ServiceMetadataFile) *volatile i64 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.monitoring_tail_offset_offset));
+    }
+
+    fn monitoringTailLengthPtr(self: *const ServiceMetadataFile) *volatile i64 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.monitoring_tail_length_offset));
+    }
+
+    fn alignedCounterValuesLength(counter_values_buffer_length: usize) usize {
+        return constants.alignUp(counter_values_buffer_length, constants.cache_line_pad);
+    }
+
+    fn counterMetadataLength(counter_values_buffer_length: usize, explicit_length: usize) usize {
+        if (explicit_length > 0) return constants.alignUp(explicit_length, counters.counter_metadata_length);
+        const slots = @max(@as(usize, 1), alignedCounterValuesLength(counter_values_buffer_length) / counters.counter_value_length);
+        return slots * counters.counter_metadata_length;
+    }
+
+    fn loadAt(comptime T: type, mapped: []align(constants.page_size) u8, offset: usize) T {
+        const ptr: *const volatile T = @ptrCast(@alignCast(mapped.ptr + offset));
+        return @atomicLoad(T, ptr, .acquire);
     }
 
     fn buildServicePath(

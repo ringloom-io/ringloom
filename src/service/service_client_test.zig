@@ -13,6 +13,7 @@ test "round-robin load balancer cycles through instances" {
         null, // broker_meta not needed for this test
         1,
         100,
+        null,
     );
     defer client.deinit();
 
@@ -44,6 +45,7 @@ test "round-robin returns null for empty instance list" {
         null,
         1,
         100,
+        null,
     );
     defer client.deinit();
 
@@ -60,6 +62,7 @@ test "ServiceClient updateLeader sets correct instance" {
         null,
         1,
         100,
+        null,
     );
     defer client.deinit();
 
@@ -84,6 +87,7 @@ test "ServiceClient removeInstance removes correct instance" {
         null,
         1,
         100,
+        null,
     );
     defer client.deinit();
 
@@ -107,6 +111,7 @@ test "ServiceClient copyTargetInstances returns node and service ids with leader
         null,
         1,
         100,
+        null,
     );
     defer client.deinit();
 
@@ -150,6 +155,7 @@ test "ServiceClient tracks duplicate service ids on different nodes" {
         null,
         1,
         100,
+        null,
     );
     defer client.deinit();
 

@@ -15,6 +15,7 @@ const BrokerMetadataHeader = memory.BrokerMetadataHeader;
 const ServiceMetadataFile = memory.ServiceMetadataFile;
 const ServiceScanner = memory.ServiceScanner;
 const constants = memory.constants;
+const metadata_reader = ringloom_common.monitoring.metadata_reader;
 
 const Args = struct {
     storage_path: []const u8 = constants.default_storage_path,
@@ -175,6 +176,7 @@ fn printBrokerFromStorage(
         broker.loadPeerSendCountersLength(),
         now_ms,
     );
+    try printBrokerDetails(stdout, &broker, now_ms);
 }
 
 fn printBrokerPath(io: std.Io, stdout: *std.Io.Writer, path: []const u8) !void {
@@ -301,6 +303,103 @@ fn printServiceFromStorage(
             parsed.name,
         },
     );
+    try printServiceDetails(stdout, &service, parsed.name, now_ms);
+}
+
+fn printBrokerDetails(stdout: *std.Io.Writer, broker: *BrokerMetadataFile, now_ms: i64) !void {
+    try stdout.print(
+        "    monitoring_version={d} counter_values_bytes={d} counter_metadata_bytes={d} error_log_bytes={d} tail_offset={d} tail_bytes={d}\n",
+        .{
+            broker.loadMetadataMonitoringVersion(),
+            broker.loadCounterValuesBufferLength(),
+            broker.loadCounterMetadataBufferLength(),
+            broker.loadErrorLogBufferLength(),
+            broker.loadMonitoringTailOffset(),
+            broker.loadMonitoringTailLength(),
+        },
+    );
+    try printRing(stdout, "control", broker.getControlBuffer(), @intCast(broker.header.control_buffer_length), now_ms);
+    try printRing(stdout, "send", broker.getSendBuffer(), @intCast(broker.header.messages_buffer_length), now_ms);
+    try printCounters(stdout, broker.getCounterValuesBuffer(), broker.getCounterMetadataBuffer());
+    try printErrors(stdout, broker.getErrorLogBuffer());
+}
+
+fn printServiceDetails(stdout: *std.Io.Writer, service: *ServiceMetadataFile, service_name: []const u8, now_ms: i64) !void {
+    _ = service_name;
+    try stdout.print(
+        "    monitoring_version={d} counter_values_bytes={d} counter_metadata_bytes={d} error_log_bytes={d} tail_offset={d} tail_bytes={d}\n",
+        .{
+            service.loadMetadataMonitoringVersion(),
+            service.loadCounterValuesBufferLength(),
+            service.loadCounterMetadataBufferLength(),
+            service.loadErrorLogBufferLength(),
+            service.loadMonitoringTailOffset(),
+            service.loadMonitoringTailLength(),
+        },
+    );
+    try printRing(stdout, "control", service.getControlBuffer(), @intCast(service.header.control_buffer_length), now_ms);
+    try printRing(stdout, "messages", service.getMessagesBuffer(), @intCast(service.header.messages_buffer_length), now_ms);
+    try printCounters(stdout, service.getCounterValuesBuffer(), service.getCounterMetadataBuffer());
+    try printErrors(stdout, service.getErrorLogBuffer());
+}
+
+fn printRing(stdout: *std.Io.Writer, name: []const u8, buffer: []u8, capacity: usize, now_ms: i64) !void {
+    const stats = metadata_reader.deriveRingStats(buffer, capacity);
+    try stdout.print(
+        "    ring={s} capacity={d} used={d} free={d} usage={d:.3} producer={d} consumer={d} consumer_heartbeat_age_ms={d}\n",
+        .{
+            name,
+            stats.capacity,
+            stats.used_bytes,
+            stats.free_bytes,
+            stats.usageRatio(),
+            stats.producer_position,
+            stats.consumer_position,
+            ageMillis(now_ms, stats.consumer_heartbeat_ms),
+        },
+    );
+}
+
+fn printCounters(
+    stdout: *std.Io.Writer,
+    values: []align(constants.cache_line_pad) u8,
+    metadata: []u8,
+) !void {
+    const capacity = metadata_reader.counterCapacity(values, metadata);
+    var printed = false;
+    for (0..capacity) |id| {
+        const sample = metadata_reader.readCounter(values, metadata, id) orelse continue;
+        if (!printed) {
+            try stdout.print("    counters:\n", .{});
+            printed = true;
+        }
+        try stdout.print("      [{d}] type={d} {s}={d}\n", .{ sample.id, sample.type_id, sample.label, sample.value });
+    }
+    if (!printed) {
+        try stdout.print("    counters: (none allocated)\n", .{});
+    }
+}
+
+fn printErrors(stdout: *std.Io.Writer, error_log: []u8) !void {
+    var offset: usize = 0;
+    var count: usize = 0;
+    while (metadata_reader.readErrorEntry(error_log, offset)) |result| {
+        if (count == 0) try stdout.print("    errors:\n", .{});
+        try stdout.print(
+            "      [{d}x] first={d} last={d} {s}\n",
+            .{
+                result.entry.observation_count,
+                result.entry.first_observation_timestamp,
+                result.entry.last_observation_timestamp,
+                result.entry.description,
+            },
+        );
+        count += 1;
+        offset = result.next_offset;
+    }
+    if (count == 0) {
+        try stdout.print("    errors: (none)\n", .{});
+    }
 }
 
 fn parseBrokerNodeId(file_name: []const u8) ?i16 {

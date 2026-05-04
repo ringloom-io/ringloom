@@ -19,4 +19,5 @@ comptime {
     _ = @import("leader_election_test.zig");
     _ = @import("graceful_unregister_test.zig");
     _ = @import("backpressure_test.zig");
+    _ = @import("observability_test.zig");
 }

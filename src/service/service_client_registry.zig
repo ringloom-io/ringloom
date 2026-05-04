@@ -12,6 +12,7 @@ const control_encoding = ringloom_common.message.control_encoding;
 
 const BuffersProvider = memory.BuffersProvider;
 const BrokerMetadataFile = memory.BrokerMetadataFile;
+const ServiceCounters = ringloom_common.monitoring.ServiceCounters;
 
 pub const ServiceClientRegistry = struct {
     clients: std.StringHashMap(*ServiceClient),
@@ -21,6 +22,7 @@ pub const ServiceClientRegistry = struct {
     local_service_id: i32,
     storage_path: []const u8,
     group: []const u8,
+    service_counters: ?*ServiceCounters,
 
     const Self = @This();
 
@@ -31,6 +33,7 @@ pub const ServiceClientRegistry = struct {
         local_service_id: i32,
         storage_path: []const u8,
         group: []const u8,
+        service_counters: ?*ServiceCounters,
     ) Self {
         return .{
             .clients = std.StringHashMap(*ServiceClient).init(allocator),
@@ -40,6 +43,7 @@ pub const ServiceClientRegistry = struct {
             .local_service_id = local_service_id,
             .storage_path = storage_path,
             .group = group,
+            .service_counters = service_counters,
         };
     }
 
@@ -61,6 +65,7 @@ pub const ServiceClientRegistry = struct {
             self.broker_meta,
             self.local_node_id,
             self.local_service_id,
+            self.service_counters,
         );
         client.owns_service_name = true;
 
