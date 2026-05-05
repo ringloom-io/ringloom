@@ -140,9 +140,14 @@ or startup fails immediately with a descriptive error.
 | `broker.io.uring.single.issuer` | `bool` | `true` | No | Enable SINGLE_ISSUER setup when supported |
 | `broker.io.uring.coop.taskrun` | `bool` | `true` | No | Enable COOP_TASKRUN setup when supported |
 | `broker.io.uring.registered.buffers` | `u32` | `64` | No | Number of registered io_uring buffers (Linux only) |
+| `broker.io.uring.sender.enabled` | `bool` | `false` | No | Enable optional sender `writev` io_uring path |
+| `broker.io.uring.sender.cqe.batch.size` | `u32` | `64` | No | Sender io_uring CQEs copied per poll |
 | `broker.io.uring.receiver.enabled` | `bool` | `false` | No | Enable optional receiver multishot accept/recv path |
+| `broker.io.uring.receiver.cqe.batch.size` | `u32` | `256` | No | Receiver io_uring CQEs copied per poll |
 | `broker.io.uring.recv.buffer.size` | `u32` | `16384` | No | Receiver provided-buffer size |
 | `broker.io.uring.recv.buffer.count` | `u32` | `256` | No | Receiver provided-buffer count |
+| `broker.sender.writev.batch.size` | `u32` | `64` | No | Maximum frames per synchronous sender `writev` syscall |
+| `broker.sender.write.budget.per.peer` | `u32` | `256` | No | Maximum sender frames flushed per peer per duty cycle |
 
 ### 2.2 BrokerConfig Struct
 

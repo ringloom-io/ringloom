@@ -205,13 +205,24 @@ pub const BrokerApplication = struct {
             .fc_normal_refresh_interval_ms = self.config.fc_normal_refresh_interval_ms,
         });
 
-        self.sender_loop = try SenderEventLoop.initWithGroup(
+        self.sender_loop = try SenderEventLoop.initWithGroupAndOptions(
             &self.send_ring_buffer.?,
             &self.counters.?,
             self.config.node_id,
             self.allocator,
             self.config.group_name,
             self.config.benchmark_latency_tracing_enabled,
+            .{
+                .io_uring_enabled = self.config.io_uring_sender_enabled,
+                .io_uring_queue_depth = @intCast(self.config.io_uring_queue_depth),
+                .io_uring_cq_depth = self.config.io_uring_cq_depth,
+                .io_uring_sqpoll = self.config.io_uring_sqpoll,
+                .io_uring_single_issuer = self.config.io_uring_single_issuer,
+                .io_uring_coop_taskrun = self.config.io_uring_coop_taskrun,
+                .io_uring_cqe_batch_size = self.config.io_uring_sender_cqe_batch_size,
+                .writev_batch_size = self.config.sender_writev_batch_size,
+                .write_budget_per_peer = self.config.sender_write_budget_per_peer,
+            },
         );
         if (self.config.fc_peer_send_counters_enabled) {
             self.sender_loop.?.setPeerSendCountersRegion(
@@ -238,6 +249,7 @@ pub const BrokerApplication = struct {
                 .sqpoll = self.config.io_uring_sqpoll,
                 .single_issuer = self.config.io_uring_single_issuer,
                 .coop_taskrun = self.config.io_uring_coop_taskrun,
+                .cqe_batch_size = self.config.io_uring_receiver_cqe_batch_size,
                 .recv_buffer_size = self.config.io_uring_recv_buffer_size,
                 .recv_buffer_count = @intCast(self.config.io_uring_recv_buffer_count),
             },

@@ -77,7 +77,7 @@ pub const PeerSender = struct {
     /// Lifetime bytes dropped before reaching this peer's socket.
     total_bytes_dropped: u64,
 
-    pub const max_send_batch = 64;
+    pub const max_send_batch = 1024;
 
     const Self = @This();
 

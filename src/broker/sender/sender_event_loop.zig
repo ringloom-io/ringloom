@@ -30,6 +30,7 @@ const PeerSender = @import("peer_sender.zig").PeerSender;
 const ConnectionState = @import("peer_sender.zig").ConnectionState;
 const SendBufferPool = @import("send_buffer_pool.zig").SendBufferPool;
 const SenderCommand = @import("sender_command.zig").SenderCommand;
+const transport = @import("../transport.zig");
 
 const linux = std.os.linux;
 const posix = std.posix;
@@ -51,6 +52,16 @@ pub const SenderCounters = struct {
     peers_disconnected: usize = 0,
     peers_timed_out: usize = 0,
     reconnect_attempts: usize = 0,
+    sync_writev_calls: usize = 0,
+    sync_writev_frames: usize = 0,
+    sync_writev_bytes: usize = 0,
+    iouring_sender_enabled: usize = 0,
+    iouring_sender_fallbacks: usize = 0,
+    iouring_sender_errors: usize = 0,
+    iouring_sender_sqes: usize = 0,
+    iouring_sender_cqes: usize = 0,
+    iouring_sender_writev_frames: usize = 0,
+    iouring_sender_writev_bytes: usize = 0,
 
     pub fn allocate(counters: *CountersManager) SenderCounters {
         return .{
@@ -67,8 +78,30 @@ pub const SenderCounters = struct {
             .peers_disconnected = counters.allocate(1, "peers_disconnected") orelse 0,
             .peers_timed_out = counters.allocate(1, "peers_timed_out") orelse 0,
             .reconnect_attempts = counters.allocate(1, "reconnect_attempts") orelse 0,
+            .sync_writev_calls = counters.allocate(1, "sender_sync_writev_calls") orelse 0,
+            .sync_writev_frames = counters.allocate(1, "sender_sync_writev_frames") orelse 0,
+            .sync_writev_bytes = counters.allocate(1, "sender_sync_writev_bytes") orelse 0,
+            .iouring_sender_enabled = counters.allocate(1, "sender_iouring_enabled") orelse 0,
+            .iouring_sender_fallbacks = counters.allocate(1, "sender_iouring_fallbacks") orelse 0,
+            .iouring_sender_errors = counters.allocate(1, "sender_iouring_errors") orelse 0,
+            .iouring_sender_sqes = counters.allocate(1, "sender_iouring_sqes") orelse 0,
+            .iouring_sender_cqes = counters.allocate(1, "sender_iouring_cqes") orelse 0,
+            .iouring_sender_writev_frames = counters.allocate(1, "sender_iouring_writev_frames") orelse 0,
+            .iouring_sender_writev_bytes = counters.allocate(1, "sender_iouring_writev_bytes") orelse 0,
         };
     }
+};
+
+pub const SenderOptions = struct {
+    io_uring_enabled: bool = false,
+    io_uring_queue_depth: u16 = 256,
+    io_uring_cq_depth: u32 = 1024,
+    io_uring_sqpoll: bool = false,
+    io_uring_single_issuer: bool = true,
+    io_uring_coop_taskrun: bool = true,
+    io_uring_cqe_batch_size: u32 = 64,
+    writev_batch_size: u32 = 64,
+    write_budget_per_peer: u32 = constants.write_budget_per_peer,
 };
 
 // ── Peer Map ──────────────────────────────────────────────────────────
@@ -164,12 +197,13 @@ pub const SenderEventLoop = struct {
 
     /// Enable benchmark-only payload timestamp tracing. Disabled in production.
     benchmark_latency_tracing_enabled: bool,
+    options: SenderOptions,
 
     /// Pre-allocated iovec array for writev batching (sync fallback path).
     writev_iovecs: [max_writev_batch]posix.iovec_const = undefined,
 
     /// io_uring ring for batched async TCP sends (Linux only).
-    io_ring: ?linux.IoUring,
+    io_ring: ?transport.IoUring,
 
     /// Optional shared-memory per-peer counters published for ServiceClients.
     peer_send_counters: ?PeerSendCountersRegion,
@@ -177,8 +211,8 @@ pub const SenderEventLoop = struct {
     /// CQE harvest buffer.
     cqe_buf: [max_cqe_batch]linux.io_uring_cqe = undefined,
 
-    const max_writev_batch = 64;
-    const max_cqe_batch = 64;
+    const max_writev_batch = 1024;
+    const max_cqe_batch = 256;
 
     const Self = @This();
 
@@ -199,13 +233,27 @@ pub const SenderEventLoop = struct {
         group_name: []const u8,
         benchmark_latency_tracing_enabled: bool,
     ) !Self {
-        // io_uring sender is available for multi-peer scenarios where
-        // batching many writevs into one io_uring_enter() reduces syscalls.
-        // For the common 1-peer case, sync writev is faster (no SQE/CQE overhead).
-        // Disabled by default; enable via broker config for high fan-out topologies.
-        const io_ring: ?linux.IoUring = null;
+        return initWithGroupAndOptions(
+            send_ring_buffer,
+            counters,
+            local_node_id,
+            allocator,
+            group_name,
+            benchmark_latency_tracing_enabled,
+            .{},
+        );
+    }
 
-        return .{
+    pub fn initWithGroupAndOptions(
+        send_ring_buffer: *RingBuffer,
+        counters: *CountersManager,
+        local_node_id: u8,
+        allocator: std.mem.Allocator,
+        group_name: []const u8,
+        benchmark_latency_tracing_enabled: bool,
+        options: SenderOptions,
+    ) !Self {
+        var self = Self{
             .send_ring_buffer = send_ring_buffer,
             .peers = PeerMap.init(),
             .counters = counters,
@@ -217,9 +265,19 @@ pub const SenderEventLoop = struct {
             .pending_send_count = 0,
             .group_name_hash = HandshakeFrame.hashGroupName(group_name),
             .benchmark_latency_tracing_enabled = benchmark_latency_tracing_enabled,
-            .io_ring = io_ring,
+            .options = options,
+            .io_ring = null,
             .peer_send_counters = null,
         };
+
+        if (options.io_uring_enabled) {
+            self.enableIoUringSender() catch |err| {
+                self.counters.increment(self.counter_ids.iouring_sender_fallbacks);
+                logIoUringSenderFallback(err);
+            };
+        }
+
+        return self;
     }
 
     pub fn setPeerSendCountersRegion(self: *Self, region: ?PeerSendCountersRegion) void {
@@ -236,6 +294,40 @@ pub const SenderEventLoop = struct {
             peer.deinit(self.allocator);
             self.allocator.destroy(peer);
         }
+    }
+
+    fn enableIoUringSender(self: *Self) !void {
+        if (comptime builtin.os.tag != .linux) return error.UnsupportedPlatform;
+
+        var ring = try transport.IoUring.initWithConfig(.{
+            .queue_depth = self.options.io_uring_queue_depth,
+            .cq_depth = self.options.io_uring_cq_depth,
+            .sqpoll = self.options.io_uring_sqpoll,
+            .single_issuer = self.options.io_uring_single_issuer,
+            .coop_taskrun = self.options.io_uring_coop_taskrun,
+        });
+        errdefer ring.deinit();
+
+        if (!ring.capabilities.writev_supported) {
+            return error.IoUringWritevUnsupported;
+        }
+
+        self.io_ring = ring;
+        self.counters.increment(self.counter_ids.iouring_sender_enabled);
+    }
+
+    fn disableIoUringSender(self: *Self, err: anyerror) void {
+        self.counters.increment(self.counter_ids.iouring_sender_fallbacks);
+        logIoUringSenderFallback(err);
+        if (self.io_ring) |*ring| {
+            ring.deinit();
+        }
+        self.io_ring = null;
+        self.clearIoUringPendingState();
+    }
+
+    fn logIoUringSenderFallback(err: anyerror) void {
+        log.warn("sender io_uring disabled; falling back to synchronous writev: {}", .{err});
     }
 
     // ── Duty Cycle ────────────────────────────────────────────────────
@@ -466,7 +558,10 @@ pub const SenderEventLoop = struct {
             if (peer.write_queue.isEmpty()) continue;
 
             // Fill iovecs from queued frames (no in-flight since io_pending guards).
-            const batch_limit = @min(@as(u32, PeerSender.max_send_batch), constants.write_budget_per_peer);
+            const batch_limit = @min(@min(
+                self.options.writev_batch_size,
+                @as(u32, PeerSender.max_send_batch),
+            ), self.options.write_budget_per_peer);
             const n = peer.write_queue.fillIovecsFrom(
                 &peer.send_iovecs,
                 0,
@@ -483,8 +578,9 @@ pub const SenderEventLoop = struct {
             const user_data = peer.encodeUserData(@intCast(n));
 
             // Submit writev SQE.
-            _ = ring.writev(user_data, peer.socket_fd, peer.send_iovecs[0..n], 0) catch {
+            _ = ring.ring.writev(user_data, peer.socket_fd, peer.send_iovecs[0..n], 0) catch {
                 // SQ full — skip this peer, will retry next cycle.
+                self.counters.increment(self.counter_ids.iouring_sender_errors);
                 continue;
             };
 
@@ -492,11 +588,17 @@ pub const SenderEventLoop = struct {
             peer.in_flight_frames = n;
             peer.in_flight_bytes = total_bytes;
             sqe_count += 1;
+            self.counters.increment(self.counter_ids.iouring_sender_sqes);
+            self.counters.add(self.counter_ids.iouring_sender_writev_frames, @intCast(n));
+            self.counters.add(self.counter_ids.iouring_sender_writev_bytes, @intCast(total_bytes));
         }
 
         // Single syscall to submit all prepared SQEs.
         if (sqe_count > 0) {
-            _ = ring.submit() catch {};
+            _ = ring.ring.submit() catch {
+                self.counters.increment(self.counter_ids.iouring_sender_errors);
+                self.disableIoUringSender(error.IoUringSubmitFailed);
+            };
         }
 
         return 0; // Actual completion counting happens in harvestSendCompletions.
@@ -508,7 +610,12 @@ pub const SenderEventLoop = struct {
         var ring = &(self.io_ring.?);
         var work_count: u32 = 0;
 
-        const count = ring.copy_cqes(&self.cqe_buf, 0) catch 0;
+        const limit = @min(self.options.io_uring_cqe_batch_size, @as(u32, @intCast(self.cqe_buf.len)));
+        const count = ring.ring.copy_cqes(self.cqe_buf[0..limit], 0) catch {
+            self.counters.increment(self.counter_ids.iouring_sender_errors);
+            return 0;
+        };
+        self.counters.add(self.counter_ids.iouring_sender_cqes, @intCast(count));
 
         for (self.cqe_buf[0..count]) |cqe| {
             const decoded = PeerSender.decodeUserData(cqe.user_data);
@@ -519,8 +626,15 @@ pub const SenderEventLoop = struct {
 
             peer.io_pending = false;
 
-            if (cqe.res <= 0) {
-                // Error or zero-byte send — disconnect.
+            if (cqe.res < 0) {
+                peer.in_flight_frames = 0;
+                peer.in_flight_bytes = 0;
+                self.counters.increment(self.counter_ids.iouring_sender_errors);
+                self.disableIoUringSender(error.IoUringWritevFailed);
+                return work_count;
+            }
+
+            if (cqe.res == 0) {
                 peer.in_flight_frames = 0;
                 peer.in_flight_bytes = 0;
                 self.disconnectPeer(peer);
@@ -553,9 +667,9 @@ pub const SenderEventLoop = struct {
                 peer.write_queue.dequeue();
             }
 
-            peer.in_flight_frames -|= frames_completed;
-            peer.in_flight_bytes -|= (written - bytes_remaining);
-            peer.total_bytes_sent += written - bytes_remaining;
+            peer.in_flight_frames = 0;
+            peer.in_flight_bytes = 0;
+            peer.total_bytes_sent += written;
 
             if (frames_completed > 0) {
                 peer.last_send_ns = Clock.monotonicNanos();
@@ -586,10 +700,10 @@ pub const SenderEventLoop = struct {
             if (peer.state != .connected) continue;
             if (peer.write_queue.isEmpty()) continue;
 
-            var budget: u32 = constants.write_budget_per_peer;
+            var budget: u32 = self.options.write_budget_per_peer;
 
             while (budget > 0) {
-                const batch_limit = @min(budget, max_writev_batch);
+                const batch_limit = @min(@min(budget, max_writev_batch), self.options.writev_batch_size);
                 const n = peer.write_queue.fillIovecs(&self.writev_iovecs, peer.partial_write_offset, batch_limit);
                 if (n == 0) break;
 
@@ -609,6 +723,9 @@ pub const SenderEventLoop = struct {
                         },
                     }
                 };
+                self.counters.increment(self.counter_ids.sync_writev_calls);
+                self.counters.add(self.counter_ids.sync_writev_frames, @intCast(n));
+                self.counters.add(self.counter_ids.sync_writev_bytes, @intCast(written));
                 peer.total_bytes_sent += written;
 
                 // Walk iovecs to determine which frames were fully written.
@@ -651,6 +768,15 @@ pub const SenderEventLoop = struct {
         }
 
         return work_count;
+    }
+
+    fn clearIoUringPendingState(self: *Self) void {
+        var peer_iter = self.peers.iterator();
+        while (peer_iter.next()) |peer| {
+            peer.io_pending = false;
+            peer.in_flight_frames = 0;
+            peer.in_flight_bytes = 0;
+        }
     }
 
     // ── Reconnections ─────────────────────────────────────────────────

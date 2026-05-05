@@ -63,6 +63,13 @@ pub const ReceiverCounters = struct {
     iouring_accept_cqes: usize = 0,
     iouring_recv_cqes: usize = 0,
     iouring_recv_bytes: usize = 0,
+    iouring_accept_rearms: usize = 0,
+    iouring_recv_rearms: usize = 0,
+    iouring_buffer_starvations: usize = 0,
+    iouring_fallback_unsupported: usize = 0,
+    iouring_fallback_init_errors: usize = 0,
+    iouring_fallback_runtime_errors: usize = 0,
+    iouring_recv_copied_bytes: usize = 0,
 
     pub fn allocate(counters: *CountersManager) ReceiverCounters {
         return .{
@@ -89,6 +96,13 @@ pub const ReceiverCounters = struct {
             .iouring_accept_cqes = counters.allocate(1, "recv_iouring_accept_cqes") orelse 0,
             .iouring_recv_cqes = counters.allocate(1, "recv_iouring_recv_cqes") orelse 0,
             .iouring_recv_bytes = counters.allocate(1, "recv_iouring_recv_bytes") orelse 0,
+            .iouring_accept_rearms = counters.allocate(1, "recv_iouring_accept_rearms") orelse 0,
+            .iouring_recv_rearms = counters.allocate(1, "recv_iouring_recv_rearms") orelse 0,
+            .iouring_buffer_starvations = counters.allocate(1, "recv_iouring_buffer_starvations") orelse 0,
+            .iouring_fallback_unsupported = counters.allocate(1, "recv_iouring_fallback_unsupported") orelse 0,
+            .iouring_fallback_init_errors = counters.allocate(1, "recv_iouring_fallback_init_errors") orelse 0,
+            .iouring_fallback_runtime_errors = counters.allocate(1, "recv_iouring_fallback_runtime_errors") orelse 0,
+            .iouring_recv_copied_bytes = counters.allocate(1, "recv_iouring_recv_copied_bytes") orelse 0,
         };
     }
 };
@@ -100,6 +114,7 @@ pub const ReceiverIoUringOptions = struct {
     sqpoll: bool = false,
     single_issuer: bool = true,
     coop_taskrun: bool = true,
+    cqe_batch_size: u32 = 256,
     recv_buffer_size: u32 = 16 * 1024,
     recv_buffer_count: u16 = 256,
 };
@@ -109,6 +124,11 @@ const ReceiverIoUringState = struct {
     recv_group: linux.IoUring.BufferGroup,
     accept_armed: bool = false,
     cqe_buf: [256]linux.io_uring_cqe = undefined,
+};
+
+const ReceiverIoUringFallbackPhase = enum {
+    init,
+    runtime,
 };
 
 const ReceiverIoOp = enum(u8) {
@@ -346,8 +366,7 @@ pub const ReceiverEventLoop = struct {
 
         if (self.iouring_options.enabled) {
             self.enableIoUringReceiver() catch |err| {
-                self.counters.increment(self.counter_ids.iouring_fallbacks);
-                logIoUringFallback(err);
+                self.recordIoUringFallback(err, .init);
             };
         }
     }
@@ -398,8 +417,7 @@ pub const ReceiverEventLoop = struct {
     }
 
     fn disableIoUringReceiver(self: *Self, err: anyerror) void {
-        self.counters.increment(self.counter_ids.iouring_fallbacks);
-        logIoUringFallback(err);
+        self.recordIoUringFallback(err, .runtime);
         if (self.iouring_state) |*state| {
             state.recv_group.deinit(self.allocator);
             state.ring.deinit();
@@ -415,6 +433,21 @@ pub const ReceiverEventLoop = struct {
         log.warn("receiver io_uring disabled; falling back to synchronous TCP: {}", .{err});
     }
 
+    fn recordIoUringFallback(self: *Self, err: anyerror, phase: ReceiverIoUringFallbackPhase) void {
+        self.counters.increment(self.counter_ids.iouring_fallbacks);
+        switch (err) {
+            error.UnsupportedPlatform,
+            error.IoUringTcpOpsUnsupported,
+            error.MultishotAcceptUnsupported,
+            => self.counters.increment(self.counter_ids.iouring_fallback_unsupported),
+            else => switch (phase) {
+                .init => self.counters.increment(self.counter_ids.iouring_fallback_init_errors),
+                .runtime => self.counters.increment(self.counter_ids.iouring_fallback_runtime_errors),
+            },
+        }
+        logIoUringFallback(err);
+    }
+
     fn armIoUringAccept(self: *Self) !void {
         var state = if (self.iouring_state) |*s| s else return error.IoUringNotActive;
         try state.ring.prepareAcceptMultishot(
@@ -424,6 +457,7 @@ pub const ReceiverEventLoop = struct {
         );
         _ = try state.ring.submit();
         state.accept_armed = true;
+        self.counters.increment(self.counter_ids.iouring_accept_rearms);
     }
 
     fn armIoUringRecv(self: *Self, peer: *PeerReceiver) !void {
@@ -437,6 +471,7 @@ pub const ReceiverEventLoop = struct {
         );
         _ = try state.ring.submit();
         peer.io_recv_armed = true;
+        self.counters.increment(self.counter_ids.iouring_recv_rearms);
     }
 
     // ── Duty Cycle ────────────────────────────────────────────────────
@@ -519,7 +554,8 @@ pub const ReceiverEventLoop = struct {
 
     fn pollIoUringCompletions(self: *Self) u32 {
         var state = if (self.iouring_state) |*s| s else return 0;
-        const count = state.ring.ring.copy_cqes(&state.cqe_buf, 0) catch |err| {
+        const limit = @min(self.iouring_options.cqe_batch_size, @as(u32, @intCast(state.cqe_buf.len)));
+        const count = state.ring.ring.copy_cqes(state.cqe_buf[0..limit], 0) catch |err| {
             self.counters.increment(self.counter_ids.iouring_errors);
             self.disableIoUringReceiver(err);
             return 0;
@@ -605,6 +641,13 @@ pub const ReceiverEventLoop = struct {
         if (cqe.res <= 0) {
             if (cqe.res < 0) {
                 self.counters.increment(self.counter_ids.iouring_errors);
+                if (cqe.err() == .NOBUFS) {
+                    self.counters.increment(self.counter_ids.iouring_buffer_starvations);
+                    if (self.iouring_state != null and peer.connected and !peer.io_recv_armed) {
+                        self.armIoUringRecv(peer) catch |err| self.disableIoUringReceiver(err);
+                    }
+                    return 0;
+                }
             }
             self.disconnectPeer(peer);
             return 0;
@@ -761,6 +804,7 @@ pub const ReceiverEventLoop = struct {
 
         while (offset < data.len) {
             const copied = peer.appendRecvData(data[offset..]);
+            self.counters.add(self.counter_ids.iouring_recv_copied_bytes, @intCast(copied));
             if (copied == 0) {
                 self.disconnectPeer(peer);
                 self.counters.increment(self.counter_ids.connection_errors);

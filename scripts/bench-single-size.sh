@@ -27,8 +27,15 @@
 #
 # io_uring receiver variant:
 #   RINGLOOM_BENCH_IOURING_RECEIVER=true ./scripts/bench-single-size.sh 128 5
-#   Optional tuning: RINGLOOM_BENCH_IOURING_RECV_BUFFER_SIZE,
-#   RINGLOOM_BENCH_IOURING_RECV_BUFFER_COUNT, RINGLOOM_BENCH_IOURING_CQ_DEPTH
+#   Optional tuning: RINGLOOM_BENCH_IOURING_SQPOLL,
+#   RINGLOOM_BENCH_IOURING_RECV_BUFFER_SIZE,
+#   RINGLOOM_BENCH_IOURING_RECV_BUFFER_COUNT, RINGLOOM_BENCH_IOURING_CQ_DEPTH,
+#   RINGLOOM_BENCH_IOURING_RECEIVER_CQE_BATCH
+# io_uring sender variant:
+#   RINGLOOM_BENCH_IOURING_SENDER=true ./scripts/bench-single-size.sh 128 5
+#   Optional tuning: RINGLOOM_BENCH_SENDER_WRITEV_BATCH_SIZE,
+#   RINGLOOM_BENCH_SENDER_WRITE_BUDGET,
+#   RINGLOOM_BENCH_IOURING_SENDER_CQE_BATCH
 #
 # Examples:
 #   # Best-of-10 for 128 B unloaded cross-broker latency
@@ -61,9 +68,15 @@ BEST_DIR="/tmp/ringloom-bench-best"
 LATENCY_MODE="transit"
 SEND_INTERVAL_NS=""
 IOURING_RECEIVER_ENABLED="${RINGLOOM_BENCH_IOURING_RECEIVER:-false}"
+IOURING_SENDER_ENABLED="${RINGLOOM_BENCH_IOURING_SENDER:-false}"
+IOURING_SQPOLL="${RINGLOOM_BENCH_IOURING_SQPOLL:-true}"
 IOURING_RECV_BUFFER_SIZE="${RINGLOOM_BENCH_IOURING_RECV_BUFFER_SIZE:-16384}"
 IOURING_RECV_BUFFER_COUNT="${RINGLOOM_BENCH_IOURING_RECV_BUFFER_COUNT:-256}"
 IOURING_CQ_DEPTH="${RINGLOOM_BENCH_IOURING_CQ_DEPTH:-1024}"
+IOURING_RECEIVER_CQE_BATCH="${RINGLOOM_BENCH_IOURING_RECEIVER_CQE_BATCH:-256}"
+IOURING_SENDER_CQE_BATCH="${RINGLOOM_BENCH_IOURING_SENDER_CQE_BATCH:-64}"
+SENDER_WRITEV_BATCH_SIZE="${RINGLOOM_BENCH_SENDER_WRITEV_BATCH_SIZE:-64}"
+SENDER_WRITE_BUDGET="${RINGLOOM_BENCH_SENDER_WRITE_BUDGET:-256}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -266,11 +279,16 @@ broker.threading.mode=dedicated
 broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
 broker.receiver.cpu.affinity=3
-broker.io.uring.sqpoll=true
+broker.io.uring.sqpoll=$IOURING_SQPOLL
+broker.io.uring.sender.enabled=$IOURING_SENDER_ENABLED
+broker.io.uring.sender.cqe.batch.size=$IOURING_SENDER_CQE_BATCH
 broker.io.uring.receiver.enabled=$IOURING_RECEIVER_ENABLED
+broker.io.uring.receiver.cqe.batch.size=$IOURING_RECEIVER_CQE_BATCH
 broker.io.uring.cq.depth=$IOURING_CQ_DEPTH
 broker.io.uring.recv.buffer.size=$IOURING_RECV_BUFFER_SIZE
 broker.io.uring.recv.buffer.count=$IOURING_RECV_BUFFER_COUNT
+broker.sender.writev.batch.size=$SENDER_WRITEV_BATCH_SIZE
+broker.sender.write.budget.per.peer=$SENDER_WRITE_BUDGET
 broker.benchmark.latency.tracing.enabled=true
 EOF
 
@@ -286,11 +304,16 @@ broker.threading.mode=dedicated
 broker.idle.strategy=yielding
 broker.sender.cpu.affinity=4
 broker.receiver.cpu.affinity=5
-broker.io.uring.sqpoll=true
+broker.io.uring.sqpoll=$IOURING_SQPOLL
+broker.io.uring.sender.enabled=$IOURING_SENDER_ENABLED
+broker.io.uring.sender.cqe.batch.size=$IOURING_SENDER_CQE_BATCH
 broker.io.uring.receiver.enabled=$IOURING_RECEIVER_ENABLED
+broker.io.uring.receiver.cqe.batch.size=$IOURING_RECEIVER_CQE_BATCH
 broker.io.uring.cq.depth=$IOURING_CQ_DEPTH
 broker.io.uring.recv.buffer.size=$IOURING_RECV_BUFFER_SIZE
 broker.io.uring.recv.buffer.count=$IOURING_RECV_BUFFER_COUNT
+broker.sender.writev.batch.size=$SENDER_WRITEV_BATCH_SIZE
+broker.sender.write.budget.per.peer=$SENDER_WRITE_BUDGET
 broker.benchmark.latency.tracing.enabled=true
 EOF
 
@@ -320,11 +343,16 @@ broker.threading.mode=dedicated
 broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
 broker.receiver.cpu.affinity=3
-broker.io.uring.sqpoll=true
+broker.io.uring.sqpoll=$IOURING_SQPOLL
+broker.io.uring.sender.enabled=$IOURING_SENDER_ENABLED
+broker.io.uring.sender.cqe.batch.size=$IOURING_SENDER_CQE_BATCH
 broker.io.uring.receiver.enabled=$IOURING_RECEIVER_ENABLED
+broker.io.uring.receiver.cqe.batch.size=$IOURING_RECEIVER_CQE_BATCH
 broker.io.uring.cq.depth=$IOURING_CQ_DEPTH
 broker.io.uring.recv.buffer.size=$IOURING_RECV_BUFFER_SIZE
 broker.io.uring.recv.buffer.count=$IOURING_RECV_BUFFER_COUNT
+broker.sender.writev.batch.size=$SENDER_WRITEV_BATCH_SIZE
+broker.sender.write.budget.per.peer=$SENDER_WRITE_BUDGET
 EOF
 
         start_bg_process "$LOGS/broker_local.log" "" \

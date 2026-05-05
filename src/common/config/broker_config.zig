@@ -105,9 +105,14 @@ pub const BrokerConfig = struct {
     io_uring_single_issuer: bool = true,
     io_uring_coop_taskrun: bool = true,
     io_uring_registered_buffers: u32 = 64,
+    io_uring_sender_enabled: bool = false,
+    io_uring_sender_cqe_batch_size: u32 = 64,
     io_uring_receiver_enabled: bool = false,
+    io_uring_receiver_cqe_batch_size: u32 = 256,
     io_uring_recv_buffer_size: u32 = 16_384,
     io_uring_recv_buffer_count: u32 = 256,
+    sender_writev_batch_size: u32 = 64,
+    sender_write_budget_per_peer: u32 = 256,
     benchmark_latency_tracing_enabled: bool = false,
 
     // ── Computed (set during validation, not from file) ─────────

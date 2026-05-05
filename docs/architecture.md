@@ -1553,7 +1553,12 @@ Managed exclusively by the **broker cluster leader**:
 | `broker.tcp.recv.buffer.size` | `262144` | TCP kernel receive buffer size per connection |
 | `broker.tcp.nodelay` | `true` | Enable TCP_NODELAY (disable Nagle) |
 | `broker.peer.write.queue.size` | `1024` | Max pending messages per peer write queue |
+| `broker.sender.writev.batch.size` | `64` | Maximum frames per synchronous sender `writev` syscall |
+| `broker.sender.write.budget.per.peer` | `256` | Maximum sender frames flushed per peer per duty cycle |
+| `broker.io.uring.sender.enabled` | `false` | Enable optional Linux sender `writev` io_uring path |
+| `broker.io.uring.sender.cqe.batch.size` | `64` | Sender io_uring CQEs copied per poll |
 | `broker.io.uring.receiver.enabled` | `false` | Enable optional Linux receiver multishot accept/recv path |
+| `broker.io.uring.receiver.cqe.batch.size` | `256` | Receiver io_uring CQEs copied per poll |
 | `broker.io.uring.queue.depth` | `256` | io_uring submission queue depth |
 | `broker.io.uring.cq.depth` | `1024` | io_uring completion queue depth |
 | `broker.io.uring.recv.buffer.size` | `16384` | Receiver provided-buffer size |

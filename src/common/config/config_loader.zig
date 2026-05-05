@@ -186,13 +186,27 @@ pub const ConfigLoader = struct {
         if (props.get("broker.io.uring.registered.buffers")) |v|
             config.io_uring_registered_buffers = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
+        if (props.get("broker.io.uring.sender.enabled")) |v|
+            config.io_uring_sender_enabled = std.mem.eql(u8, v, "true");
+        if (props.get("broker.io.uring.sender.cqe.batch.size")) |v|
+            config.io_uring_sender_cqe_batch_size = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
         if (props.get("broker.io.uring.receiver.enabled")) |v|
             config.io_uring_receiver_enabled = std.mem.eql(u8, v, "true");
+        if (props.get("broker.io.uring.receiver.cqe.batch.size")) |v|
+            config.io_uring_receiver_cqe_batch_size = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
         if (props.get("broker.io.uring.recv.buffer.size")) |v|
             config.io_uring_recv_buffer_size = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
         if (props.get("broker.io.uring.recv.buffer.count")) |v|
             config.io_uring_recv_buffer_count = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.sender.writev.batch.size")) |v|
+            config.sender_writev_batch_size = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.sender.write.budget.per.peer")) |v|
+            config.sender_write_budget_per_peer = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
         if (props.get("broker.benchmark.latency.tracing.enabled")) |v|
             config.benchmark_latency_tracing_enabled = std.mem.eql(u8, v, "true");
@@ -333,9 +347,14 @@ fn applyEnvOverrides(
         "broker.io.uring.single.issuer",
         "broker.io.uring.coop.taskrun",
         "broker.io.uring.registered.buffers",
+        "broker.io.uring.sender.enabled",
+        "broker.io.uring.sender.cqe.batch.size",
         "broker.io.uring.receiver.enabled",
+        "broker.io.uring.receiver.cqe.batch.size",
         "broker.io.uring.recv.buffer.size",
         "broker.io.uring.recv.buffer.count",
+        "broker.sender.writev.batch.size",
+        "broker.sender.write.budget.per.peer",
         "broker.benchmark.latency.tracing.enabled",
     };
 
@@ -398,12 +417,20 @@ fn validate(config: *BrokerConfig) ConfigError!void {
     config.io_uring_cq_depth = alignToPowerOfTwo(config.io_uring_cq_depth);
     if (config.io_uring_cq_depth < config.io_uring_queue_depth)
         config.io_uring_cq_depth = config.io_uring_queue_depth;
+    if (config.io_uring_sender_cqe_batch_size == 0 or config.io_uring_sender_cqe_batch_size > 256)
+        return ConfigError.InvalidValue;
+    if (config.io_uring_receiver_cqe_batch_size == 0 or config.io_uring_receiver_cqe_batch_size > 256)
+        return ConfigError.InvalidValue;
     if (config.io_uring_recv_buffer_size < 1024 or config.io_uring_recv_buffer_size > config.max_frame_length)
         return ConfigError.InvalidValue;
     config.io_uring_recv_buffer_size = alignToPowerOfTwo(config.io_uring_recv_buffer_size);
     if (config.io_uring_recv_buffer_count == 0 or config.io_uring_recv_buffer_count > 32768)
         return ConfigError.InvalidValue;
     config.io_uring_recv_buffer_count = alignToPowerOfTwo(config.io_uring_recv_buffer_count);
+    if (config.sender_writev_batch_size == 0 or config.sender_writev_batch_size > 1024)
+        return ConfigError.InvalidValue;
+    if (config.sender_write_budget_per_peer == 0 or config.sender_write_budget_per_peer > 4096)
+        return ConfigError.InvalidValue;
 
     // ── Compute derived fields ──────────────────────────────────
     config.max_counter_id = config.counter_values_buffer_size / 128;
@@ -482,7 +509,38 @@ test "default values are applied for omitted properties" {
     try std.testing.expectEqual(@as(u32, 65_536), config.control_buffer_size);
     try std.testing.expectEqual(@as(u32, 1_048_576), config.messages_buffer_size);
     try std.testing.expectEqual(@as(u32, 65_536), config.max_frame_length);
+    try std.testing.expect(!config.io_uring_sender_enabled);
+    try std.testing.expectEqual(@as(u32, 64), config.sender_writev_batch_size);
+    try std.testing.expectEqual(@as(u32, 256), config.sender_write_budget_per_peer);
+    try std.testing.expectEqual(@as(u32, 64), config.io_uring_sender_cqe_batch_size);
+    try std.testing.expectEqual(@as(u32, 256), config.io_uring_receiver_cqe_batch_size);
     try std.testing.expect(config.single_node_cluster);
+}
+
+test "io_uring phase 3 tuning properties are parsed" {
+    const content =
+        \\broker.node.id=1
+        \\broker.local.host.port=127.0.0.1:9000
+        \\broker.io.uring.sender.enabled=true
+        \\broker.io.uring.sender.cqe.batch.size=128
+        \\broker.io.uring.receiver.enabled=true
+        \\broker.io.uring.receiver.cqe.batch.size=128
+        \\broker.sender.writev.batch.size=256
+        \\broker.sender.write.budget.per.peer=512
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const loader = ConfigLoader.initForTesting(arena.allocator());
+
+    const config = try loader.parseAndBuild(content);
+
+    try std.testing.expect(config.io_uring_sender_enabled);
+    try std.testing.expect(config.io_uring_receiver_enabled);
+    try std.testing.expectEqual(@as(u32, 128), config.io_uring_sender_cqe_batch_size);
+    try std.testing.expectEqual(@as(u32, 128), config.io_uring_receiver_cqe_batch_size);
+    try std.testing.expectEqual(@as(u32, 256), config.sender_writev_batch_size);
+    try std.testing.expectEqual(@as(u32, 512), config.sender_write_budget_per_peer);
 }
 
 test "windows-style line endings are handled" {
