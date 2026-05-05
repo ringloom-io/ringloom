@@ -205,6 +205,66 @@ path.
    improve best and median paced latency without materially hurting saturated
    throughput.
 
+## Status After Implementing Phases 3/3A
+
+Phases 3 and 3A have now been implemented and benchmarked in `ReleaseFast` on
+the same untuned shared workstation used for the prior io_uring measurements.
+The synchronous sender remains the safest default, but the sender io_uring path
+is now functional enough for continued experiments instead of silently degrading
+to synchronous `writev` on retryable TCP backpressure.
+
+Implemented Phase 3 sender work:
+
+- Added config-backed sender knobs for synchronous `writev` batch size,
+  per-peer write budget, optional sender io_uring enablement, sender CQE batch
+  size, and the shared io_uring setup flags.
+- Raised the per-peer sender `writev` batch ceiling to 1024 frames so 128, 256,
+  and larger batch experiments are possible.
+- Added sender counters for synchronous `writev` calls/frames/bytes and sender
+  io_uring activation, fallbacks, SQEs, CQEs, writev frames/bytes, retryable
+  write completions, and io_uring-driven peer disconnects.
+- Re-enabled the sender io_uring `writev` path behind config while preserving
+  one outstanding write per peer.
+- Hardened sender io_uring completion handling: retryable write CQE errors such
+  as `EAGAIN` now clear the in-flight marker and retry the queued batch instead
+  of disabling io_uring globally. Runtime write CQE failures no longer disable
+  the whole sender ring while other peers may still have unprocessed write
+  completions; non-retryable peer/socket failures disconnect only that peer.
+
+Implemented Phase 3A receiver work:
+
+- Added a configurable receiver CQE batch size, bounded by the receiver's
+  internal CQE buffer.
+- Added counters for multishot accept/recv re-arms, provided-buffer starvation,
+  fallback reasons, and bytes copied from provided buffers into the parser path.
+- Added explicit `NOBUFS` handling so provided-buffer starvation is counted and
+  recv is re-armed instead of being treated like a peer disconnect.
+
+Focused 128 B best-of-3 rerun after the sender io_uring fallback hardening:
+
+| Variant | Paced p50 | Saturated throughput | Saturated p50 | Saturated p95 | Result |
+|---|---:|---:|---:|---:|---|
+| Sync `writev` batch 256, budget 256 | 8.03 us | 4.80M msg/s | 4.19 ms | 4.99 ms | Strongest overall Phase 3 default candidate, but still benchmark-gated |
+| Sender io_uring, batch 256, SQPOLL off | 8.19 us | 4.59M msg/s | 4.19 ms | 4.54 ms | No longer needs retryable-error fallback; competitive, but not clearly better than sync batching |
+| Sender io_uring, batch 256, SQPOLL on | 7.89 us | 3.56M msg/s | 2.17 ms | 2.50 ms | SQPOLL now completes and lowers latency, but costs saturated throughput on this host |
+| Receiver io_uring, CQE batch 128, 16 KiB x 256 buffers | 8.24 us | 4.40M msg/s | 4.18 ms | 4.62 ms | Works with the new CQE batch knob, but not enough evidence for a default switch |
+
+Validation run after the Phase 3/3A implementation:
+
+- `zig build test -Doptimize=Debug`
+- `zig build install -Doptimize=ReleaseFast`
+- `zig build test-bins -Doptimize=ReleaseFast`
+- `zig build e2e -Doptimize=Debug`
+
+The current recommendation is to keep the default sender on synchronous
+`writev`, with batch/budget tuning available for benchmarks and deployments
+that can validate the workload. Sender io_uring should remain opt-in:
+SQPOLL-on is now stable in the focused benchmark and can improve latency, but
+its lower saturated throughput on this untuned host is not acceptable as a
+default. Receiver io_uring should also remain opt-in until a wider sweep across
+message sizes, receiver buffer sizes/counts, and CQ depth confirms no tail or
+throughput regressions.
+
 ### Phase 4: Advanced receive/send features
 
 1. Add recv bundles only after the plain multishot receiver is stable and

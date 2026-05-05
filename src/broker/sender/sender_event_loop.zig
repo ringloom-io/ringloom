@@ -62,6 +62,8 @@ pub const SenderCounters = struct {
     iouring_sender_cqes: usize = 0,
     iouring_sender_writev_frames: usize = 0,
     iouring_sender_writev_bytes: usize = 0,
+    iouring_sender_retries: usize = 0,
+    iouring_sender_peer_disconnects: usize = 0,
 
     pub fn allocate(counters: *CountersManager) SenderCounters {
         return .{
@@ -88,6 +90,8 @@ pub const SenderCounters = struct {
             .iouring_sender_cqes = counters.allocate(1, "sender_iouring_cqes") orelse 0,
             .iouring_sender_writev_frames = counters.allocate(1, "sender_iouring_writev_frames") orelse 0,
             .iouring_sender_writev_bytes = counters.allocate(1, "sender_iouring_writev_bytes") orelse 0,
+            .iouring_sender_retries = counters.allocate(1, "sender_iouring_retries") orelse 0,
+            .iouring_sender_peer_disconnects = counters.allocate(1, "sender_iouring_peer_disconnects") orelse 0,
         };
     }
 };
@@ -328,6 +332,13 @@ pub const SenderEventLoop = struct {
 
     fn logIoUringSenderFallback(err: anyerror) void {
         log.warn("sender io_uring disabled; falling back to synchronous writev: {}", .{err});
+    }
+
+    fn isRetryableIoUringWriteErr(err: linux.E) bool {
+        return switch (err) {
+            .AGAIN, .INTR, .BUSY => true,
+            else => false,
+        };
     }
 
     // ── Duty Cycle ────────────────────────────────────────────────────
@@ -627,11 +638,17 @@ pub const SenderEventLoop = struct {
             peer.io_pending = false;
 
             if (cqe.res < 0) {
+                const err = cqe.err();
                 peer.in_flight_frames = 0;
                 peer.in_flight_bytes = 0;
                 self.counters.increment(self.counter_ids.iouring_sender_errors);
-                self.disableIoUringSender(error.IoUringWritevFailed);
-                return work_count;
+                if (isRetryableIoUringWriteErr(err)) {
+                    self.counters.increment(self.counter_ids.iouring_sender_retries);
+                    continue;
+                }
+                self.counters.increment(self.counter_ids.iouring_sender_peer_disconnects);
+                self.disconnectPeer(peer);
+                continue;
             }
 
             if (cqe.res == 0) {
@@ -999,6 +1016,14 @@ fn createTestCounters(
         values_buf,
         meta_buf,
     );
+}
+
+test "sender io_uring write errors distinguish retry from fallback" {
+    try testing.expect(SenderEventLoop.isRetryableIoUringWriteErr(.AGAIN));
+    try testing.expect(SenderEventLoop.isRetryableIoUringWriteErr(.INTR));
+    try testing.expect(SenderEventLoop.isRetryableIoUringWriteErr(.BUSY));
+    try testing.expect(!SenderEventLoop.isRetryableIoUringWriteErr(.PIPE));
+    try testing.expect(!SenderEventLoop.isRetryableIoUringWriteErr(.INVAL));
 }
 
 test "SenderEventLoop init and deinit" {

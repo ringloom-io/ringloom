@@ -137,40 +137,6 @@ service on broker A embeds a monotonic timestamp in each message. Full path:
 > - **1,024 B:** broker A queue 526.92 µs, transport 105.85 µs, broker B delivery 2.64 µs
 > - **4,096 B:** broker A queue 332.36 µs, transport 422.40 µs, broker B delivery 1.10 µs
 
-## Focused io_uring Phase 3/3A Measurements
-
-**Date:** 2026-05-05
-**Zig version:** 0.16.0
-**Build mode:** ReleaseFast
-**Host:** same untuned shared workstation used for the current baseline.
-
-These are best-of-3 `scripts/bench-single-size.sh 128` runs. The default
-synchronous TCP sender remains the safe default; the measurements below compare
-newly exposed tuning knobs for sender `writev` batching, sender io_uring, and
-receiver io_uring CQE batch size.
-
-| Variant | Paced p50 | Saturated throughput | Saturated p50 | Notes |
-|---|---:|---:|---:|---|
-| Baseline sync sender/receiver, batch 64 | 9.47 µs | 4.00M msg/s | 4.72 ms | Current default path in this session |
-| Sync `writev` batch 256, budget 256 | 8.11 µs | 4.84M msg/s | 4.18 ms | 14.4% lower paced p50, 20.9% higher saturated throughput |
-| Sync `writev` batch 1024, budget 1024 | 9.13 µs | 4.77M msg/s | 4.42 ms | Larger budget did not beat the 256-frame setting |
-| Sender io_uring, batch 256, CQE batch 64, SQPOLL off | 9.48 µs | 4.13M msg/s | 4.37 ms | Functional with fallback, but not a win over sync batching |
-| Receiver io_uring, CQE batch 128, 16 KiB × 256 buffers | 7.90 µs | 4.10M msg/s | 2.21 ms | Best paced p50, but saturated p95 worsened to 6.73 ms |
-
-Takeaways:
-- A 256-frame synchronous sender batch is the strongest Phase 3 sender result
-  for this 128 B sweep. It reduced broker A queue p50 from 1.85 ms to 1.58 ms
-  and transport p50 from 2.84 ms to 2.46 ms in saturated mode.
-- Increasing both batch and per-peer write budget to 1024 did not improve the
-  final measured result on this host, so the larger budget should remain a
-  benchmark-only knob rather than a default.
-- Sender io_uring should remain experimental. It now falls back to synchronous
-  `writev` on io_uring write failures instead of stalling service discovery, but
-  measured throughput and latency did not beat sync batching.
-- Receiver CQE batch 128 is promising for paced latency and saturated p50, but
-  the saturated tail regression means it should stay opt-in until a wider sweep
-  across sizes/buffer counts confirms it.
-
 ## Backpressure Onset (escalating load)
 
 Topology: 1 broker + slow consumer (configurable delay) + ping producer
@@ -253,7 +219,6 @@ Topology: 1 broker + slow consumer (configurable delay) + ping producer
 | 2026-05-02 | Single-size benchmark defaults to paced transit latency and records sender/transport/delivery stage breakdown | Remote single-size runs now distinguish unloaded transit from saturated queueing; stage timing points show where backlog accumulates | — |
 | 2026-05-02 | Benchmark trace clock switched to stable `CLOCK_MONOTONIC`; broker-side tracing gated behind benchmark-only config; full harness rerun on untuned dev machine | Remote saturated queueing refresh: 32 B p50 **10.1 ms**, 128 B **4.5 ms**, 512 B **810 µs**. Local refresh shows burst throughput up to **13.8M msgs/s** (32 B) but saturated local latency is environment-sensitive on the untuned machine | — |
 | 2026-05-02 | `run-benchmarks.sh` split into paced transit and saturated benchmark passes | Automated baseline now reports remote transit p50 **8.4–12.2 µs** while still keeping saturated queueing p50 **0.64–7.71 ms** and throughput data in the same harness output | 
-| 2026-05-05 | io_uring Phase 3/3A tuning knobs and counters: sender sync `writev` batch/budget config, sender io_uring opt-in with fallback, receiver CQE batch config, expanded io_uring counters | 128 B focused run: sync batch 256/budget 256 improved saturated throughput **4.00M → 4.84M msg/s** and paced p50 **9.47 µs → 8.11 µs**; receiver io_uring CQE batch 128 improved paced p50 **9.47 µs → 7.90 µs** but worsened saturated tail | — |
 
 <!-- Template for adding new entries:
 | YYYY-MM-DD | Description of change | e.g. "p99 latency -15%" | abc1234 |
