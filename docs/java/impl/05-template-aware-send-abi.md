@@ -12,8 +12,9 @@ message type. Generated ergonomic clients need template-aware copy sends.
 1. Zig service-client methods for template-aware copy sends.
 2. C ABI declarations and implementations.
 3. Java FFM binding methods.
-4. Generated client integration.
-5. Unit and integration tests for local and remote paths.
+4. Correlation-aware claim and send variants needed by request/response.
+5. Generated client integration.
+6. Unit and integration tests for local and remote paths.
 
 ## Native service changes
 
@@ -103,6 +104,76 @@ public void sendMessageOrThrow(int templateId, byte[] payload);
 
 Hot-path methods should return integer status codes and must not allocate.
 
+## Correlation-aware request sends
+
+Request/response requires generated clients to choose the outgoing
+`correlation_id`. Add correlation-aware variants for every generated send path.
+Existing methods remain as compatibility wrappers that pass `correlation_id = 0`.
+
+Native service additions:
+
+```zig
+pub fn tryClaimRequest(
+    self: *Self,
+    template_id: u16,
+    correlation_id: i64,
+    payload_len: usize,
+) SendError!SendClaim
+
+pub fn tryClaimToRequest(
+    self: *Self,
+    target_node_id: i16,
+    target_service_id: i32,
+    template_id: u16,
+    correlation_id: i64,
+    payload_len: usize,
+) SendError!SendClaim
+
+pub fn sendMessageRequest(
+    self: *Self,
+    template_id: u16,
+    correlation_id: i64,
+    payload: []const u8,
+) SendError!void
+```
+
+C ABI additions should mirror the template-aware functions with an added
+`int64_t correlation_id`, for example:
+
+```c
+ringloom_status_t ringloom_client_try_claim_request(
+    ringloom_client_t *client,
+    uint16_t template_id,
+    int64_t correlation_id,
+    size_t payload_len,
+    ringloom_buffer_claim_t *out_claim
+);
+
+ringloom_status_t ringloom_client_send_message_request(
+    ringloom_client_t *client,
+    uint16_t template_id,
+    int64_t correlation_id,
+    const uint8_t *payload,
+    size_t payload_len
+);
+```
+
+Direct-target and leader variants should be added for both claim and copy send
+paths. For local IPC, the produced application message header must carry the
+caller-provided `correlation_id`. For remote broker routing, the TCP frame header
+must carry the same `correlation_id`.
+
+Java binding additions:
+
+```java
+public int tryClaimRequest(int templateId, long correlationId, long payloadLength, BufferClaim claim);
+public int sendMessageRequest(int templateId, long correlationId, MemorySegment payload);
+```
+
+Generated request/response clients must use these methods. If the native library
+does not expose the required correlation-aware symbols, framework startup should
+fail before accepting request/response client calls.
+
 `RingloomNative` changes:
 
 1. Add method handles and function descriptors.
@@ -118,6 +189,8 @@ Generated clients should use:
 2. `sendMessage(...)` for copy/ergonomic methods.
 3. `sendToMessage(...)` for direct target routing.
 4. `sendToLeaderMessage(...)` for leader routing.
+5. `tryClaimRequest(...)` and `sendMessageRequest(...)` variants for every
+   request/response method so the correlation id is caller-selected.
 
 The annotation processor should fail compilation if a template id is outside
 `0..65535`.
@@ -130,6 +203,8 @@ Zig unit tests:
 2. Template id `0` preserves existing default behavior.
 3. Payload is copied correctly.
 4. Claim is aborted on copy/commit error paths where applicable.
+5. Correlation-aware local claim writes the selected correlation id.
+6. Correlation-aware remote claim writes the TCP frame correlation id.
 
 Java integration tests:
 
@@ -138,11 +213,13 @@ Java integration tests:
 3. `sendToLeaderMessage(...)` reaches leader target.
 4. Remote broker path preserves TCP frame template id.
 5. Existing no-template APIs still work.
+6. `tryClaimRequest(...)` and `sendMessageRequest(...)` preserve correlation ids.
 
 Generated framework tests:
 
 1. Ergonomic generated client method uses template-aware copy send.
 2. Duplicate template id validation remains processor responsibility.
+3. Request/response generated clients use correlation-aware send methods.
 
 ## Acceptance criteria
 
@@ -151,3 +228,5 @@ Generated framework tests:
 3. Local and remote paths preserve template ids.
 4. Generated ergonomic clients no longer need to claim buffers just to set a
    template id.
+5. Generated request/response clients can set correlation ids on local and remote
+   sends.

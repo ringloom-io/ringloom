@@ -13,9 +13,13 @@ compile-time wiring, bootstrap, serialization, event loops, and metrics access.
 2. Keep application code clean: interfaces for clients, annotated methods for
    handlers, explicit generated code instead of runtime reflection.
 3. Preserve a zero-allocation hot-path profile for services that opt into it.
-4. Support pluggable serialization with initial SBE and Apache Fory modules.
-5. Expose RingLoom runtime metrics counters and gauges to Java applications.
-6. Keep dependencies minimal and IoC-friendly for Micronaut, Spring, Avaje, and
+4. Support explicit message execution modes: consumer-thread dispatch,
+   partitioned worker dispatch, and virtual-thread dispatch.
+5. Provide request/response APIs for callback-style and virtual-thread blocking
+   callers.
+6. Support pluggable serialization with initial SBE and Apache Fory modules.
+7. Expose RingLoom runtime metrics counters and gauges to Java applications.
+8. Keep dependencies minimal and IoC-friendly for Micronaut, Spring, Avaje, and
    similar frameworks.
 
 Non-goals for the initial framework:
@@ -24,6 +28,13 @@ Non-goals for the initial framework:
 2. Runtime classpath scanning or reflection-based dispatch.
 3. Hiding the low-level `io.ringloom.service` bindings from advanced users.
 4. Application-level tracing implementation, beyond reserving extension points.
+5. Cross-thread zero-copy dispatch before a native retain/release payload ABI
+   exists. Async dispatch modes can still be zero-allocation by copying into
+   preallocated worker-owned storage.
+6. Dynamic partition-worker rebalancing. Worker count and hash mapping are fixed
+   at startup to preserve per-key ordering.
+7. JDK-internal virtual-thread scheduler overrides. Virtual-thread blocking must
+   use public JDK APIs such as `LockSupport` or standard blocking primitives.
 
 ## Confirmed design decisions
 
@@ -44,7 +55,7 @@ do not pay for unused features.
 | Artifact | Purpose | Required dependencies |
 |---|---|---|
 | `ringloom-java-bindings` | Existing FFM bindings to `libringloom_service` | none beyond JDK |
-| `ringloom-framework-core` | Runtime, event loops, generated-code contracts, serializers SPI, metrics API | `ringloom-java-bindings`, `slf4j-api` |
+| `ringloom-framework-core` | Runtime, event loops, message execution policies, request/response registry, generated-code contracts, serializers SPI, metrics API | `ringloom-java-bindings`, `slf4j-api` |
 | `ringloom-framework-processor` | Annotation processor that generates client proxies, handler dispatchers, and bootstrap metadata | Java annotation processing APIs |
 | `ringloom-framework-yaml` | YAML configuration loader and standalone bootstrapper | core, SnakeYAML Engine |
 | `ringloom-serializer-sbe` | SBE encoder/decoder adapter | core, Agrona/SBE runtime as needed by generated SBE codecs |
@@ -77,6 +88,8 @@ ringloom-framework-core
   RingloomRuntime
   EventLoop / AgentRunner / IdleStrategy
   ClientInvoker / MessageDispatcher
+  MessageExecutionPolicy / PartitionedWorker
+  RequestResponseRegistry
   SerializerRegistry
   Metrics facade
         |
@@ -136,6 +149,27 @@ public interface PricingClient {
 
     @RingloomRequest(templateId = PricingTemplates.PRICE_REQUEST, serializer = "sbe")
     int requestPrice(PriceRequestFlyweight request, DirectSendContext context);
+
+    @RingloomRequest(
+        templateId = PricingTemplates.PRICE_REQUEST,
+        responseTemplateId = PricingTemplates.PRICE_RESPONSE,
+        serializer = "sbe"
+    )
+    int requestPrice(
+        PriceRequestFlyweight request,
+        ResponseCallback<PriceResponseFlyweight> callback,
+        Object callbackContext,
+        DirectRequestContext context
+    );
+
+    @RingloomRequest(
+        templateId = PricingTemplates.PRICE_REQUEST,
+        responseTemplateId = PricingTemplates.PRICE_RESPONSE,
+        serializer = "sbe",
+        mode = RequestMode.VIRTUAL_THREAD_BLOCKING
+    )
+    PriceResponse requestPriceBlocking(PriceRequest request, RequestTimeout timeout)
+        throws RingloomRequestException, InterruptedException;
 }
 ```
 
@@ -148,10 +182,18 @@ The processor generates an implementation such as
    zero-copy methods.
 4. Uses status-code return values for hot-path methods.
 5. Provides optional throwing convenience methods only outside hot paths.
+6. Registers pending request state before request/response sends and removes it on
+   response, timeout, cancellation, or runtime shutdown.
 
 The generated proxy should be injectable as a bean. For IoC-neutral use, it can
 also be created by `RingloomRuntime.client(PricingClient.class)` using generated
 metadata rather than reflection over annotations.
+
+Callback request/response methods should support a no-allocation profile by
+accepting a reusable `DirectRequestContext`, a stateless callback object, and a
+caller-managed `callbackContext`. The framework should not allocate lambdas,
+wrapper results, boxed ids, or per-request callback adapters on the hot path.
+Virtual-thread blocking methods are an ergonomic profile and may allocate.
 
 ### Message handlers
 
@@ -190,6 +232,12 @@ The generated dispatcher owns reusable flyweight instances and context objects
 per event-loop thread. It must document that borrowed payload memory is valid
 only during the handler call, matching `RingloomMessage`.
 
+Handlers are invoked through a configured message execution policy. The default
+policy invokes the handler directly on the message-consumer thread. Async
+policies must preserve the low-level borrowed-memory contract: any payload that
+crosses a thread boundary is copied by the consumer thread into worker-owned
+storage before the low-level poll callback returns.
+
 ## Annotation model
 
 Initial annotations:
@@ -199,8 +247,10 @@ Initial annotations:
 | `@RingloomApplication` | type | Optional marker for generated standalone bootstrap metadata. |
 | `@RingloomServiceComponent` | type | Marks a class that contains RingLoom handlers or lifecycle hooks. |
 | `@RingloomClient` | interface | Declares a logical target service client. |
-| `@RingloomRequest` | method | Declares template id, serializer, routing mode, and error policy for a send method. |
-| `@RingloomHandler` | method | Declares template id and serializer for inbound messages. |
+| `@RingloomRequest` | method | Declares template id, optional response template id, serializer, routing mode, request mode, and error policy for a send or request method. |
+| `@RingloomHandler` | method | Declares template id, serializer, and optional partition-key source for inbound messages. |
+| `@RingloomPartitionKey` | parameter or method | Marks a primitive partition key or generated extractor used by partitioned worker dispatch. |
+| `@RingloomResponseHandler` | method | Optional explicit handler for responses that are not consumed by a pending request callback. |
 | `@RingloomLifecycleHandler` | method | Handles service availability/unavailability events for a generated client. |
 | `@RingloomMetric` | field or method | Optional application metric registration in service metadata, if supported later. |
 
@@ -245,6 +295,19 @@ ringloom:
       thread: dedicated
       idleStrategy: busySpin
       pollLimit: 256
+      execution:
+        mode: consumerThread
+        partitioned:
+          workers: 4
+          queueCapacity: 1024
+          maxPayloadBytes: 4096
+          backpressure: parkConsumer
+        virtualThreads:
+          maxInFlight: 10000
+    requests:
+      maxPending: 65536
+      timeoutMillis: 5000
+      pendingPool: true
     lifecycle:
       shutdownHook: true
 
@@ -287,16 +350,20 @@ Core configuration records:
 ### RingloomRuntime
 
 `RingloomRuntime` owns the low-level service handle, generated clients, message
-consumer, dispatcher, control loop, metrics facade, and lifecycle.
+consumer, message execution policy, request/response registry, control loop,
+metrics facade, and lifecycle.
 
 Responsibilities:
 
 1. Start `RingloomService` from config.
 2. Create low-level `RingloomClient` instances by logical target name.
 3. Connect generated client proxies to serializers and low-level clients.
-4. Create one `MessageConsumer` and one generated dispatcher.
-5. Start and stop configured event-loop threads.
-6. Expose `RingloomMetrics` and lifecycle state.
+4. Create one `MessageConsumer`, one generated dispatcher, and one configured
+   message execution policy.
+5. Create the request/response registry used by generated clients and response
+   dispatch.
+6. Start and stop configured event-loop threads.
+7. Expose `RingloomMetrics` and lifecycle state.
 
 It should implement `AutoCloseable` and provide deterministic shutdown. It
 should not hide status codes from hot-path code; higher-level throwing wrappers
@@ -327,7 +394,7 @@ Common agents:
 | Agent | Uses | Work |
 |---|---|---|
 | `ControlAgent` | `RingloomService` | Calls `pollControl(limit)` to drive discovery, lifecycle callbacks, and heartbeats. |
-| `MessageConsumerAgent` | `MessageConsumer` | Calls `poll(dispatcher, limit)` and invokes generated handlers. |
+| `MessageConsumerAgent` | `MessageConsumer` | Calls `poll(ingress, limit)` and hands messages to the configured execution policy. |
 | `CompositeAgent` | multiple agents | Runs multiple agents on one thread for compact deployments. |
 | `LifecycleAgent` | runtime state | Optional startup/shutdown hooks and health transitions. |
 
@@ -338,6 +405,45 @@ Threading modes:
 | `dedicated` | separate control and message threads | Lowest and most predictable message latency. |
 | `shared` | one event loop runs control and message agents | Fewer threads, acceptable for smaller services. |
 | `external` | caller polls manually | IoC/container-managed event loops or tests. |
+
+### Message execution modes
+
+The message consumer always polls on one ingress thread. Handler execution is
+selected independently from the control/message event-loop topology:
+
+| Mode | Handler thread | Allocation profile | Copy profile | Ordering |
+|---|---|---|---|---|
+| `consumerThread` | The polling thread invokes generated handlers directly. | Can be zero-allocation. | Can be zero-copy because the borrowed payload is consumed before the poll callback returns. | Native consumer order. |
+| `partitionedWorkers` | A fixed set of worker threads, each with one SPSC queue fed by the consumer thread. | Can be zero-allocation with preallocated slots, contexts, and flyweights. | One ingress copy into a worker-owned slot is required until a native payload retain/release ABI exists. | Messages with the same partition key are routed to the same worker and preserve order. |
+| `virtualThreads` | A bounded virtual-thread executor. | Not guaranteed; ergonomic mode. | Payloads are copied or decoded before task submission. | Native order is not preserved after submission unless application-level synchronization is used. |
+
+Partitioned worker dispatch uses generated partition-key extractors. Extraction
+runs on the consumer thread against the borrowed payload and must return a
+primitive `long` without allocation. Generated SBE extractors can read a field
+path directly from the borrowed segment; custom extractors must be startup-bound
+and documented as non-retaining. The worker index is a stable hash of the key and
+the fixed worker count; worker counts are not rebalanced at runtime.
+
+Each partitioned worker owns:
+
+1. One SPSC queue whose producer is the message consumer thread.
+2. Preallocated queue slots with enough payload storage for the configured maximum
+   payload size.
+3. Reusable `MessageContext`, `DecodeContext`, flyweights, and handler scratch
+   objects.
+
+When a partitioned worker queue is full, the default policy is to park or back off
+the consumer thread until the target queue accepts the message. The framework
+must not drop a single message within a partition because that would allow a
+later message with the same key to overtake it. Optional fail-fast policies must
+fail the whole poll attempt or stop the runtime with a clear error; they must not
+silently skip one message and continue.
+
+Virtual-thread dispatch must use public JDK APIs. The framework should create a
+bounded executor backed by virtual threads or accept one from configuration, copy
+or decode payloads before submission, and close the executor during runtime
+shutdown. It must not depend on `jdk.internal.vm.Continuation`, `--add-opens`, or
+other JDK-internal scheduler hooks.
 
 ### Idle strategies
 
@@ -359,11 +465,17 @@ The framework should provide reusable per-thread context objects:
 |---|---|
 | `MessageContext` | Read-only source/target ids, correlation id, flags, payload segment, and reply helpers. |
 | `DirectSendContext` | Reusable `BufferClaim`, selected route, and serializer scratch state for zero-copy client sends. |
+| `DirectRequestContext` | Reusable send context plus pending-request slot and correlation-id scratch for callback request/response sends. |
 | `DecodeContext` | Serializer-specific reusable state. |
 | `HandlerResult` | Status code constants or small value type for generated dispatch. |
+| `PartitionedMessageSlot` | Worker-owned storage for async dispatch payload copies and copied message headers. |
+| `RequestAwaiter` | Pooled or per-call waiter used by virtual-thread blocking request methods. |
 
-Contexts should be owned by a single event-loop thread. Sharing across threads
-should be explicit and documented as unsupported unless a type states otherwise.
+Contexts should be owned by a single event-loop or worker thread. Sharing across
+threads should be explicit and documented as unsupported unless a type states
+otherwise. `PartitionedMessageSlot` is the handoff object between the consumer
+thread and one worker thread; it must not expose mutable payload storage to any
+other producer or consumer.
 
 ## Serialization SPI
 
@@ -432,6 +544,17 @@ Per-message dispatch should only do:
 
 ## Zero-allocation hot path
 
+The framework should define allocation and copy guarantees separately:
+
+| Path | Zero allocations | Zero copy |
+|---|---|---|
+| Consumer-thread handler with flyweight payload | Yes | Yes |
+| Partitioned-worker handler with preallocated SPSC slots | Yes | No; one copy into the worker slot is required. |
+| Virtual-thread handler | No guarantee | No guarantee |
+| Zero-copy generated send with `DirectSendContext` | Yes | Yes |
+| Callback request/response with pooled pending slots and reusable callback/context | Yes | Send path can be zero-copy; response callback sees borrowed or worker-owned payload according to execution mode. |
+| Virtual-thread blocking request/response | No guarantee | No guarantee |
+
 The hot path can be allocation-free when an application follows these rules:
 
 1. Use `@RingloomHandler` methods with flyweight or `MemorySegment` payload
@@ -445,10 +568,57 @@ The hot path can be allocation-free when an application follows these rules:
    handler return.
 6. Pre-create clients, serializers, dispatchers, counters, gauges, and contexts
    at startup.
+7. For partitioned workers, configure fixed queue capacities and maximum payload
+   sizes so enqueue copies fit preallocated slots.
+8. For request/response callbacks, use stateless callback instances and
+   caller-owned context objects rather than capturing lambdas.
 
 The framework should include a hot-path allocation test suite similar to the
 current Java binding allocation tests. Tests should verify steady-state polling
 and generated zero-copy sends do not allocate.
+
+## Request/response API
+
+Request/response is built on the existing message `correlation_id` field and
+explicit reply routing. A generated request client must allocate a correlation id
+before sending, register a pending request, send the request with that correlation
+id, and complete or remove the pending entry exactly once.
+
+Pending request entries should be pooled for callback APIs:
+
+1. `PendingRequest` stores correlation id, generation, expected response template
+   id, callback, caller context, timeout, serializer, and completion state.
+2. Correlation ids should encode enough generation information to reject late
+   responses after timeout/cancellation and slot reuse.
+3. Response dispatch first checks the pending registry by correlation id. If a
+   pending entry exists and the response template matches, the callback or waiter
+   is completed; otherwise the message can fall through to an explicit
+   `@RingloomResponseHandler` or unknown-template policy.
+4. Late, duplicate, or wrong-template responses must be counted and dropped with a
+   clear diagnostic path, not delivered to a reused pending request.
+5. Runtime shutdown completes all pending requests with a shutdown status.
+
+Callback APIs should offer two profiles:
+
+1. **Hot-path callback profile**: caller passes a reusable
+   `DirectRequestContext`, a stateless `ResponseCallback<T>`, and an opaque
+   caller context. The callback receives a borrowed flyweight or worker-owned
+   response view that is valid only during callback invocation.
+2. **Ergonomic callback profile**: generated code may allocate decoded response
+   objects, futures, or adapters.
+
+The callback execution thread follows the configured message execution policy.
+In partitioned-worker mode, correlation ids should encode or otherwise record the
+originating worker index so the response completion runs on the same worker that
+owns the request partition when ordering or thread-affine state requires it.
+
+Virtual-thread blocking request APIs are built on the same pending registry, but
+the generated client parks the current virtual thread until completion, timeout,
+interruption, or shutdown. The implementation should use `LockSupport.parkNanos`
+and `LockSupport.unpark`, or an equivalent Loom-friendly public blocking
+primitive. It must handle spurious wakeups by checking completion in a loop, honor
+`Thread.interrupt()` by unregistering the pending request and throwing
+`InterruptedException`, and unpark all waiters during runtime shutdown.
 
 ## Metrics API
 
@@ -527,6 +697,32 @@ ringloom_status_t ringloom_client_send_to_leader_message(
 
 The existing no-template methods can remain as convenience APIs with template id
 `0`, preserving compatibility.
+
+### Correlation-aware request sends
+
+Generated request/response clients must set `correlation_id` on every request.
+The current low-level Java binding can read inbound correlation ids but its
+public send and claim methods do not expose a caller-selected correlation id, so
+request/response requires additive correlation-aware send surfaces.
+
+Add native service methods, C ABI functions, and Java binding methods for:
+
+1. Load-balanced zero-copy claims with `template_id` and `correlation_id`.
+2. Direct-target zero-copy claims with `target_node_id`, `target_service_id`,
+   `template_id`, and `correlation_id`.
+3. Leader zero-copy claims with `template_id` and `correlation_id`.
+4. Copy sends for the same routing modes with `template_id` and
+   `correlation_id`.
+
+The ABI should preserve the existing no-correlation methods as compatibility
+wrappers that pass `correlation_id = 0`. The Java framework should use
+correlation-aware methods for all request/response paths and should fail startup
+if the loaded native library does not expose the required symbols.
+
+The response sender should use the request `MessageContext` source node and
+source service id as the reply target and echo the request correlation id. In
+multi-instance deployments, correlation id alone is not a return address; reply
+routing must preserve the originating service instance.
 
 ### Metrics reader ABI
 
@@ -632,7 +828,9 @@ Core framework classes should be normal Java objects with explicit constructors:
 3. generated client implementations
 4. generated dispatcher
 5. `SerializerRegistry`
-6. `RingloomMetrics`
+6. `MessageExecutionPolicy`
+7. `RequestResponseRegistry`
+8. `RingloomMetrics`
 
 The core module should not depend on Spring, Micronaut, Avaje, Jakarta, or CDI.
 The first IoC-specific module should target Avaje. Later modules can adapt
@@ -698,11 +896,16 @@ Inbound message:
 
 1. `MessageConsumerAgent` polls `MessageConsumer`.
 2. Low-level binding updates one reusable `RingloomMessage`.
-3. Generated dispatcher reads `templateId`.
-4. Serializer wraps or decodes payload.
-5. Handler is invoked with a reusable `MessageContext`.
-6. Handler optionally sends responses through generated clients.
-7. Handler returns a status code.
+3. The configured `MessageExecutionPolicy` handles the message.
+4. For `consumerThread`, generated dispatcher reads `templateId`, wraps or
+   decodes payload, and invokes the handler with a reusable `MessageContext`.
+5. For `partitionedWorkers`, generated ingress extracts a primitive partition
+   key, copies the message header and payload into the target worker's
+   preallocated SPSC slot, and returns from the low-level poll callback.
+6. For `virtualThreads`, ingress copies or decodes payload into task-owned state
+   and submits bounded virtual-thread work.
+7. Handler optionally sends responses through generated clients.
+8. Handler returns a status code.
 
 Outbound zero-copy send:
 
@@ -711,6 +914,26 @@ Outbound zero-copy send:
 3. Serializer writes directly into `claim.payloadSegment()`.
 4. Proxy commits the claim.
 5. Status is returned to the caller.
+
+Callback request/response:
+
+1. Generated proxy obtains a `PendingRequest` from the registry or caller context.
+2. Proxy allocates a generation-safe correlation id and registers the pending
+   request before publishing the send.
+3. Proxy sends with `templateId` and `correlationId`.
+4. Response ingress resolves the correlation id before normal handler dispatch.
+5. Callback receives a response flyweight or decoded object and the caller
+   context.
+6. Pending state is cleared and returned to the pool.
+
+Virtual-thread blocking request/response:
+
+1. Generated proxy registers a pending request and sends with a correlation id.
+2. Proxy parks the current virtual thread until completion, timeout, interrupt, or
+   shutdown.
+3. Response ingress stores the result and unparks the waiting virtual thread.
+4. Proxy unregisters pending state and returns the response or throws the mapped
+   exception.
 
 ## Implementation phases
 
@@ -734,3 +957,7 @@ Each phase has a detailed implementation specification under `docs/java/impl/`.
    [08-avaje-ioc.md](impl/08-avaje-ioc.md).
 9. **Tracing design**:
    [09-tracing-design.md](impl/09-tracing-design.md).
+10. **Message execution modes**:
+    [10-message-execution-modes.md](impl/10-message-execution-modes.md).
+11. **Request/response**:
+    [11-request-response.md](impl/11-request-response.md).

@@ -35,9 +35,11 @@ Beans to expose:
 4. `RingloomRuntime`.
 5. `RingloomApplication`.
 6. `RingloomMetrics`.
-7. Generated client implementations.
-8. Generated dispatcher.
-9. Application handler components.
+7. `MessageExecutionPolicy`.
+8. `RequestResponseRegistry`.
+9. Generated client implementations.
+10. Generated dispatcher.
+11. Application handler components.
 
 Generated clients should be injectable by their interface type:
 
@@ -83,6 +85,8 @@ The adapter should ensure shutdown order:
 2. Close generated clients if they own resources.
 3. Close low-level clients and service.
 4. Close metrics reader.
+5. Complete pending request/response callbacks or virtual-thread waiters with a
+   shutdown status.
 
 ## Configuration
 
@@ -136,7 +140,8 @@ Integration tests:
 2. A handler component receives an injected generated client.
 3. Generated client interface is injectable.
 4. `RingloomMetrics` is injectable.
-5. Context shutdown closes RingLoom runtime.
+5. `RequestResponseRegistry` is injectable for advanced users.
+6. Context shutdown closes RingLoom runtime and completes pending requests.
 
 End-to-end test:
 

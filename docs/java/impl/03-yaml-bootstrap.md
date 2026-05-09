@@ -49,6 +49,19 @@ ringloom:
     messages:
       idleStrategy: busySpin
       pollLimit: 256
+      execution:
+        mode: consumerThread
+        partitioned:
+          workers: 4
+          queueCapacity: 1024
+          maxPayloadBytes: 4096
+          backpressure: parkConsumer
+        virtualThreads:
+          maxInFlight: 10000
+    requests:
+      maxPending: 65536
+      defaultTimeoutMillis: 5000
+      pooledPendingRequests: true
     lifecycle:
       shutdownHook: true
 
@@ -137,6 +150,13 @@ Startup should fail before native service start when:
 7. Serializer config declares an unknown type.
 8. Generated application service name does not match YAML service name.
 9. Duplicate client aliases map to incompatible target services.
+10. Message execution mode is unknown.
+11. Partitioned execution has non-positive worker count, non-power-of-two queue
+    capacity, non-positive max payload size, or unknown backpressure policy.
+12. Partitioned execution is enabled but generated metadata lacks required
+    partition-key extractors.
+13. Virtual-thread execution has non-positive `maxInFlight`.
+14. Request/response config has non-positive `maxPending` or timeout values.
 
 Validation errors should include YAML path-like locations where possible, for
 example `ringloom.runtime.messages.pollLimit`.
@@ -162,6 +182,10 @@ Unit tests:
 4. Invalid idle strategy fails.
 5. Invalid buffer length fails.
 6. Missing generated application fails with clear message.
+7. Invalid message execution mode fails.
+8. Partitioned execution validates worker count, queue capacity, max payload, and
+   generated partition-key metadata.
+9. Request/response defaults map to core config records.
 
 Integration tests:
 
@@ -169,6 +193,8 @@ Integration tests:
 2. Generated metadata is discovered via `ServiceLoader`.
 3. Dedicated and shared modes start the expected event loops.
 4. Shutdown hook path closes runtime idempotently.
+5. Partitioned-worker execution starts the configured number of workers.
+6. Virtual-thread execution uses bounded in-flight configuration.
 
 ## Acceptance criteria
 
@@ -176,3 +202,5 @@ Integration tests:
 2. YAML parsing remains isolated from core.
 3. Configuration errors are deterministic and descriptive.
 4. Runtime behavior is identical to programmatic config after parsing.
+5. Message execution and request/response config is fully represented in core
+   immutable records.
