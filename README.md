@@ -2,48 +2,110 @@
 
 ![RingLoom logo](assets/RingLoom.png)
 
-RingLoom is a Zig message broker and runtime for low-latency service-to-service
-communication. It uses shared-memory ring buffers for same-host IPC and TCP between
-brokers for cross-host routing.
+**RingLoom** is a high-performance message broker and service runtime for low-latency systems.
+It combines zero-copy same-host IPC over shared-memory ring buffers with TCP-based cross-host
+routing, giving services one messaging model for both local and remote communication.
 
-## Purpose
+RingLoom is aimed at workloads where predictable latency, explicit memory layout, and
+allocation-free hot paths matter more than general-purpose middleware features.
 
-RingLoom is built for predictable messaging in clustered systems where hot-path
-efficiency, explicit memory control, and simple transport semantics matter more than
-general-purpose middleware features.
+## Why RingLoom
 
-## Architecture
+- **Fast local communication** with memory-mapped metadata files and lock-free ring buffers.
+- **Cross-host routing** through broker-to-broker TCP transport with platform-optimized I/O.
+- **Predictable execution** from pre-allocated buffers, explicit wire formats, and tight event loops.
+- **Operational visibility** through test harnesses, `ringloom-stat`, and a Prometheus exporter.
+- **Service integration options** through Zig modules plus C/C++, Java, and Node.js bindings.
 
-- Same-host communication uses memory-mapped metadata files and lock-free ring buffers.
-- Cross-host communication uses framed TCP with `io_uring` on Linux and `kqueue` on macOS.
-- Brokers handle registration, discovery, heartbeats, routing, cluster membership, and leader election.
-
-## Implemented
+## Highlights
 
 - Shared-memory IPC between services and the local broker
-- Broker-to-broker TCP transport and frame protocol
+- Broker-to-broker TCP transport with `io_uring` on Linux and `kqueue` on macOS
 - Dedicated control, sender, and receiver event loops
-- Service registration, discovery, and heartbeat tracking
-- Cluster membership, leader election, and state synchronization
+- Service registration, discovery, heartbeat tracking, and leader election
+- Cluster membership and state synchronization
 - End-to-end and performance test harnesses
-- Java, Node, and C++ bindings for service integration
+- Order-management sample application spanning multiple services and broker nodes
 
-## Planned
+## Architecture at a glance
 
-- More operational tooling and monitoring views
-- Broader failure-recovery and long-running soak coverage
-- Packaging and deployment refinements for production use
-
-## Build and test
-
-Requires Zig 0.16.x.
-
-```bash
-zig build test
-zig build e2e
-zig build perf
-zig build test-cpp
+```text
+same host                                              remote host
+┌──────────────┐   shared memory   ┌────────────────┐   TCP   ┌────────────────┐   shared memory   ┌──────────────┐
+│ Service      │ ────────────────▶│ RingLoom       │ ──────▶│ RingLoom       │ ────────────────▶│ Service      │
+│ producer     │                   │ broker node A  │         │ broker node B  │                   │ consumer     │
+└──────────────┘                   └────────────────┘         └────────────────┘                   └──────────────┘
 ```
+
+Core modules:
+
+| Module | Purpose |
+|---|---|
+| `ringloom_common` | Shared foundations: ring buffers, protocol codecs, config, monitoring, platform helpers |
+| `ringloom_tcp` | TCP transport library and platform-specific I/O engines |
+| `ringloom_service` | Service-side runtime and client APIs |
+| `ringloom_broker` | Broker runtime, routing, cluster management, and event loops |
+| `ringloom_testing` | Multi-process test harness for end-to-end and perf scenarios |
+
+## Getting started
+
+### Requirements
+
+- Zig **0.16.x**
+- Linux or macOS
+- Optional tooling for bindings:
+  - Gradle for Java bindings
+  - Node.js and npm for Node.js bindings
+  - A C++17 toolchain for C++ bindings
+
+### Common commands
+
+| Command | What it does |
+|---|---|
+| `zig build test` | Run unit and integration tests |
+| `zig build test-testing` | Run testing harness tests only |
+| `zig build e2e` | Run end-to-end correctness tests |
+| `zig build perf` | Run performance benchmarks |
+| `zig build run -- --config <path>` | Run the broker |
+| `zig build stat` | Run the `ringloom-stat` monitoring CLI |
+| `zig build observability` | Build the Prometheus exporter |
+| `zig build run-observability -- --storage-path /dev/shm --group default` | Run the Prometheus exporter |
+| `zig build sample-order-management` | Build the sample application |
+| `zig build run-sample-order-management` | Run the sample application |
+
+### Bindings and integration
+
+| Area | Command |
+|---|---|
+| C service ABI | `zig build service-c` |
+| C++ bindings | `zig build test-cpp` |
+| Java bindings | `zig build test-java` |
+| Java framework | `zig build test-java-framework` |
+| Node.js bindings | `zig build test-node` |
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `src/` | Core broker, service runtime, transport, tests, and binaries |
+| `tools/` | Operational tools such as `ringloom-stat` and the observability exporter |
+| `bindings/` | C++, Java, and Node.js integration layers |
+| `samples/order-management/` | Runnable multi-service sample application |
+| `docs/` | Architecture, testing, observability, and implementation notes |
+
+## Documentation
+
+- [`docs/architecture.md`](docs/architecture.md) - broker architecture and data flow
+- [`docs/testing.md`](docs/testing.md) - testing strategy and harness details
+- [`docs/observability.md`](docs/observability.md) - Prometheus exporter design
+- [`docs/samples_order_management.md`](docs/samples_order_management.md) - sample topology and behavior
+
+## Project status
+
+RingLoom already covers the core runtime pieces: local IPC, broker routing, cluster control
+flows, service discovery, testing infrastructure, and multiple language bindings. The project
+is still evolving around operational tooling, broader recovery coverage, and production
+hardening.
 
 ## License
 
