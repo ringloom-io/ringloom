@@ -127,7 +127,7 @@ mavenPublishing {
         name.set("RingLoom Java Bindings")
         description.set("Java FFM bindings for RingLoom service IPC with embedded native Linux x86_64 library.")
         inceptionYear.set("2026")
-        url.set("https://github.com/ringloom-framework/ringloom")
+        url.set("https://github.com/ringloom-io/ringloom")
         licenses {
             license {
                 name.set("Apache License, Version 2.0")
@@ -137,15 +137,15 @@ mavenPublishing {
         }
         developers {
             developer {
-                id.set("ringloom-framework")
-                name.set("RingLoom Framework")
-                url.set("https://github.com/ringloom-framework")
+                id.set("ringloom-io")
+                name.set("RingLoom Devs")
+                url.set("https://github.com/ringloom-io")
             }
         }
         scm {
-            url.set("https://github.com/ringloom-framework/ringloom")
-            connection.set("scm:git:https://github.com/ringloom-framework/ringloom.git")
-            developerConnection.set("scm:git:ssh://git@github.com/ringloom-framework/ringloom.git")
+            url.set("https://github.com/ringloom-io/ringloom")
+            connection.set("scm:git:https://github.com/ringloom-io/ringloom.git")
+            developerConnection.set("scm:git:ssh://git@github.com/ringloom-io/ringloom.git")
         }
     }
 }
