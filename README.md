@@ -52,7 +52,7 @@ Core modules:
 ### Requirements
 
 - Zig **0.16.x**
-- Linux or macOS
+- Linux
 - Optional tooling for bindings:
   - Gradle for Java bindings
   - Node.js and npm for Node.js bindings
