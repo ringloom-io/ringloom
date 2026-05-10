@@ -1,10 +1,22 @@
+import com.vanniktech.maven.publish.JavaLibrary
+import com.vanniktech.maven.publish.JavadocJar
+import com.vanniktech.maven.publish.SourcesJar
+
 plugins {
     java
+    id("com.vanniktech.maven.publish") version "0.36.0"
 }
 
 repositories {
     mavenCentral()
 }
+
+val publicationGroup = providers.gradleProperty("ringloom.mavenGroup").orElse("io.ringloom")
+val publicationArtifactId = providers.gradleProperty("ringloom.mavenArtifactId").orElse("ringloom-java-bindings")
+val publicationVersion = providers.gradleProperty("ringloom.version").orElse("0.0.0-SNAPSHOT")
+
+group = publicationGroup.get()
+version = publicationVersion.get()
 
 fun normalizeOsName(osName: String): String = when {
     osName.startsWith("linux", ignoreCase = true) -> "linux"
@@ -90,5 +102,43 @@ tasks.withType<Test>().configureEach {
     }
     System.getProperty("ringloom.nativeLibPath")?.takeIf { it.isNotBlank() }?.let {
         systemProperty("ringloom.nativeLibPath", it)
+    }
+}
+
+mavenPublishing {
+    coordinates(publicationGroup.get(), publicationArtifactId.get(), publicationVersion.get())
+    configure(
+        JavaLibrary(
+            javadocJar = JavadocJar.Empty(),
+            sourcesJar = SourcesJar.Sources(),
+        )
+    )
+    publishToMavenCentral(automaticRelease = true)
+    signAllPublications()
+
+    pom {
+        name.set("RingLoom Java Bindings")
+        description.set("Java FFM bindings for RingLoom service IPC with embedded native Linux x86_64 library.")
+        inceptionYear.set("2026")
+        url.set("https://github.com/ringloom-framework/ringloom")
+        licenses {
+            license {
+                name.set("Apache License, Version 2.0")
+                url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                distribution.set("repo")
+            }
+        }
+        developers {
+            developer {
+                id.set("ringloom-framework")
+                name.set("RingLoom Framework")
+                url.set("https://github.com/ringloom-framework")
+            }
+        }
+        scm {
+            url.set("https://github.com/ringloom-framework/ringloom")
+            connection.set("scm:git:https://github.com/ringloom-framework/ringloom.git")
+            developerConnection.set("scm:git:ssh://git@github.com/ringloom-framework/ringloom.git")
+        }
     }
 }

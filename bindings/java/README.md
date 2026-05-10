@@ -46,6 +46,20 @@ gradle jar
 
 When Gradle builds the embedded library itself, it uses `zig build service-c -Doptimize=ReleaseSmall`.
 
+## Release publishing
+
+Tag pushes publish `io.ringloom:ringloom-java-bindings:<tag-version>` to Maven Central. Tags may be prefixed with `v`; the workflow strips that prefix for the Maven version and artifact filenames.
+
+Before publishing, the `io.ringloom` namespace must be verified in the Sonatype Central Portal and these GitHub Actions secrets must be configured:
+
+- `MAVEN_CENTRAL_USERNAME`
+- `MAVEN_CENTRAL_PASSWORD`
+- `SIGNING_IN_MEMORY_KEY`
+- `SIGNING_IN_MEMORY_KEY_ID`
+- `SIGNING_IN_MEMORY_KEY_PASSWORD`
+
+`SIGNING_IN_MEMORY_KEY` must be the ASCII-armored private GPG key, including the `BEGIN PGP PRIVATE KEY BLOCK` and `END PGP PRIVATE KEY BLOCK` lines.
+
 ## Test
 
 ```bash
