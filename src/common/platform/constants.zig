@@ -91,6 +91,10 @@ pub const control_msg_type_id: i32 = 1;
 /// Message type ID for application messages.
 pub const application_msg_type_id: i32 = 2;
 
+/// Internal ring-buffer message type for records that carry a MessageHeader
+/// followed by application payload. Kept outside the u16 template-id range.
+pub const message_envelope_msg_type_id: i32 = 0x7fff_fffe;
+
 pub const flag_admin: u8 = 0x20;
 
 // IPC message fragmentation flags (used by ring buffer message layer).

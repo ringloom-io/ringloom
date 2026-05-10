@@ -944,8 +944,7 @@ pub const ReceiverEventLoop = struct {
         // service-visible ring-buffer message type.
         const result = message_router.routeToService(
             self.service_registry,
-            header.target_service_id,
-            header.template_id,
+            header.*,
             payload,
         );
         switch (result) {
@@ -1202,9 +1201,14 @@ test "processCompleteFrame routes data to service" {
     test_received_payload_len = 0;
     const messages_read = rb.read(&testCaptureHandler, 10);
     try testing.expectEqual(@as(u32, 1), messages_read);
-    try testing.expectEqual(@as(i32, 42), test_received_msg_type);
-    try testing.expectEqual(payload.len, test_received_payload_len);
-    try testing.expectEqualSlices(u8, payload[0..], test_received_payload_buf[0..test_received_payload_len]);
+    try testing.expectEqual(constants.message_envelope_msg_type_id, test_received_msg_type);
+    const envelope = ringloom_common.message.message_header.tryDecodeEnvelope(
+        test_received_msg_type,
+        test_received_payload_buf[0..test_received_payload_len],
+    ).?;
+    try testing.expectEqual(@as(u16, 42), envelope.header.template_id);
+    try testing.expectEqual(payload.len, envelope.payload.len);
+    try testing.expectEqualSlices(u8, payload[0..], envelope.payload);
 }
 
 test "doWork returns 0 when no peers connected" {

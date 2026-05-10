@@ -792,14 +792,24 @@ should adapt it to `RingloomMetrics`.
 
 ### Application counters and gauges
 
-For custom Java service metrics, add an optional startup-time registration API:
+Java services can register custom metrics at startup. These metrics are stored
+in the service's native memory-mapped counter manager, not in Java heap state,
+and are visible through the same `RingloomMetricsReader` snapshot API as native
+RingLoom counters.
 
 ```c
-ringloom_status_t ringloom_service_register_counter(
+ringloom_status_t ringloom_service_counter_register(
     ringloom_service_t *service,
     const char *name,
     size_t name_len,
     int32_t *out_counter_id
+);
+
+ringloom_status_t ringloom_service_gauge_register(
+    ringloom_service_t *service,
+    const char *name,
+    size_t name_len,
+    int32_t *out_gauge_id
 );
 
 ringloom_status_t ringloom_service_counter_add(
@@ -813,11 +823,18 @@ ringloom_status_t ringloom_service_counter_set(
     int32_t counter_id,
     int64_t value
 );
+
+ringloom_status_t ringloom_service_gauge_set(
+    ringloom_service_t *service,
+    int32_t gauge_id,
+    int64_t value
+);
 ```
 
-These calls should be optional for the first framework iteration if only native
-RingLoom metrics are needed. Based on the current scope, they should be deferred
-until after Java can read native RingLoom metrics.
+Metric names must be non-empty and fit in the native metadata label field. The
+Zig side publishes metric metadata before exposing the slot as allocated so
+readers never observe partially initialized names or kinds. Runtime unregister
+and high-cardinality label APIs are intentionally out of scope.
 
 ## IoC integration
 

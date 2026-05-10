@@ -9,11 +9,12 @@
 extern "C" {
 #endif
 
-#define RINGLOOM_SERVICE_ABI_VERSION 2u
+#define RINGLOOM_SERVICE_ABI_VERSION 3u
 
 typedef struct ringloom_service ringloom_service_t;
 typedef struct ringloom_client ringloom_client_t;
 typedef struct ringloom_message_consumer ringloom_message_consumer_t;
+typedef struct ringloom_metrics_reader ringloom_metrics_reader_t;
 
 typedef enum ringloom_status {
     RINGLOOM_OK = 0,
@@ -86,6 +87,26 @@ typedef struct ringloom_service_lifecycle_event {
     size_t service_name_len;
 } ringloom_service_lifecycle_event_t;
 
+typedef enum ringloom_metric_kind {
+    RINGLOOM_METRIC_COUNTER = 1,
+    RINGLOOM_METRIC_GAUGE = 2
+} ringloom_metric_kind_t;
+
+typedef struct ringloom_metric_descriptor {
+    const char *name;
+    size_t name_len;
+    ringloom_metric_kind_t kind;
+    int64_t value;
+} ringloom_metric_descriptor_t;
+
+typedef struct ringloom_ring_stats {
+    uint64_t capacity_bytes;
+    uint64_t used_bytes;
+    uint64_t free_bytes;
+    uint64_t producer_position;
+    uint64_t consumer_position;
+} ringloom_ring_stats_t;
+
 typedef void (*ringloom_message_handler_t)(
     void *user_data,
     const ringloom_message_t *message
@@ -137,6 +158,63 @@ ringloom_status_t ringloom_message_consumer_poll(
     uint32_t *out_count
 );
 
+ringloom_status_t ringloom_service_create_metrics_reader(
+    ringloom_service_t *service,
+    ringloom_metrics_reader_t **out_reader
+);
+
+void ringloom_metrics_reader_destroy(ringloom_metrics_reader_t *reader);
+
+ringloom_status_t ringloom_metrics_reader_counter_count(
+    ringloom_metrics_reader_t *reader,
+    size_t *out_count
+);
+
+ringloom_status_t ringloom_metrics_reader_counter_at(
+    ringloom_metrics_reader_t *reader,
+    size_t index,
+    ringloom_metric_descriptor_t *out_metric
+);
+
+ringloom_status_t ringloom_metrics_reader_ring_stats(
+    ringloom_metrics_reader_t *reader,
+    const char *ring_name,
+    size_t ring_name_len,
+    ringloom_ring_stats_t *out_stats
+);
+
+ringloom_status_t ringloom_service_counter_register(
+    ringloom_service_t *service,
+    const char *name,
+    size_t name_len,
+    int32_t *out_counter_id
+);
+
+ringloom_status_t ringloom_service_gauge_register(
+    ringloom_service_t *service,
+    const char *name,
+    size_t name_len,
+    int32_t *out_gauge_id
+);
+
+ringloom_status_t ringloom_service_counter_add(
+    ringloom_service_t *service,
+    int32_t counter_id,
+    int64_t delta
+);
+
+ringloom_status_t ringloom_service_counter_set(
+    ringloom_service_t *service,
+    int32_t counter_id,
+    int64_t value
+);
+
+ringloom_status_t ringloom_service_gauge_set(
+    ringloom_service_t *service,
+    int32_t gauge_id,
+    int64_t value
+);
+
 ringloom_status_t ringloom_service_create_client(
     ringloom_service_t *service,
     const char *target_service_name,
@@ -158,9 +236,66 @@ ringloom_status_t ringloom_client_send(
     size_t payload_len
 );
 
+ringloom_status_t ringloom_client_send_message(
+    ringloom_client_t *client,
+    uint16_t template_id,
+    const uint8_t *payload,
+    size_t payload_len
+);
+
+ringloom_status_t ringloom_client_send_message_request(
+    ringloom_client_t *client,
+    uint16_t template_id,
+    int64_t correlation_id,
+    const uint8_t *payload,
+    size_t payload_len
+);
+
 ringloom_status_t ringloom_client_try_claim(
     ringloom_client_t *client,
     uint16_t template_id,
+    size_t payload_len,
+    ringloom_buffer_claim_t *out_claim
+);
+
+ringloom_status_t ringloom_client_try_claim_request(
+    ringloom_client_t *client,
+    uint16_t template_id,
+    int64_t correlation_id,
+    size_t payload_len,
+    ringloom_buffer_claim_t *out_claim
+);
+
+ringloom_status_t ringloom_client_try_claim_to(
+    ringloom_client_t *client,
+    int16_t target_node_id,
+    int32_t target_service_id,
+    uint16_t template_id,
+    size_t payload_len,
+    ringloom_buffer_claim_t *out_claim
+);
+
+ringloom_status_t ringloom_client_try_claim_to_request(
+    ringloom_client_t *client,
+    int16_t target_node_id,
+    int32_t target_service_id,
+    uint16_t template_id,
+    int64_t correlation_id,
+    size_t payload_len,
+    ringloom_buffer_claim_t *out_claim
+);
+
+ringloom_status_t ringloom_client_try_claim_to_leader(
+    ringloom_client_t *client,
+    uint16_t template_id,
+    size_t payload_len,
+    ringloom_buffer_claim_t *out_claim
+);
+
+ringloom_status_t ringloom_client_try_claim_to_leader_request(
+    ringloom_client_t *client,
+    uint16_t template_id,
+    int64_t correlation_id,
     size_t payload_len,
     ringloom_buffer_claim_t *out_claim
 );
@@ -181,8 +316,42 @@ ringloom_status_t ringloom_client_send_to(
     size_t payload_len
 );
 
+ringloom_status_t ringloom_client_send_to_message(
+    ringloom_client_t *client,
+    int16_t target_node_id,
+    int32_t target_service_id,
+    uint16_t template_id,
+    const uint8_t *payload,
+    size_t payload_len
+);
+
+ringloom_status_t ringloom_client_send_to_message_request(
+    ringloom_client_t *client,
+    int16_t target_node_id,
+    int32_t target_service_id,
+    uint16_t template_id,
+    int64_t correlation_id,
+    const uint8_t *payload,
+    size_t payload_len
+);
+
 ringloom_status_t ringloom_client_send_to_leader(
     ringloom_client_t *client,
+    const uint8_t *payload,
+    size_t payload_len
+);
+
+ringloom_status_t ringloom_client_send_to_leader_message(
+    ringloom_client_t *client,
+    uint16_t template_id,
+    const uint8_t *payload,
+    size_t payload_len
+);
+
+ringloom_status_t ringloom_client_send_to_leader_message_request(
+    ringloom_client_t *client,
+    uint16_t template_id,
+    int64_t correlation_id,
     const uint8_t *payload,
     size_t payload_len
 );

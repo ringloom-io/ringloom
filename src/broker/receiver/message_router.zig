@@ -11,6 +11,10 @@ const std = @import("std");
 const ringloom_common = @import("ringloom_common");
 const constants = ringloom_common.platform.constants;
 const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
+const message_header = ringloom_common.message.message_header;
+const MessageHeader = ringloom_common.message.MessageHeader;
+const frame_parser = ringloom_common.protocol.frame_parser;
+const TcpFrameHeader = frame_parser.TcpFrameHeader;
 
 /// Result of a route attempt.
 pub const RouteResult = enum {
@@ -33,6 +37,39 @@ pub const RouteResult = enum {
 /// If the service's ring buffer is full, the payload is dropped (always-read model).
 pub fn routeToService(
     registry: *const ServiceRegistry,
+    header: TcpFrameHeader,
+    payload: []const u8,
+) RouteResult {
+    const target_service_id = header.target_service_id;
+    const service = registry.lookup(target_service_id) orelse {
+        return .unknown_service;
+    };
+
+    if (payload.len > std.math.maxInt(i32)) return .unknown_service;
+    const total_len = MessageHeader.encoded_length + payload.len;
+    var claim = service.messages_ring_buffer.tryClaim(constants.message_envelope_msg_type_id, total_len) orelse {
+        return .service_full;
+    };
+    MessageHeader.encode(claim.buffer[0..MessageHeader.encoded_length], .{
+        .source_node_id = @intCast(header.source_node_id),
+        .source_service_id = @intCast(header.source_service_id),
+        .target_node_id = @intCast(header.target_node_id),
+        .target_service_id = @intCast(header.target_service_id),
+        .template_id = header.template_id,
+        .correlation_id = header.correlation_id,
+        .flags = header.flags,
+        .payload_length = @intCast(payload.len),
+    });
+    if (payload.len > 0) {
+        @memcpy(claim.buffer[MessageHeader.encoded_length..][0..payload.len], payload);
+    }
+    claim.commit();
+
+    return .success;
+}
+
+pub fn routePlainToService(
+    registry: *const ServiceRegistry,
     target_service_id: u16,
     template_id: u16,
     payload: []const u8,
@@ -41,23 +78,14 @@ pub fn routeToService(
         return .unknown_service;
     };
 
-    service.messages_ring_buffer.write(msgTypeFromTemplateId(template_id), payload) catch |err| {
+    service.messages_ring_buffer.write(message_header.msgTypeFromTemplateId(template_id), payload) catch |err| {
         switch (err) {
-            error.BufferFull => {
-                return .service_full;
-            },
-            else => {
-                return .unknown_service;
-            },
+            error.BufferFull => return .service_full,
+            else => return .unknown_service,
         }
     };
 
     return .success;
-}
-
-fn msgTypeFromTemplateId(template_id: u16) i32 {
-    if (template_id == 0) return constants.application_msg_type_id;
-    return @intCast(template_id);
 }
 
 /// Service registry — maps serviceId to service state.
@@ -168,7 +196,7 @@ test "routeToService writes to service ring buffer" {
 
     // Route an application payload (header already stripped by caller).
     const payload = "hello-world-payload";
-    const result = routeToService(&registry, 5, 0, payload);
+    const result = routePlainToService(&registry, 5, 0, payload);
     try testing.expect(result == .success);
 
     // Verify the ring buffer received the correct msg_type_id and exact payload.
@@ -195,7 +223,7 @@ test "routeToService preserves non-zero template ID as message type" {
     });
 
     const payload = "templated-payload";
-    const result = routeToService(&registry, 5, 42, payload);
+    const result = routePlainToService(&registry, 5, 42, payload);
     try testing.expect(result == .success);
 
     test_received_msg_type = 0;
@@ -209,8 +237,46 @@ test "routeToService preserves non-zero template ID as message type" {
 
 test "routeToService returns unknown_service for unregistered service" {
     const registry = ServiceRegistry.init();
-    const result = routeToService(&registry, 99, 0, "test-payload");
+    const result = routePlainToService(&registry, 99, 0, "test-payload");
     try testing.expect(result == .unknown_service);
+}
+
+test "routeToService wraps remote frame metadata in envelope" {
+    var rb_buf: [4096 + 768]u8 align(8) = undefined;
+    @memset(&rb_buf, 0);
+    var rb = RingBuffer.init(&rb_buf, false, null, null) catch unreachable;
+
+    var registry = ServiceRegistry.init();
+    registry.register(.{
+        .service_id = 5,
+        .service_name = "test-service",
+        .node_id = 1,
+        .messages_ring_buffer = &rb,
+    });
+
+    const payload = "response";
+    const result = routeToService(&registry, .{
+        .frame_length = TcpFrameHeader.size + payload.len,
+        .flags = constants.flag_unfragmented,
+        .source_node_id = 7,
+        .target_node_id = 1,
+        .source_service_id = 11,
+        .target_service_id = 5,
+        .template_id = 42,
+        .correlation_id = 1234,
+    }, payload);
+    try testing.expect(result == .success);
+
+    test_received_msg_type = 0;
+    test_received_payload_len = 0;
+    const messages_read = rb.read(&testCaptureHandler, 10);
+    try testing.expectEqual(@as(u32, 1), messages_read);
+    try testing.expectEqual(constants.message_envelope_msg_type_id, test_received_msg_type);
+    const envelope = message_header.tryDecodeEnvelope(test_received_msg_type, test_received_payload_buf[0..test_received_payload_len]).?;
+    try testing.expectEqual(@as(i64, 1234), envelope.header.correlation_id);
+    try testing.expectEqual(@as(i16, 11), envelope.header.source_service_id);
+    try testing.expectEqual(@as(u16, 42), envelope.header.template_id);
+    try testing.expectEqualStrings(payload, envelope.payload);
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────

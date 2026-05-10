@@ -3,6 +3,7 @@ package io.ringloom.service;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -14,6 +15,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * work.</p>
  */
 public final class RingloomService implements AutoCloseable {
+    private static final int MAX_METRIC_NAME_BYTES = 244;
+
     private final MemorySegment nativeHandle;
     private final AtomicBoolean closed;
 
@@ -162,6 +165,54 @@ public final class RingloomService implements AutoCloseable {
         }
     }
 
+    public RingloomMetricsReader metricsReader() {
+        ensureOpen();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outReader = arena.allocate(RingloomNative.ADDRESS);
+            outReader.set(RingloomNative.ADDRESS, 0, MemorySegment.NULL);
+
+            int status = RingloomNative.createMetricsReader(nativeHandle, outReader);
+            RingloomNative.throwForStatus("ringloom_service_create_metrics_reader", status);
+            return new RingloomMetricsReader(outReader.get(RingloomNative.ADDRESS, 0));
+        }
+    }
+
+    public NativeCounter registerCounter(String name) {
+        ensureOpen();
+        byte[] nameBytes = metricNameBytes(name);
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment nativeName = arena.allocateFrom(ValueLayout.JAVA_BYTE, nameBytes);
+            MemorySegment outCounterId = arena.allocate(ValueLayout.JAVA_INT);
+            int status = RingloomNative.serviceCounterRegister(
+                nativeHandle,
+                nativeName,
+                nameBytes.length,
+                outCounterId
+            );
+            RingloomNative.throwForStatus("ringloom_service_counter_register", status);
+            return new NativeCounter(this, outCounterId.get(ValueLayout.JAVA_INT, 0));
+        }
+    }
+
+    public NativeGauge registerGauge(String name) {
+        ensureOpen();
+        byte[] nameBytes = metricNameBytes(name);
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment nativeName = arena.allocateFrom(ValueLayout.JAVA_BYTE, nameBytes);
+            MemorySegment outGaugeId = arena.allocate(ValueLayout.JAVA_INT);
+            int status = RingloomNative.serviceGaugeRegister(
+                nativeHandle,
+                nativeName,
+                nameBytes.length,
+                outGaugeId
+            );
+            RingloomNative.throwForStatus("ringloom_service_gauge_register", status);
+            return new NativeGauge(this, outGaugeId.get(ValueLayout.JAVA_INT, 0));
+        }
+    }
+
     /**
      * Stops the service registration without destroying the Java wrapper.
      */
@@ -183,9 +234,26 @@ public final class RingloomService implements AutoCloseable {
         RingloomNative.serviceDestroy(nativeHandle);
     }
 
-    private void ensureOpen() {
+    MemorySegment nativeHandle() {
+        ensureOpen();
+        return nativeHandle;
+    }
+
+    void ensureOpen() {
         if (closed.get()) {
             throw new IllegalStateException("RingloomService is closed");
         }
+    }
+
+    private static byte[] metricNameBytes(String name) {
+        Objects.requireNonNull(name, "name");
+        byte[] bytes = name.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length == 0) {
+            throw new IllegalArgumentException("name must not be empty");
+        }
+        if (bytes.length > MAX_METRIC_NAME_BYTES) {
+            throw new IllegalArgumentException("name must be at most " + MAX_METRIC_NAME_BYTES + " UTF-8 bytes");
+        }
+        return bytes;
     }
 }

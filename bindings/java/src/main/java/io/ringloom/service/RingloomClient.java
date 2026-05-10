@@ -94,7 +94,92 @@ public final class RingloomClient implements AutoCloseable {
     public int tryClaim(int templateId, long payloadLength, BufferClaim claim) {
         ensureOpen();
         Objects.requireNonNull(claim, "claim");
-        int status = RingloomNative.clientTryClaim(nativeHandle, (short) templateId, payloadLength, claim.nativeStruct());
+        int status = RingloomNative.clientTryClaim(nativeHandle, narrowTemplateId(templateId), payloadLength, claim.nativeStruct());
+        claim.refreshFromNative();
+        return status;
+    }
+
+    public int tryClaimRequest(int templateId, long correlationId, long payloadLength, BufferClaim claim) {
+        ensureOpen();
+        Objects.requireNonNull(claim, "claim");
+        int status = RingloomNative.clientTryClaimRequest(
+            nativeHandle,
+            narrowTemplateId(templateId),
+            correlationId,
+            payloadLength,
+            claim.nativeStruct()
+        );
+        claim.refreshFromNative();
+        return status;
+    }
+
+    public int tryClaimTo(
+        short targetNodeId,
+        int targetServiceId,
+        int templateId,
+        long payloadLength,
+        BufferClaim claim
+    ) {
+        ensureOpen();
+        Objects.requireNonNull(claim, "claim");
+        int status = RingloomNative.clientTryClaimTo(
+            nativeHandle,
+            targetNodeId,
+            targetServiceId,
+            narrowTemplateId(templateId),
+            payloadLength,
+            claim.nativeStruct()
+        );
+        claim.refreshFromNative();
+        return status;
+    }
+
+    public int tryClaimToRequest(
+        short targetNodeId,
+        int targetServiceId,
+        int templateId,
+        long correlationId,
+        long payloadLength,
+        BufferClaim claim
+    ) {
+        ensureOpen();
+        Objects.requireNonNull(claim, "claim");
+        int status = RingloomNative.clientTryClaimToRequest(
+            nativeHandle,
+            targetNodeId,
+            targetServiceId,
+            narrowTemplateId(templateId),
+            correlationId,
+            payloadLength,
+            claim.nativeStruct()
+        );
+        claim.refreshFromNative();
+        return status;
+    }
+
+    public int tryClaimToLeader(int templateId, long payloadLength, BufferClaim claim) {
+        ensureOpen();
+        Objects.requireNonNull(claim, "claim");
+        int status = RingloomNative.clientTryClaimToLeader(
+            nativeHandle,
+            narrowTemplateId(templateId),
+            payloadLength,
+            claim.nativeStruct()
+        );
+        claim.refreshFromNative();
+        return status;
+    }
+
+    public int tryClaimToLeaderRequest(int templateId, long correlationId, long payloadLength, BufferClaim claim) {
+        ensureOpen();
+        Objects.requireNonNull(claim, "claim");
+        int status = RingloomNative.clientTryClaimToLeaderRequest(
+            nativeHandle,
+            narrowTemplateId(templateId),
+            correlationId,
+            payloadLength,
+            claim.nativeStruct()
+        );
         claim.refreshFromNative();
         return status;
     }
@@ -147,6 +232,29 @@ public final class RingloomClient implements AutoCloseable {
         return RingloomNative.clientSend(nativeHandle, RingloomNative.payloadPointer(segment), segment.byteSize());
     }
 
+    public int sendMessage(int templateId, MemorySegment payload) {
+        ensureOpen();
+        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
+        return RingloomNative.clientSendMessage(
+            nativeHandle,
+            narrowTemplateId(templateId),
+            RingloomNative.payloadPointer(segment),
+            segment.byteSize()
+        );
+    }
+
+    public int sendMessageRequest(int templateId, long correlationId, MemorySegment payload) {
+        ensureOpen();
+        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
+        return RingloomNative.clientSendMessageRequest(
+            nativeHandle,
+            narrowTemplateId(templateId),
+            correlationId,
+            RingloomNative.payloadPointer(segment),
+            segment.byteSize()
+        );
+    }
+
     /**
      * Sends a payload to a specific target instance.
      *
@@ -167,6 +275,39 @@ public final class RingloomClient implements AutoCloseable {
         );
     }
 
+    public int sendToMessage(short targetNodeId, int targetServiceId, int templateId, MemorySegment payload) {
+        ensureOpen();
+        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
+        return RingloomNative.clientSendToMessage(
+            nativeHandle,
+            targetNodeId,
+            targetServiceId,
+            narrowTemplateId(templateId),
+            RingloomNative.payloadPointer(segment),
+            segment.byteSize()
+        );
+    }
+
+    public int sendToMessageRequest(
+        short targetNodeId,
+        int targetServiceId,
+        int templateId,
+        long correlationId,
+        MemorySegment payload
+    ) {
+        ensureOpen();
+        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
+        return RingloomNative.clientSendToMessageRequest(
+            nativeHandle,
+            targetNodeId,
+            targetServiceId,
+            narrowTemplateId(templateId),
+            correlationId,
+            RingloomNative.payloadPointer(segment),
+            segment.byteSize()
+        );
+    }
+
     /**
      * Sends a payload to the currently discovered leader instance.
      *
@@ -177,6 +318,29 @@ public final class RingloomClient implements AutoCloseable {
         ensureOpen();
         MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
         return RingloomNative.clientSendToLeader(nativeHandle, RingloomNative.payloadPointer(segment), segment.byteSize());
+    }
+
+    public int sendToLeaderMessage(int templateId, MemorySegment payload) {
+        ensureOpen();
+        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
+        return RingloomNative.clientSendToLeaderMessage(
+            nativeHandle,
+            narrowTemplateId(templateId),
+            RingloomNative.payloadPointer(segment),
+            segment.byteSize()
+        );
+    }
+
+    public int sendToLeaderMessageRequest(int templateId, long correlationId, MemorySegment payload) {
+        ensureOpen();
+        MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
+        return RingloomNative.clientSendToLeaderMessageRequest(
+            nativeHandle,
+            narrowTemplateId(templateId),
+            correlationId,
+            RingloomNative.payloadPointer(segment),
+            segment.byteSize()
+        );
     }
 
     /**
@@ -200,6 +364,19 @@ public final class RingloomClient implements AutoCloseable {
     public void sendOrThrow(MemorySegment payload) {
         int status = send(payload);
         RingloomNative.throwForStatus("ringloom_client_send", status);
+    }
+
+    public void sendMessageOrThrow(int templateId, MemorySegment payload) {
+        int status = sendMessage(templateId, payload);
+        RingloomNative.throwForStatus("ringloom_client_send_message", status);
+    }
+
+    public void sendMessageOrThrow(int templateId, byte[] payload) {
+        Objects.requireNonNull(payload, "payload");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment segment = arena.allocateFrom(ValueLayout.JAVA_BYTE, payload);
+            sendMessageOrThrow(templateId, segment);
+        }
     }
 
     @Override
@@ -334,5 +511,12 @@ public final class RingloomClient implements AutoCloseable {
         if (closed.get()) {
             throw new IllegalStateException("RingloomClient is closed");
         }
+    }
+
+    private static short narrowTemplateId(int templateId) {
+        if (templateId < 0 || templateId > 0xFFFF) {
+            throw new IllegalArgumentException("templateId must be in range 0..65535");
+        }
+        return (short) templateId;
     }
 }

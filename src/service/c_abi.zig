@@ -4,6 +4,9 @@ const builtin = @import("builtin");
 const ringloom_common = @import("ringloom_common");
 
 const memory_constants = ringloom_common.memory.constants;
+const message_header = ringloom_common.message.message_header;
+const MessageHeader = message_header.MessageHeader;
+const counters_mod = ringloom_common.concurrent.counters;
 const error_state_mod = ringloom_common.concurrent.error_state;
 const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 
@@ -16,8 +19,9 @@ const ServiceClient = @import("service_client.zig").ServiceClient;
 pub const ringloom_service = opaque {};
 pub const ringloom_client = opaque {};
 pub const ringloom_message_consumer = opaque {};
+pub const ringloom_metrics_reader = opaque {};
 
-pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 2;
+pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 3;
 const max_error_message_length = error_state_mod.max_error_message_length;
 
 pub const ringloom_status_t = enum(c_int) {
@@ -36,6 +40,7 @@ pub const ringloom_status_t = enum(c_int) {
 };
 
 const Status = ringloom_status_t;
+const custom_metric_category: u28 = 0;
 
 pub const ringloom_service_config_t = extern struct {
     storage_path: ?[*]const u8,
@@ -90,6 +95,26 @@ pub const ringloom_service_lifecycle_event_t = extern struct {
     is_leader: bool,
     service_name: ?[*]const u8,
     service_name_len: usize,
+};
+
+pub const ringloom_metric_kind_t = enum(c_int) {
+    RINGLOOM_METRIC_COUNTER = 1,
+    RINGLOOM_METRIC_GAUGE = 2,
+};
+
+pub const ringloom_metric_descriptor_t = extern struct {
+    name: ?[*]const u8,
+    name_len: usize,
+    kind: ringloom_metric_kind_t,
+    value: i64,
+};
+
+pub const ringloom_ring_stats_t = extern struct {
+    capacity_bytes: u64,
+    used_bytes: u64,
+    free_bytes: u64,
+    producer_position: u64,
+    consumer_position: u64,
 };
 
 const ServiceHandle = struct {
@@ -192,6 +217,15 @@ const MessageConsumerHandle = struct {
     }
 };
 
+const MetricsReaderHandle = struct {
+    service: *ServiceHandle,
+    name_scratch: [244]u8 = undefined,
+
+    fn init(service: *ServiceHandle) MetricsReaderHandle {
+        return .{ .service = service };
+    }
+};
+
 const OwnedServiceConfig = struct {
     storage_path: []u8,
     group: []u8,
@@ -259,6 +293,10 @@ fn messageConsumerHandleFromOpaque(consumer: ?*ringloom_message_consumer) ?*Mess
     return if (consumer) |ptr| @ptrCast(@alignCast(ptr)) else null;
 }
 
+fn metricsReaderHandleFromOpaque(reader: ?*ringloom_metrics_reader) ?*MetricsReaderHandle {
+    return if (reader) |ptr| @ptrCast(@alignCast(ptr)) else null;
+}
+
 fn serviceHandleToOpaque(service: *ServiceHandle) *ringloom_service {
     return @ptrCast(service);
 }
@@ -269,6 +307,10 @@ fn clientHandleToOpaque(client: *ClientHandle) *ringloom_client {
 
 fn messageConsumerHandleToOpaque(consumer: *MessageConsumerHandle) *ringloom_message_consumer {
     return @ptrCast(consumer);
+}
+
+fn metricsReaderHandleToOpaque(reader: *MetricsReaderHandle) *ringloom_metrics_reader {
+    return @ptrCast(reader);
 }
 
 fn requiredBytes(ptr: ?[*]const u8, len: usize, field_name: []const u8) ![]const u8 {
@@ -465,6 +507,18 @@ fn requireActiveConsumer(consumer: ?*ringloom_message_consumer) ?*MessageConsume
     return handle;
 }
 
+fn requireMetricsReader(reader: ?*ringloom_metrics_reader) ?*MetricsReaderHandle {
+    const handle = metricsReaderHandleFromOpaque(reader) orelse return null;
+    if (handle.service.destroy_requested.load(.acquire) or
+        handle.service.stopped.load(.acquire) or
+        handle.service.engine == null)
+    {
+        _ = setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "parent service is not active");
+        return null;
+    }
+    return handle;
+}
+
 fn progressControlPlane(service: *ServiceHandle) void {
     const engine = service.engine orelse return;
     if (engine.control_agent_runner == null) {
@@ -507,17 +561,31 @@ fn pollDispatch(msg_type_id: i32, payload: []const u8) void {
         user_data: ?*anyopaque,
         message: *const ringloom_message_t,
     ) callconv(.c) void = @ptrCast(ctx.handler.?);
-    var message = ringloom_message_t{
-        .correlation_id = 0,
-        .source_node_id = 0,
-        .source_service_id = 0,
-        .target_node_id = 0,
-        .target_service_id = 0,
-        .template_id = if (msg_type_id > 0) @intCast(msg_type_id) else 0,
-        .flags = 0,
-        .payload = if (payload.len == 0) null else payload.ptr,
-        .payload_len = payload.len,
-    };
+
+    var message = if (message_header.tryDecodeEnvelope(msg_type_id, payload)) |envelope|
+        ringloom_message_t{
+            .correlation_id = envelope.header.correlation_id,
+            .source_node_id = envelope.header.source_node_id,
+            .source_service_id = envelope.header.source_service_id,
+            .target_node_id = envelope.header.target_node_id,
+            .target_service_id = envelope.header.target_service_id,
+            .template_id = envelope.header.template_id,
+            .flags = envelope.header.flags,
+            .payload = if (envelope.payload.len == 0) null else envelope.payload.ptr,
+            .payload_len = envelope.payload.len,
+        }
+    else
+        ringloom_message_t{
+            .correlation_id = 0,
+            .source_node_id = 0,
+            .source_service_id = 0,
+            .target_node_id = 0,
+            .target_service_id = 0,
+            .template_id = message_header.templateIdFromMsgTypeId(msg_type_id),
+            .flags = 0,
+            .payload = if (payload.len == 0) null else payload.ptr,
+            .payload_len = payload.len,
+        };
 
     handler(ctx.user_data, &message);
     ctx.out_count.* += 1;
@@ -687,8 +755,10 @@ export fn ringloom_message_consumer_destroy(consumer: ?*ringloom_message_consume
     if (handle.closed.cmpxchgWeak(false, true, .acq_rel, .acquire) != null) return;
 
     handle.service.polling_consumer_active.store(false, .release);
-    handle.service.release();
-    handle.service.allocator.destroy(handle);
+    const service = handle.service;
+    const allocator = service.allocator;
+    allocator.destroy(handle);
+    service.release();
 }
 
 export fn ringloom_message_consumer_poll(
@@ -722,6 +792,266 @@ export fn ringloom_message_consumer_poll(
 
     _ = consumer_handle.ring_buffer.read(&pollDispatch, limit);
     return .RINGLOOM_OK;
+}
+
+export fn ringloom_service_create_metrics_reader(
+    service: ?*ringloom_service,
+    out_reader: ?*?*ringloom_metrics_reader,
+) Status {
+    clearLastError();
+
+    const out = out_reader orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_reader must not be NULL");
+    out.* = null;
+
+    const service_handle = requireActiveService(service) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+
+    const reader = service_handle.allocator.create(MetricsReaderHandle) catch
+        return setLastError(.RINGLOOM_ERR_OUT_OF_MEMORY, "native allocation failed");
+    reader.* = MetricsReaderHandle.init(service_handle);
+    service_handle.retain();
+
+    out.* = metricsReaderHandleToOpaque(reader);
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_metrics_reader_destroy(reader: ?*ringloom_metrics_reader) void {
+    clearLastError();
+    const handle = metricsReaderHandleFromOpaque(reader) orelse return;
+    const service = handle.service;
+    const allocator = service.allocator;
+    allocator.destroy(handle);
+    service.release();
+}
+
+export fn ringloom_metrics_reader_counter_count(
+    reader: ?*ringloom_metrics_reader,
+    out_count: ?*usize,
+) Status {
+    clearLastError();
+
+    const out = out_count orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_count must not be NULL");
+    out.* = 0;
+
+    const handle = requireMetricsReader(reader) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    out.* = handle.service.engine.?.counters.allocatedCount();
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_metrics_reader_counter_at(
+    reader: ?*ringloom_metrics_reader,
+    index: usize,
+    out_metric: ?*ringloom_metric_descriptor_t,
+) Status {
+    clearLastError();
+
+    const out = out_metric orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_metric must not be NULL");
+    out.* = .{
+        .name = null,
+        .name_len = 0,
+        .kind = .RINGLOOM_METRIC_COUNTER,
+        .value = 0,
+    };
+
+    const handle = requireMetricsReader(reader) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    const snapshot = handle.service.engine.?.counters.snapshotAllocatedAt(index, &handle.name_scratch) orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "counter index is out of range");
+
+    out.* = .{
+        .name = if (snapshot.label.len == 0) null else snapshot.label.ptr,
+        .name_len = snapshot.label.len,
+        .kind = nativeMetricKind(counters_mod.metricKindFromTypeId(snapshot.type_id)),
+        .value = snapshot.value,
+    };
+    return .RINGLOOM_OK;
+}
+
+fn nativeMetricKind(kind: counters_mod.MetricKind) ringloom_metric_kind_t {
+    return switch (kind) {
+        .counter => .RINGLOOM_METRIC_COUNTER,
+        .gauge => .RINGLOOM_METRIC_GAUGE,
+    };
+}
+
+export fn ringloom_metrics_reader_ring_stats(
+    reader: ?*ringloom_metrics_reader,
+    ring_name: ?[*]const u8,
+    ring_name_len: usize,
+    out_stats: ?*ringloom_ring_stats_t,
+) Status {
+    clearLastError();
+
+    const out = out_stats orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_stats must not be NULL");
+    out.* = .{
+        .capacity_bytes = 0,
+        .used_bytes = 0,
+        .free_bytes = 0,
+        .producer_position = 0,
+        .consumer_position = 0,
+    };
+
+    const handle = requireMetricsReader(reader) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    const name = requiredBytes(ring_name, ring_name_len, "ring_name") catch
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "ring_name must not be empty");
+    const service_meta = handle.service.engine.?.service_meta;
+
+    const buffer = if (std.mem.eql(u8, name, "control"))
+        service_meta.getControlBuffer()
+    else if (std.mem.eql(u8, name, "messages"))
+        service_meta.getMessagesBuffer()
+    else
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "unknown ring name");
+
+    out.* = ringStatsForBuffer(buffer) catch |err|
+        return mapRuntimeError(err, "failed to read ring stats");
+    return .RINGLOOM_OK;
+}
+
+fn ringStatsForBuffer(buffer: []u8) !ringloom_ring_stats_t {
+    var ring = try RingBuffer.init(@alignCast(buffer), false, null, null);
+    const capacity = ring.getCapacity();
+    const raw_used = ring.size();
+    const used = @min(raw_used, capacity);
+    const producer = ring.producerPosition();
+    const consumer = ring.consumerPosition();
+
+    return .{
+        .capacity_bytes = @intCast(capacity),
+        .used_bytes = @intCast(used),
+        .free_bytes = @intCast(capacity - used),
+        .producer_position = if (producer < 0) 0 else @intCast(producer),
+        .consumer_position = if (consumer < 0) 0 else @intCast(consumer),
+    };
+}
+
+export fn ringloom_service_counter_register(
+    service: ?*ringloom_service,
+    name: ?[*]const u8,
+    name_len: usize,
+    out_counter_id: ?*i32,
+) Status {
+    return registerServiceMetric(service, name, name_len, .counter, out_counter_id);
+}
+
+export fn ringloom_service_gauge_register(
+    service: ?*ringloom_service,
+    name: ?[*]const u8,
+    name_len: usize,
+    out_gauge_id: ?*i32,
+) Status {
+    return registerServiceMetric(service, name, name_len, .gauge, out_gauge_id);
+}
+
+export fn ringloom_service_counter_add(
+    service: ?*ringloom_service,
+    counter_id: i32,
+    delta: i64,
+) Status {
+    clearLastError();
+    if (counter_id < 0) {
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "counter_id must be non-negative");
+    }
+
+    const handle = requireActiveService(service) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    const kind = handle.engine.?.counters.allocatedKind(@intCast(counter_id)) catch |err|
+        return mapMetricAccessError(err, "counter_id does not reference an allocated counter");
+    if (kind != .counter) {
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "counter_id references a gauge");
+    }
+    handle.engine.?.counters.tryAdd(@intCast(counter_id), delta) catch |err|
+        return mapMetricAccessError(err, "counter_id does not reference an allocated counter");
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_service_counter_set(
+    service: ?*ringloom_service,
+    counter_id: i32,
+    value: i64,
+) Status {
+    clearLastError();
+    if (counter_id < 0) {
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "counter_id must be non-negative");
+    }
+
+    const handle = requireActiveService(service) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    const kind = handle.engine.?.counters.allocatedKind(@intCast(counter_id)) catch |err|
+        return mapMetricAccessError(err, "counter_id does not reference an allocated counter");
+    if (kind != .counter) {
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "counter_id references a gauge");
+    }
+    handle.engine.?.counters.trySet(@intCast(counter_id), value) catch |err|
+        return mapMetricAccessError(err, "counter_id does not reference an allocated counter");
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_service_gauge_set(
+    service: ?*ringloom_service,
+    gauge_id: i32,
+    value: i64,
+) Status {
+    clearLastError();
+    if (gauge_id < 0) {
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "gauge_id must be non-negative");
+    }
+
+    const handle = requireActiveService(service) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    const kind = handle.engine.?.counters.allocatedKind(@intCast(gauge_id)) catch |err|
+        return mapMetricAccessError(err, "gauge_id does not reference an allocated gauge");
+    if (kind != .gauge) {
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "gauge_id references a counter");
+    }
+    handle.engine.?.counters.trySet(@intCast(gauge_id), value) catch |err|
+        return mapMetricAccessError(err, "gauge_id does not reference an allocated gauge");
+    return .RINGLOOM_OK;
+}
+
+fn registerServiceMetric(
+    service: ?*ringloom_service,
+    name: ?[*]const u8,
+    name_len: usize,
+    kind: counters_mod.MetricKind,
+    out_metric_id: ?*i32,
+) Status {
+    clearLastError();
+    const out = out_metric_id orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_metric_id must not be NULL");
+    out.* = -1;
+
+    const handle = requireActiveService(service) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    const metric_name = requiredBytes(name, name_len, "name") catch
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "metric name must not be empty");
+    if (metric_name.len > counters_mod.max_label_length) {
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "metric name is too long");
+    }
+
+    const type_id = counters_mod.encodeTypeId(kind, custom_metric_category);
+    const id = handle.engine.?.counters.allocate(type_id, metric_name) orelse
+        return setLastError(.RINGLOOM_ERR_OUT_OF_MEMORY, "native metric slots exhausted");
+    if (id > std.math.maxInt(i32)) {
+        return setLastError(.RINGLOOM_ERR_INTERNAL, "native metric id is out of range");
+    }
+
+    out.* = @intCast(id);
+    return .RINGLOOM_OK;
+}
+
+fn mapMetricAccessError(err: counters_mod.CountersManager.CounterAccessError, message: []const u8) Status {
+    return switch (err) {
+        error.InvalidCounterId,
+        error.CounterNotAllocated,
+        => setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, message),
+    };
 }
 
 export fn ringloom_service_create_client(
@@ -770,8 +1100,10 @@ export fn ringloom_client_destroy(client: ?*ringloom_client) void {
         handle.lifecycle_handler = null;
         handle.lifecycle_user_data = null;
     }
-    handle.service.release();
-    handle.service.allocator.destroy(handle);
+    const service = handle.service;
+    const allocator = service.allocator;
+    allocator.destroy(handle);
+    service.release();
 }
 
 export fn ringloom_client_set_lifecycle_handler(
@@ -809,6 +1141,43 @@ export fn ringloom_client_send(
     return .RINGLOOM_OK;
 }
 
+export fn ringloom_client_send_message(
+    client: ?*ringloom_client,
+    template_id: u16,
+    payload: ?[*]const u8,
+    payload_len: usize,
+) Status {
+    clearLastError();
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+    const payload_slice = payloadBytes(payload, payload_len) orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "payload pointer is NULL for non-zero payload length");
+
+    handle.client.sendMessage(template_id, payload_slice) catch |err|
+        return mapRuntimeError(err, "failed to send template-aware payload");
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_client_send_message_request(
+    client: ?*ringloom_client,
+    template_id: u16,
+    correlation_id: i64,
+    payload: ?[*]const u8,
+    payload_len: usize,
+) Status {
+    clearLastError();
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+    const payload_slice = payloadBytes(payload, payload_len) orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "payload pointer is NULL for non-zero payload length");
+
+    handle.client.sendMessageRequest(template_id, correlation_id, payload_slice) catch |err|
+        return mapRuntimeError(err, "failed to send request payload");
+    return .RINGLOOM_OK;
+}
+
 export fn ringloom_client_send_to(
     client: ?*ringloom_client,
     target_node_id: i16,
@@ -828,6 +1197,52 @@ export fn ringloom_client_send_to(
     return .RINGLOOM_OK;
 }
 
+export fn ringloom_client_send_to_message(
+    client: ?*ringloom_client,
+    target_node_id: i16,
+    target_service_id: i32,
+    template_id: u16,
+    payload: ?[*]const u8,
+    payload_len: usize,
+) Status {
+    clearLastError();
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+    const payload_slice = payloadBytes(payload, payload_len) orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "payload pointer is NULL for non-zero payload length");
+
+    handle.client.sendToMessage(target_node_id, target_service_id, template_id, payload_slice) catch |err|
+        return mapRuntimeError(err, "failed to send template-aware payload to target service id");
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_client_send_to_message_request(
+    client: ?*ringloom_client,
+    target_node_id: i16,
+    target_service_id: i32,
+    template_id: u16,
+    correlation_id: i64,
+    payload: ?[*]const u8,
+    payload_len: usize,
+) Status {
+    clearLastError();
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+    const payload_slice = payloadBytes(payload, payload_len) orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "payload pointer is NULL for non-zero payload length");
+
+    handle.client.sendToMessageRequest(
+        target_node_id,
+        target_service_id,
+        template_id,
+        correlation_id,
+        payload_slice,
+    ) catch |err| return mapRuntimeError(err, "failed to send request payload to target service id");
+    return .RINGLOOM_OK;
+}
+
 export fn ringloom_client_send_to_leader(
     client: ?*ringloom_client,
     payload: ?[*]const u8,
@@ -842,6 +1257,43 @@ export fn ringloom_client_send_to_leader(
 
     handle.client.sendToLeader(payload_slice) catch |err|
         return mapRuntimeError(err, "failed to send payload to leader");
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_client_send_to_leader_message(
+    client: ?*ringloom_client,
+    template_id: u16,
+    payload: ?[*]const u8,
+    payload_len: usize,
+) Status {
+    clearLastError();
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+    const payload_slice = payloadBytes(payload, payload_len) orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "payload pointer is NULL for non-zero payload length");
+
+    handle.client.sendToLeaderMessage(template_id, payload_slice) catch |err|
+        return mapRuntimeError(err, "failed to send template-aware payload to leader");
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_client_send_to_leader_message_request(
+    client: ?*ringloom_client,
+    template_id: u16,
+    correlation_id: i64,
+    payload: ?[*]const u8,
+    payload_len: usize,
+) Status {
+    clearLastError();
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+    const payload_slice = payloadBytes(payload, payload_len) orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "payload pointer is NULL for non-zero payload length");
+
+    handle.client.sendToLeaderMessageRequest(template_id, correlation_id, payload_slice) catch |err|
+        return mapRuntimeError(err, "failed to send request payload to leader");
     return .RINGLOOM_OK;
 }
 
@@ -883,16 +1335,8 @@ export fn ringloom_client_try_claim(
 ) Status {
     clearLastError();
 
-    const out = out_claim orelse
-        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_claim must not be NULL");
-    out.* = .{
-        .payload = null,
-        .payload_len = 0,
-        ._ring_buffer = 0,
-        ._header_index = 0,
-        ._record_length = 0,
-        ._active = 0,
-    };
+    const out = prepareClaimOut(out_claim) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
 
     const handle = requireActiveClient(client) orelse
         return .RINGLOOM_ERR_INVALID_ARGUMENT;
@@ -901,6 +1345,149 @@ export fn ringloom_client_try_claim(
     const claim = handle.client.tryClaim(template_id, payload_len) catch |err|
         return mapRuntimeError(err, "failed to claim writable send buffer");
 
+    writeClaimOut(out, claim);
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_client_try_claim_request(
+    client: ?*ringloom_client,
+    template_id: u16,
+    correlation_id: i64,
+    payload_len: usize,
+    out_claim: ?*ringloom_buffer_claim_t,
+) Status {
+    clearLastError();
+
+    const out = prepareClaimOut(out_claim) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+
+    const claim = handle.client.tryClaimRequest(template_id, correlation_id, payload_len) catch |err|
+        return mapRuntimeError(err, "failed to claim writable request send buffer");
+
+    writeClaimOut(out, claim);
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_client_try_claim_to(
+    client: ?*ringloom_client,
+    target_node_id: i16,
+    target_service_id: i32,
+    template_id: u16,
+    payload_len: usize,
+    out_claim: ?*ringloom_buffer_claim_t,
+) Status {
+    clearLastError();
+
+    const out = prepareClaimOut(out_claim) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+
+    const claim = handle.client.tryClaimTo(target_node_id, target_service_id, template_id, payload_len) catch |err|
+        return mapRuntimeError(err, "failed to claim writable target send buffer");
+
+    writeClaimOut(out, claim);
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_client_try_claim_to_request(
+    client: ?*ringloom_client,
+    target_node_id: i16,
+    target_service_id: i32,
+    template_id: u16,
+    correlation_id: i64,
+    payload_len: usize,
+    out_claim: ?*ringloom_buffer_claim_t,
+) Status {
+    clearLastError();
+
+    const out = prepareClaimOut(out_claim) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+
+    const claim = handle.client.tryClaimToRequest(
+        target_node_id,
+        target_service_id,
+        template_id,
+        correlation_id,
+        payload_len,
+    ) catch |err| return mapRuntimeError(err, "failed to claim writable target request send buffer");
+
+    writeClaimOut(out, claim);
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_client_try_claim_to_leader(
+    client: ?*ringloom_client,
+    template_id: u16,
+    payload_len: usize,
+    out_claim: ?*ringloom_buffer_claim_t,
+) Status {
+    clearLastError();
+
+    const out = prepareClaimOut(out_claim) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+
+    const claim = handle.client.tryClaimToLeader(template_id, payload_len) catch |err|
+        return mapRuntimeError(err, "failed to claim writable leader send buffer");
+
+    writeClaimOut(out, claim);
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_client_try_claim_to_leader_request(
+    client: ?*ringloom_client,
+    template_id: u16,
+    correlation_id: i64,
+    payload_len: usize,
+    out_claim: ?*ringloom_buffer_claim_t,
+) Status {
+    clearLastError();
+
+    const out = prepareClaimOut(out_claim) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    progressControlPlane(handle.service);
+
+    const claim = handle.client.tryClaimToLeaderRequest(template_id, correlation_id, payload_len) catch |err|
+        return mapRuntimeError(err, "failed to claim writable leader request send buffer");
+
+    writeClaimOut(out, claim);
+    return .RINGLOOM_OK;
+}
+
+fn prepareClaimOut(out_claim: ?*ringloom_buffer_claim_t) ?*ringloom_buffer_claim_t {
+    const out = out_claim orelse {
+        _ = setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_claim must not be NULL");
+        return null;
+    };
+    out.* = .{
+        .payload = null,
+        .payload_len = 0,
+        ._ring_buffer = 0,
+        ._header_index = 0,
+        ._record_length = 0,
+        ._active = 0,
+    };
+    return out;
+}
+
+fn writeClaimOut(out: *ringloom_buffer_claim_t, claim: ServiceClient.SendClaim) void {
     out.* = .{
         .payload = if (claim.payload.len == 0) null else claim.payload.ptr,
         .payload_len = claim.payload.len,
@@ -909,7 +1496,6 @@ export fn ringloom_client_try_claim(
         ._record_length = claim.claim.record_length,
         ._active = 1,
     };
-    return .RINGLOOM_OK;
 }
 
 fn clearClaim(claim: *ringloom_buffer_claim_t) void {
@@ -999,6 +1585,12 @@ comptime {
     std.debug.assert(@offsetOf(ringloom_service_lifecycle_event_t, "service_name") == 16);
     std.debug.assert(@offsetOf(ringloom_service_lifecycle_event_t, "service_name_len") == 24);
     std.debug.assert(@sizeOf(ringloom_service_lifecycle_event_t) == 32);
+    std.debug.assert(@offsetOf(ringloom_metric_descriptor_t, "name") == 0);
+    std.debug.assert(@offsetOf(ringloom_metric_descriptor_t, "name_len") == 8);
+    std.debug.assert(@offsetOf(ringloom_metric_descriptor_t, "kind") == 16);
+    std.debug.assert(@offsetOf(ringloom_metric_descriptor_t, "value") == 24);
+    std.debug.assert(@sizeOf(ringloom_metric_descriptor_t) == 32);
+    std.debug.assert(@sizeOf(ringloom_ring_stats_t) == 40);
 }
 
 test "abi version matches header constant" {

@@ -8,7 +8,7 @@
 //! Metadata entries are 256 bytes each, holding state, type_id, and a label string.
 //!
 //! Metadata layout per slot (256 bytes):
-//!   [0..4)    state      (i32: unused=0, allocated=1, reclaimed=-1)
+//!   [0..4)    state      (i32: unused=0, allocated=1, allocating=2, reclaimed=-1)
 //!   [4..8)    type_id    (i32)
 //!   [8..12)   label_len  (i32)
 //!   [12..256) label      (up to 244 bytes of UTF-8 text)
@@ -27,14 +27,38 @@ pub const counter_value_length: usize = constants.cache_line_pad; // 128
 pub const counter_metadata_length: usize = 256;
 
 /// Maximum number of label bytes that fit in a metadata slot.
-const max_label_length: usize = counter_metadata_length - 12; // 244
+pub const max_label_length: usize = counter_metadata_length - 12; // 244
+
+pub const MetricKind = enum(u4) {
+    counter = 0,
+    gauge = 1,
+};
+
+const metric_kind_shift: u5 = 28;
+const metric_category_mask: u32 = 0x0fff_ffff;
 
 /// State of a counter slot.
 pub const CounterState = enum(i32) {
     unused = 0,
     allocated = 1,
+    allocating = 2,
     reclaimed = -1,
 };
+
+pub fn encodeTypeId(kind: MetricKind, category: u28) i32 {
+    const raw = (@as(u32, @intFromEnum(kind)) << metric_kind_shift) |
+        (@as(u32, category) & metric_category_mask);
+    return @bitCast(raw);
+}
+
+pub fn metricKindFromTypeId(type_id: i32) MetricKind {
+    const raw: u32 = @bitCast(type_id);
+    const kind_bits: u4 = @intCast(raw >> metric_kind_shift);
+    return switch (kind_bits) {
+        @intFromEnum(MetricKind.gauge) => .gauge,
+        else => .counter,
+    };
+}
 
 // ── CountersManager ───────────────────────────────────────────────────
 
@@ -51,6 +75,12 @@ pub const CountersManager = struct {
     pub const MetadataView = struct {
         type_id: i32,
         label: []const u8,
+    };
+
+    pub const CounterSnapshot = struct {
+        type_id: i32,
+        label: []const u8,
+        value: i64,
     };
 
     // ── Construction ──────────────────────────────────────────────────
@@ -87,8 +117,8 @@ pub const CountersManager = struct {
 
             switch (state) {
                 .unused, .reclaimed => {
-                    // Try to claim: CAS current → allocated.
-                    const desired = @intFromEnum(CounterState.allocated);
+                    // Try to claim a private initialization state.
+                    const desired = @intFromEnum(CounterState.allocating);
                     if (@cmpxchgWeak(
                         i32,
                         state_ptr,
@@ -99,13 +129,13 @@ pub const CountersManager = struct {
                     ) == null) {
                         // CAS succeeded — we own this slot.
                         self.writeMetadata(id, type_id, label);
-                        // Zero the value with release so readers see consistent state.
                         @atomicStore(i64, self.valuePtr(id), 0, .release);
+                        @atomicStore(i32, state_ptr, @intFromEnum(CounterState.allocated), .release);
                         return id;
                     }
                     // CAS failed — another thread grabbed it; continue scanning.
                 },
-                .allocated => {},
+                .allocated, .allocating => {},
             }
         }
         return null;
@@ -143,11 +173,79 @@ pub const CountersManager = struct {
         @atomicStore(i64, self.valuePtr(counter_id), value, .release);
     }
 
+    pub const CounterAccessError = error{
+        InvalidCounterId,
+        CounterNotAllocated,
+    };
+
+    pub fn tryAdd(self: *Self, counter_id: usize, delta: i64) CounterAccessError!void {
+        const ptr = try self.allocatedValuePtr(counter_id);
+        _ = @atomicRmw(i64, ptr, .Add, delta, .monotonic);
+    }
+
+    pub fn trySet(self: *Self, counter_id: usize, value: i64) CounterAccessError!void {
+        const ptr = try self.allocatedValuePtr(counter_id);
+        @atomicStore(i64, ptr, value, .release);
+    }
+
     // ── Queries ───────────────────────────────────────────────────────
 
     /// The maximum counter id that can be allocated (inclusive).
     pub fn maxCounterId(self: *const Self) usize {
         return self.max_counter_id;
+    }
+
+    pub fn isAllocated(self: *Self, counter_id: usize) bool {
+        if (counter_id > self.max_counter_id) return false;
+        const state_raw = @atomicLoad(i32, self.metadataStatePtr(counter_id), .acquire);
+        const state: CounterState = @enumFromInt(state_raw);
+        return state == .allocated;
+    }
+
+    pub fn allocatedKind(self: *Self, counter_id: usize) CounterAccessError!MetricKind {
+        _ = try self.allocatedValuePtr(counter_id);
+        return metricKindFromTypeId(self.readMetadata(counter_id).type_id);
+    }
+
+    pub fn allocatedCount(self: *Self) usize {
+        var count: usize = 0;
+        var id: usize = 0;
+        while (id <= self.max_counter_id) : (id += 1) {
+            const state_raw = @atomicLoad(i32, self.metadataStatePtr(id), .acquire);
+            const state: CounterState = @enumFromInt(state_raw);
+            if (state == .allocated) count += 1;
+        }
+        return count;
+    }
+
+    pub fn snapshotAllocatedAt(self: *Self, index: usize, label_scratch: []u8) ?CounterSnapshot {
+        var allocated_index: usize = 0;
+        var id: usize = 0;
+        while (id <= self.max_counter_id) : (id += 1) {
+            const state_before = @atomicLoad(i32, self.metadataStatePtr(id), .acquire);
+            const state: CounterState = @enumFromInt(state_before);
+            if (state != .allocated) continue;
+            if (allocated_index != index) {
+                allocated_index += 1;
+                continue;
+            }
+
+            const meta = self.readMetadata(id);
+            const copy_len = @min(meta.label.len, label_scratch.len);
+            if (copy_len > 0) {
+                @memcpy(label_scratch[0..copy_len], meta.label[0..copy_len]);
+            }
+            const value = @atomicLoad(i64, self.valuePtr(id), .acquire);
+            const state_after = @atomicLoad(i32, self.metadataStatePtr(id), .acquire);
+            if (state_after != state_before) return null;
+
+            return .{
+                .type_id = meta.type_id,
+                .label = label_scratch[0..copy_len],
+                .value = value,
+            };
+        }
+        return null;
     }
 
     /// Iterate all **allocated** counters, calling `callback` for each.
@@ -174,6 +272,14 @@ pub const CountersManager = struct {
         const offset = id * counter_value_length;
         const byte_ptr: [*]u8 = @ptrCast(self.values_buffer.ptr + offset);
         return @ptrCast(@alignCast(byte_ptr));
+    }
+
+    fn allocatedValuePtr(self: *Self, id: usize) CounterAccessError!*i64 {
+        if (id > self.max_counter_id) return error.InvalidCounterId;
+        const state_raw = @atomicLoad(i32, self.metadataStatePtr(id), .acquire);
+        const state: CounterState = @enumFromInt(state_raw);
+        if (state != .allocated) return error.CounterNotAllocated;
+        return self.valuePtr(id);
     }
 
     /// Return a pointer to the state word (i32) at the start of the
@@ -305,4 +411,25 @@ test "set overwrites counter value" {
     const id = mgr.allocate(1, "overwrite-me") orelse unreachable;
     mgr.set(id, 42);
     try std.testing.expectEqual(@as(i64, 42), mgr.get(id));
+}
+
+test "metric type id encodes kind without changing counter default" {
+    try std.testing.expectEqual(MetricKind.counter, metricKindFromTypeId(0));
+    const gauge_type = encodeTypeId(.gauge, 7);
+    try std.testing.expectEqual(MetricKind.gauge, metricKindFromTypeId(gauge_type));
+}
+
+test "tryAdd and trySet reject unallocated counters" {
+    var values_buf: [128 * 2]u8 align(128) = [_]u8{0} ** (128 * 2);
+    var meta_buf: [256 * 2]u8 align(4) = [_]u8{0} ** (256 * 2);
+
+    var mgr = CountersManager.init(&values_buf, &meta_buf);
+    try std.testing.expectError(error.CounterNotAllocated, mgr.tryAdd(0, 1));
+    try std.testing.expectError(error.InvalidCounterId, mgr.trySet(3, 1));
+
+    const id = mgr.allocate(encodeTypeId(.counter, 1), "custom") orelse unreachable;
+    try mgr.tryAdd(id, 5);
+    try std.testing.expectEqual(@as(i64, 5), mgr.get(id));
+    try mgr.trySet(id, 9);
+    try std.testing.expectEqual(@as(i64, 9), mgr.get(id));
 }

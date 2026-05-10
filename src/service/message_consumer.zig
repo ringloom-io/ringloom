@@ -6,6 +6,7 @@ const std = @import("std");
 const ringloom_common = @import("ringloom_common");
 const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const constants = ringloom_common.memory.constants;
+const message_header = ringloom_common.message.message_header;
 const ServiceCounters = ringloom_common.monitoring.ServiceCounters;
 
 /// Default number of messages to read per poll cycle.
@@ -67,6 +68,10 @@ fn onMessage(msg_type_id: i32, payload: []const u8) void {
         }
     }
     if (tls_handler) |handler| {
-        handler(msg_type_id, payload);
+        if (message_header.tryDecodeEnvelope(msg_type_id, payload)) |envelope| {
+            handler(message_header.msgTypeFromTemplateId(envelope.header.template_id), envelope.payload);
+        } else {
+            handler(msg_type_id, payload);
+        }
     }
 }

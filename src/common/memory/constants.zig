@@ -80,6 +80,9 @@ pub const control_msg_type_id: i32 = platform_constants.control_msg_type_id;
 /// Message type ID for application messages.
 pub const application_msg_type_id: i32 = platform_constants.application_msg_type_id;
 
+/// Internal ring-buffer message type for MessageHeader-wrapped application records.
+pub const message_envelope_msg_type_id: i32 = platform_constants.message_envelope_msg_type_id;
+
 /// Services subdirectory.
 pub const services_directory: []const u8 = platform_constants.services_directory;
 

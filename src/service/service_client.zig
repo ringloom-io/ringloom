@@ -170,6 +170,10 @@ pub const ServiceClient = struct {
     /// Send a message to one instance of this service, selected by the
     /// load balancer.
     pub fn send(self: *Self, payload: []const u8) SendError!void {
+        try self.sendMessage(0, payload);
+    }
+
+    pub fn sendMessage(self: *Self, template_id: u16, payload: []const u8) SendError!void {
         self.lockInstances();
         defer self.unlockInstances();
 
@@ -186,27 +190,32 @@ pub const ServiceClient = struct {
             };
         }
 
-        if (instance.node_id == self.local_node_id) {
-            // Same-host direct path.
-            const producer = instance.ipc_producer orelse
-                return error.ProducerNotInitialized;
-            producer.write(constants.application_msg_type_id, payload) catch |err| {
+        try self.sendToInstance(instance, template_id, 0, payload, false);
+    }
+
+    pub fn sendMessageRequest(
+        self: *Self,
+        template_id: u16,
+        correlation_id: i64,
+        payload: []const u8,
+    ) SendError!void {
+        self.lockInstances();
+        defer self.unlockInstances();
+
+        const instance = self.balancer.next(self.instances.items) orelse
+            {
+                self.recordSendError(error.NoAvailableInstance);
+                return error.NoAvailableInstance;
+            };
+
+        if (self.fc_config.enabled) {
+            self.applyFlowControl(instance, payload.len) catch |err| {
                 self.recordSendError(err);
                 return err;
             };
-            self.recordSend(payload.len);
-        } else {
-            // Cross-host routed path.
-            self.sendToRemoteService(
-                instance.node_id,
-                instance.service_id,
-                payload,
-            ) catch |err| {
-                self.recordSendError(err);
-                return err;
-            };
-            self.recordSend(payload.len);
         }
+
+        try self.sendToInstance(instance, template_id, correlation_id, payload, true);
     }
 
     /// Send a message to a specific instance (bypasses load balancer).
@@ -214,6 +223,16 @@ pub const ServiceClient = struct {
         self: *Self,
         target_node_id: i16,
         target_service_id: i32,
+        payload: []const u8,
+    ) SendError!void {
+        try self.sendToMessage(target_node_id, target_service_id, 0, payload);
+    }
+
+    pub fn sendToMessage(
+        self: *Self,
+        target_node_id: i16,
+        target_service_id: i32,
+        template_id: u16,
         payload: []const u8,
     ) SendError!void {
         self.lockInstances();
@@ -232,29 +251,42 @@ pub const ServiceClient = struct {
             };
         }
 
-        if (instance.node_id == self.local_node_id) {
-            const producer = instance.ipc_producer orelse
-                return error.ProducerNotInitialized;
-            producer.write(constants.application_msg_type_id, payload) catch |err| {
+        try self.sendToInstance(instance, template_id, 0, payload, false);
+    }
+
+    pub fn sendToMessageRequest(
+        self: *Self,
+        target_node_id: i16,
+        target_service_id: i32,
+        template_id: u16,
+        correlation_id: i64,
+        payload: []const u8,
+    ) SendError!void {
+        self.lockInstances();
+        defer self.unlockInstances();
+
+        const instance = self.findInstance(target_node_id, target_service_id) orelse
+            {
+                self.recordSendError(error.NoAvailableInstance);
+                return error.NoAvailableInstance;
+            };
+
+        if (self.fc_config.enabled) {
+            self.applyFlowControl(instance, payload.len) catch |err| {
                 self.recordSendError(err);
                 return err;
             };
-            self.recordSend(payload.len);
-        } else {
-            self.sendToRemoteService(
-                instance.node_id,
-                instance.service_id,
-                payload,
-            ) catch |err| {
-                self.recordSendError(err);
-                return err;
-            };
-            self.recordSend(payload.len);
         }
+
+        try self.sendToInstance(instance, template_id, correlation_id, payload, true);
     }
 
     /// Send to the leader instance only.
     pub fn sendToLeader(self: *Self, payload: []const u8) SendError!void {
+        try self.sendToLeaderMessage(0, payload);
+    }
+
+    pub fn sendToLeaderMessage(self: *Self, template_id: u16, payload: []const u8) SendError!void {
         self.lockInstances();
         defer self.unlockInstances();
 
@@ -267,25 +299,33 @@ pub const ServiceClient = struct {
                     };
                 }
 
-                if (inst.node_id == self.local_node_id) {
-                    const producer = inst.ipc_producer orelse
-                        return error.ProducerNotInitialized;
-                    producer.write(constants.application_msg_type_id, payload) catch |err| {
+                try self.sendToInstance(inst, template_id, 0, payload, false);
+                return;
+            }
+        }
+        self.recordSendError(error.NoAvailableInstance);
+        return error.NoLeaderAvailable;
+    }
+
+    pub fn sendToLeaderMessageRequest(
+        self: *Self,
+        template_id: u16,
+        correlation_id: i64,
+        payload: []const u8,
+    ) SendError!void {
+        self.lockInstances();
+        defer self.unlockInstances();
+
+        for (self.instances.items) |*inst| {
+            if (inst.is_leader) {
+                if (self.fc_config.enabled) {
+                    self.applyFlowControl(inst, payload.len) catch |err| {
                         self.recordSendError(err);
                         return err;
                     };
-                    self.recordSend(payload.len);
-                } else {
-                    self.sendToRemoteService(
-                        inst.node_id,
-                        inst.service_id,
-                        payload,
-                    ) catch |err| {
-                        self.recordSendError(err);
-                        return err;
-                    };
-                    self.recordSend(payload.len);
                 }
+
+                try self.sendToInstance(inst, template_id, correlation_id, payload, true);
                 return;
             }
         }
@@ -312,7 +352,66 @@ pub const ServiceClient = struct {
             };
         }
 
-        return self.tryClaimToInstance(instance, template_id, payload_len);
+        return self.tryClaimToInstance(instance, template_id, 0, payload_len, false);
+    }
+
+    pub fn tryClaimRequest(
+        self: *Self,
+        template_id: u16,
+        correlation_id: i64,
+        payload_len: usize,
+    ) SendError!SendClaim {
+        self.lockInstances();
+        defer self.unlockInstances();
+
+        const instance = self.balancer.next(self.instances.items) orelse
+            {
+                self.recordSendError(error.NoAvailableInstance);
+                return error.NoAvailableInstance;
+            };
+
+        if (self.fc_config.enabled) {
+            self.applyFlowControl(instance, payload_len) catch |err| {
+                self.recordSendError(err);
+                return err;
+            };
+        }
+
+        return self.tryClaimToInstance(instance, template_id, correlation_id, payload_len, true);
+    }
+
+    pub fn tryClaimTo(
+        self: *Self,
+        target_node_id: i16,
+        target_service_id: i32,
+        template_id: u16,
+        payload_len: usize,
+    ) SendError!SendClaim {
+        return self.tryClaimToWithCorrelation(target_node_id, target_service_id, template_id, 0, payload_len, false);
+    }
+
+    pub fn tryClaimToRequest(
+        self: *Self,
+        target_node_id: i16,
+        target_service_id: i32,
+        template_id: u16,
+        correlation_id: i64,
+        payload_len: usize,
+    ) SendError!SendClaim {
+        return self.tryClaimToWithCorrelation(target_node_id, target_service_id, template_id, correlation_id, payload_len, true);
+    }
+
+    pub fn tryClaimToLeader(self: *Self, template_id: u16, payload_len: usize) SendError!SendClaim {
+        return self.tryClaimToLeaderWithCorrelation(template_id, 0, payload_len, false);
+    }
+
+    pub fn tryClaimToLeaderRequest(
+        self: *Self,
+        template_id: u16,
+        correlation_id: i64,
+        payload_len: usize,
+    ) SendError!SendClaim {
+        return self.tryClaimToLeaderWithCorrelation(template_id, correlation_id, payload_len, true);
     }
 
     // ── Instance Management ───────────────────────────────────────────
@@ -626,16 +725,94 @@ pub const ServiceClient = struct {
 
     // ── Internal: Cross-Host Send ─────────────────────────────────────
 
+    fn tryClaimToWithCorrelation(
+        self: *Self,
+        target_node_id: i16,
+        target_service_id: i32,
+        template_id: u16,
+        correlation_id: i64,
+        payload_len: usize,
+        envelope_local: bool,
+    ) SendError!SendClaim {
+        self.lockInstances();
+        defer self.unlockInstances();
+
+        const instance = self.findInstance(target_node_id, target_service_id) orelse
+            {
+                self.recordSendError(error.NoAvailableInstance);
+                return error.NoAvailableInstance;
+            };
+
+        if (self.fc_config.enabled) {
+            self.applyFlowControl(instance, payload_len) catch |err| {
+                self.recordSendError(err);
+                return err;
+            };
+        }
+
+        return self.tryClaimToInstance(instance, template_id, correlation_id, payload_len, envelope_local);
+    }
+
+    fn tryClaimToLeaderWithCorrelation(
+        self: *Self,
+        template_id: u16,
+        correlation_id: i64,
+        payload_len: usize,
+        envelope_local: bool,
+    ) SendError!SendClaim {
+        self.lockInstances();
+        defer self.unlockInstances();
+
+        for (self.instances.items) |*inst| {
+            if (inst.is_leader) {
+                if (self.fc_config.enabled) {
+                    self.applyFlowControl(inst, payload_len) catch |err| {
+                        self.recordSendError(err);
+                        return err;
+                    };
+                }
+
+                return self.tryClaimToInstance(inst, template_id, correlation_id, payload_len, envelope_local);
+            }
+        }
+        self.recordSendError(error.NoAvailableInstance);
+        return error.NoLeaderAvailable;
+    }
+
+    fn sendToInstance(
+        self: *Self,
+        instance: *ServiceInstance,
+        template_id: u16,
+        correlation_id: i64,
+        payload: []const u8,
+        envelope_local: bool,
+    ) SendError!void {
+        var send_claim = try self.tryClaimToInstance(
+            instance,
+            template_id,
+            correlation_id,
+            payload.len,
+            envelope_local,
+        );
+        if (payload.len > 0) {
+            @memcpy(send_claim.payload, payload);
+        }
+        send_claim.commit();
+    }
+
     fn sendToRemoteService(
         self: *Self,
         target_node_id: i16,
         target_service_id: i32,
+        template_id: u16,
+        correlation_id: i64,
         payload: []const u8,
     ) SendError!void {
         var send_claim = try self.tryClaimRemoteService(
             target_node_id,
             target_service_id,
-            0,
+            template_id,
+            correlation_id,
             payload.len,
         );
 
@@ -652,15 +829,24 @@ pub const ServiceClient = struct {
         self: *Self,
         instance: *ServiceInstance,
         template_id: u16,
+        correlation_id: i64,
         payload_len: usize,
+        envelope_local: bool,
     ) SendError!SendClaim {
         if (instance.node_id == self.local_node_id) {
             const producer = instance.ipc_producer orelse
                 return error.ProducerNotInitialized;
-            const msg_type_id: i32 = if (template_id == 0)
-                constants.application_msg_type_id
-            else
-                @intCast(template_id);
+            if (envelope_local) {
+                return self.tryClaimLocalEnvelope(
+                    producer,
+                    instance,
+                    template_id,
+                    correlation_id,
+                    payload_len,
+                );
+            }
+
+            const msg_type_id = message_header.msgTypeFromTemplateId(template_id);
 
             if (payload_len > producer.ring_buffer.maxMessageLength()) {
                 return error.MessageTooLong;
@@ -683,8 +869,47 @@ pub const ServiceClient = struct {
             instance.node_id,
             instance.service_id,
             template_id,
+            correlation_id,
             payload_len,
         );
+    }
+
+    fn tryClaimLocalEnvelope(
+        self: *Self,
+        producer: *IpcProducer,
+        instance: *ServiceInstance,
+        template_id: u16,
+        correlation_id: i64,
+        payload_len: usize,
+    ) SendError!SendClaim {
+        if (payload_len > std.math.maxInt(i32)) return error.MessageTooLong;
+        const total_len = MessageHeader.encoded_length + payload_len;
+        if (total_len > producer.ring_buffer.maxMessageLength()) {
+            return error.MessageTooLong;
+        }
+
+        const claim = producer.tryClaim(constants.message_envelope_msg_type_id, total_len) orelse
+            {
+                self.recordSendError(error.SendBufferFull);
+                return error.SendBufferFull;
+            };
+        MessageHeader.encode(claim.buffer[0..MessageHeader.encoded_length], .{
+            .source_node_id = self.local_node_id,
+            .source_service_id = @intCast(self.local_service_id),
+            .target_node_id = instance.node_id,
+            .target_service_id = @intCast(instance.service_id),
+            .template_id = template_id,
+            .correlation_id = correlation_id,
+            .flags = constants.flag_unfragmented,
+            .payload_length = @intCast(payload_len),
+        });
+
+        return .{
+            .claim = claim,
+            .payload = claim.buffer[MessageHeader.encoded_length..][0..payload_len],
+            .service_counters = self.service_counters,
+            .logical_payload_len = payload_len,
+        };
     }
 
     fn tryClaimRemoteService(
@@ -692,6 +917,7 @@ pub const ServiceClient = struct {
         target_node_id: i16,
         target_service_id: i32,
         template_id: u16,
+        correlation_id: i64,
         payload_len: usize,
     ) SendError!SendClaim {
         const send_rb = self.brokerSendRingBuffer() orelse return error.SendBufferFull;
@@ -716,7 +942,7 @@ pub const ServiceClient = struct {
             .source_service_id = @intCast(self.local_service_id),
             .target_service_id = @intCast(target_service_id),
             .template_id = template_id,
-            .correlation_id = 0,
+            .correlation_id = correlation_id,
         };
 
         return .{

@@ -259,7 +259,7 @@ Header skeleton:
 extern "C" {
 #endif
 
-#define RINGLOOM_SERVICE_ABI_VERSION 2u
+#define RINGLOOM_SERVICE_ABI_VERSION 3u
 
 typedef struct ringloom_service ringloom_service_t;
 typedef struct ringloom_client ringloom_client_t;
@@ -1411,7 +1411,7 @@ they should delete it.
 Validates native loading and ABI basics:
 
 1. load native library
-2. assert ABI version equals `2`
+2. assert ABI version equals the binding's `RINGLOOM_SERVICE_ABI_VERSION`
 3. assert status strings are non-empty
 4. assert invalid start arguments produce `RINGLOOM_ERR_INVALID_ARGUMENT`
 

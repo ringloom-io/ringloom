@@ -15,6 +15,7 @@
 //! Total: 28 bytes, but padded to 32 for alignment.
 
 const std = @import("std");
+const constants = @import("../platform/constants.zig");
 
 pub const MessageHeader = extern struct {
     correlation_id: i64 = 0,
@@ -68,6 +69,44 @@ pub const MessageHeader = extern struct {
     }
 };
 
+pub const EnvelopeView = struct {
+    header: *const MessageHeader,
+    payload: []const u8,
+};
+
+pub fn msgTypeFromTemplateId(template_id: u16) i32 {
+    if (template_id == 0) return constants.application_msg_type_id;
+    return @intCast(template_id);
+}
+
+pub fn templateIdFromMsgTypeId(msg_type_id: i32) u16 {
+    if (msg_type_id == constants.application_msg_type_id) return 0;
+    if (msg_type_id <= 0 or msg_type_id > std.math.maxInt(u16)) return 0;
+    return @intCast(msg_type_id);
+}
+
+pub fn tryDecodeEnvelope(msg_type_id: i32, record_payload: []const u8) ?EnvelopeView {
+    if (msg_type_id != constants.message_envelope_msg_type_id) return null;
+    if (record_payload.len < MessageHeader.encoded_length) return null;
+
+    const header = MessageHeader.decode(record_payload[0..MessageHeader.encoded_length]);
+    if (header.payload_length < 0) return null;
+
+    const payload_len: usize = @intCast(header.payload_length);
+    if (payload_len != record_payload.len - MessageHeader.encoded_length) return null;
+
+    return .{
+        .header = header,
+        .payload = record_payload[MessageHeader.encoded_length..],
+    };
+}
+
+comptime {
+    std.debug.assert(constants.message_envelope_msg_type_id > std.math.maxInt(u16));
+    std.debug.assert(constants.message_envelope_msg_type_id != constants.application_msg_type_id);
+    std.debug.assert(constants.message_envelope_msg_type_id != constants.control_msg_type_id);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -112,4 +151,21 @@ test "MessageHeader default fields are zero" {
     try testing.expectEqual(@as(i16, 0), decoded.source_node_id);
     try testing.expectEqual(@as(i64, 0), decoded.correlation_id);
     try testing.expectEqual(@as(u8, 0), decoded.flags);
+}
+
+test "envelope decode validates message type and payload length" {
+    var buf: [MessageHeader.encoded_length + 5]u8 align(@alignOf(MessageHeader)) = undefined;
+    @memset(&buf, 0);
+    MessageHeader.encode(buf[0..MessageHeader.encoded_length], .{
+        .template_id = 42,
+        .correlation_id = 99,
+        .payload_length = 5,
+    });
+    @memcpy(buf[MessageHeader.encoded_length..], "hello");
+
+    const decoded = tryDecodeEnvelope(constants.message_envelope_msg_type_id, &buf).?;
+    try testing.expectEqual(@as(u16, 42), decoded.header.template_id);
+    try testing.expectEqual(@as(i64, 99), decoded.header.correlation_id);
+    try testing.expectEqualStrings("hello", decoded.payload);
+    try testing.expect(tryDecodeEnvelope(constants.application_msg_type_id, &buf) == null);
 }
