@@ -18,7 +18,7 @@ This is a breaking architecture. Backward compatibility with the TCP protocol, T
 4. **Optional AF_XDP/eBPF kernel bypass.** Redirect only configured RingLoom UDP port traffic into AF_XDP sockets. All other traffic must return `XDP_PASS` to the kernel.
 5. **POSIX UDP fallback.** If AF_XDP is unavailable, not configured, unsupported by the NIC/kernel, or fails startup validation, the broker uses non-blocking POSIX UDP.
 6. **Per-remote-service send buffers.** A remote service destination has an independent shared-memory outbound buffer. Sender backpressure pauses only that destination buffer.
-7. **Bounded hot-path allocation.** All transport buffers, term logs, retransmit state, reassembly slots, and scheduler entries are preallocated or allocated during control-plane setup.
+7. **Bounded hot-path allocation.** All transport buffers, term logs, retransmit state, receive-window state, pending-message state, and scheduler entries are preallocated or allocated during control-plane setup.
 8. **Detailed observability.** Packet loss, retransmission, flow-control stalls, congestion windows, AF_XDP fallback, and per-destination send-buffer pressure must be visible through counters.
 
 ### Non-goals
@@ -56,7 +56,7 @@ The v2 transport uses one **I/O staging buffer** per event-loop direction:
 Reliability state is separate and bounded:
 
 - Send retransmission state lives in per-stream term logs.
-- Receive reassembly state lives in per-stream reassembly windows and bounded active-message slots.
+- Receive ordering and backpressure state lives in per-stream bounded receive windows, gap trackers, and bounded pending-message state.
 - ACK/status/NAK bookkeeping lives in per-stream control state.
 
 The staging buffers must not be confused with durable in-flight storage. Retransmission and reassembly require retained per-stream state.
@@ -411,15 +411,36 @@ Fragments may be retransmitted independently. The receiver delivers a message on
 
 ### 6.3 Receiver reassembly
 
-Each stream has:
+The receiver uses one shared RX staging buffer for packet I/O, but durable receive state is **per stream**, not global.
 
-- high-water mark: highest packet position observed,
-- rebuild position: highest contiguous position rebuilt,
-- consumed position: highest application-delivered position,
-- gap tracker,
-- bounded active reassembly slots keyed by `message_id`.
+Each active stream has a bounded receive window sized to the advertised flow-control window plus bounded slack for reorder and target-service backpressure:
 
-If reassembly slots are exhausted, the receiver drops the oldest incomplete message for that stream, increments `reassembly_slot_drops`, and may NAK gaps only if they are still inside the receive window.
+```
+StreamReceiveWindow
+  data: receive_window_length bytes
+  frame_meta: fixed-size presence/length metadata
+  high_water_mark
+  rebuild_position
+  consumed_position
+  gap_tracker
+  pending_message_state
+```
+
+Key properties:
+
+- The receiver does **not** mirror the sender's three-term retransmit log by default.
+- It retains only enough committed DATA to cover the active receive window and bounded pending delivery.
+- Packets are copied from the shared RX staging buffer into the stream-local receive window at the absolute position derived from `(term_id, term_offset)`.
+- Frame metadata is published only after payload bytes are copied, so rebuild logic sees committed frames only.
+- Rebuild walks forward from `rebuild_position` in position order and stops at the first gap or undeliverable complete message.
+
+For delivery:
+
+- Unfragmented messages are routed directly from the receive window to the target service ring when capacity exists.
+- Fragmented messages are rebuilt from contiguous frames in the receive window.
+- A separate per-message reassembly arena is optional, not required by default. It should be used only when message layout or lifetime makes direct rebuild from the receive window impractical.
+
+If bounded pending-message state is exhausted, the receiver drops the oldest incomplete or blocked message for that stream, increments the appropriate drop counter, and may NAK gaps only if they are still inside the receive window.
 
 ### 6.4 Duplicate and stale packet handling
 
@@ -485,7 +506,7 @@ receiver_do_work:
   3. validate common header and session
   4. dispatch by frame type
        SETUP -> validate/create stream
-       DATA -> insert into term/reassembly state
+       DATA -> insert into stream receive-window state
        RTTM -> update RTT or reply
        HEARTBEAT -> liveness update
        ERROR -> notify control loop
@@ -500,11 +521,11 @@ receiver_do_work:
 The receiver should no longer always drop application messages immediately when a target service ring buffer is full. Instead:
 
 1. If the target service buffer has capacity, route the complete message and advance consumed position.
-2. If the target service buffer is full, keep the message in the receive/reassembly window if bounded capacity allows.
+2. If the target service buffer is full, keep the complete message pinned in that stream's receive window or bounded pending-message state.
 3. Advertise reduced or zero receiver window for that stream.
 4. If receive-side retention is exhausted, drop the message, advance according to the configured loss policy, and increment explicit counters.
 
-This converts remote-service backpressure into per-stream flow-control pressure rather than global connection pressure.
+The receiver must not acknowledge past blocked data by moving it into one global cross-stream queue. This converts remote-service backpressure into per-stream flow-control pressure rather than global connection pressure.
 
 ---
 
@@ -724,4 +745,3 @@ The implementation plan in `docs/impl-v2/` references these current v1 assumptio
 - ReceiverEventLoop accepts TCP, parses stream frames, and routes complete TCP frames in `src/broker/receiver/receiver_event_loop.zig`.
 - Config currently exposes TCP and TCP io_uring keys in `src/common/config/broker_config.zig` and `src/common/config/config_loader.zig`.
 - E2E coverage currently centers on TCP cross-broker behavior in `src/e2e/cross_broker_test.zig`, `src/e2e/fragmentation_test.zig`, and `src/e2e/backpressure_test.zig`.
-

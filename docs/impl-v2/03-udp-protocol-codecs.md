@@ -2,7 +2,7 @@
 
 ## Objective
 
-Introduce transport-neutral reliable UDP protocol primitives: frame codecs, stream identity, position arithmetic, term logs, retransmit addressing, and malformed-frame validation.
+Introduce transport-neutral reliable UDP protocol primitives: frame codecs, stream identity, position arithmetic, sender term logs, receive-window primitives, retransmit addressing, and malformed-frame validation.
 
 ## Source touchpoints
 
@@ -28,9 +28,10 @@ Introduce transport-neutral reliable UDP protocol primitives: frame codecs, stre
 10. `StreamId`
 11. `StreamKey`
 12. `TermLog`
-13. `Position`
-14. `RetransmitAction`
-15. `LossRange`
+13. `ReceiveWindow`
+14. `Position`
+15. `RetransmitAction`
+16. `LossRange`
 
 ## Stream identity
 
@@ -77,6 +78,16 @@ StreamKey = {
 6. Scan committed frames for normal send and retransmit ranges.
 7. Rotate terms only when safe relative to acknowledged receiver position.
 
+## Receive-window requirements
+
+1. One bounded receive window per active stream; no global durable cross-stream receive buffer.
+2. Window capacity sized from configured receiver window plus bounded reorder/backpressure slack.
+3. Position arithmetic reuses the same absolute-position helpers as sender term logs.
+4. DATA insertion copies payload first and publishes frame metadata last.
+5. Rebuild walks forward from `rebuild_position` until the first gap or blocked complete message.
+6. Unfragmented messages can be delivered directly from the receive window to the target service ring.
+7. Fragmented messages should rebuild from contiguous frames in the receive window by default; a separate reassembly arena is optional.
+
 ## Tests
 
 ### Codec unit tests
@@ -110,4 +121,3 @@ StreamKey = {
 - `ringloom_udp` protocol tests pass independently of broker runtime.
 - No new UDP protocol code imports `ringloom_tcp`.
 - Service/broker code can depend on route envelopes without depending on TCP frame headers.
-

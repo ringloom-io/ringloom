@@ -36,14 +36,18 @@ StreamReceiver
   stream_id
   stream_key
   receive_window
+  receive_buffer
+  frame_meta
   high_water_mark
   rebuild_position
   consumed_position
   gap_tracker
-  reassembly_slots
+  pending_message_state
   next_status_ns
   next_nak_ns
 ```
+
+The receiver event loop still uses one shared RX staging buffer for packet polling, but committed packet retention is per stream in `receive_buffer`.
 
 ## Packet handling
 
@@ -62,23 +66,24 @@ StreamReceiver
 
 1. Reject packet beyond flow-control overrun guard.
 2. Drop packet below stale/dedup window.
-3. Insert committed frame if slot empty.
+3. Copy DATA payload into the stream receive buffer if the target slot is empty.
 4. Ignore duplicate if already present.
 5. Advance high-water mark.
 6. Track gaps between rebuild position and high-water mark.
-7. Schedule delayed NAK for persistent gaps.
+7. Publish frame metadata only after payload copy completes.
+8. Schedule delayed NAK for persistent gaps.
 
 ## Reassembly and delivery
 
 1. Rebuild contiguous DATA frames in term order.
 2. For unfragmented messages, route directly when target service buffer has capacity.
 3. For fragmented messages:
-   - allocate or find reassembly slot by `message_id`,
-   - verify route metadata consistency,
-   - copy fragment into bounded reassembly arena,
+   - verify route metadata consistency while rebuilding contiguous fragments,
+   - rebuild directly from the stream receive buffer by default,
+   - use a bounded per-message scratch/reassembly arena only when direct rebuild is impractical,
    - route only after all bytes are present.
 4. If target service buffer is full:
-   - keep complete message pending if receive retention allows,
+   - keep the complete message pinned in the stream receive buffer or bounded pending-message state if retention allows,
    - advertise reduced receiver window,
    - do not block other streams.
 5. If retention is exhausted:
@@ -114,7 +119,7 @@ Send NAK when:
 6. Stale session DATA is dropped.
 7. Fragmented message reassembles only after all fragments arrive.
 8. Inconsistent route metadata across fragments drops the message.
-9. Reassembly slot exhaustion drops oldest or configured victim.
+9. Pending-message exhaustion drops oldest or configured victim.
 10. Target service full reduces advertised receiver window.
 11. STATUS scheduling follows window advancement and interval rules.
 
@@ -138,4 +143,3 @@ Send NAK when:
 - Complete messages are delivered in stream order and at most once within a session.
 - Receiver emits STATUS/NAK frames and updates per-stream pressure.
 - Loss, reorder, duplication, and slow target service tests pass.
-

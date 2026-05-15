@@ -30,7 +30,7 @@ Receiver window is based on:
 
 - configured maximum,
 - target service ring remaining capacity,
-- receive reassembly retention,
+- receive-window retention and bounded pending-message capacity,
 - stream liveness,
 - admin/heartbeat priority.
 
@@ -134,4 +134,3 @@ Add counters at three scopes:
 - Service-facing flow control reads v2 pressure and capacity state.
 - Monitoring replaces TCP counters with UDP, stream, and destination counters.
 - Tests prove pressure closes and reopens one stream without affecting another.
-
