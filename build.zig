@@ -19,6 +19,12 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const ringloom_udp = b.addModule("ringloom_udp", .{
+        .root_source_file = b.path("src/udp/root.zig"),
+        .target = target,
+    });
+    _ = ringloom_udp;
+
     const ringloom_service = b.addModule("ringloom_service", .{
         .root_source_file = b.path("src/service/root.zig"),
         .target = target,
@@ -182,6 +188,14 @@ pub fn build(b: *std.Build) void {
     });
     const run_tcp_tests = b.addRunArtifact(tcp_tests);
 
+    const udp_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/udp/root.zig"),
+            .target = target,
+        }),
+    });
+    const run_udp_tests = b.addRunArtifact(udp_tests);
+
     const service_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/service/root.zig"),
@@ -221,6 +235,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_common_tests.step);
     test_step.dependOn(&run_broker_tests.step);
     test_step.dependOn(&run_tcp_tests.step);
+    test_step.dependOn(&run_udp_tests.step);
     test_step.dependOn(&run_service_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_testing_tests.step);

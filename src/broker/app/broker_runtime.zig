@@ -56,7 +56,6 @@ pub const BrokerRuntime = struct {
 
     // Ring buffers stored as fields so event loop pointers remain valid.
     control_rb: ?RingBuffer,
-    send_rb: ?RingBuffer,
 
     control_loop: ?ControlLoop,
     sender_loop: ?SenderEventLoop,
@@ -86,7 +85,6 @@ pub const BrokerRuntime = struct {
             .cluster_manager = null,
             .routing_registry = null,
             .control_rb = null,
-            .send_rb = null,
             .control_loop = null,
             .sender_loop = null,
             .receiver_loop = null,
@@ -142,13 +140,6 @@ pub const BrokerRuntime = struct {
             null,
         );
 
-        self.send_rb = try RingBuffer.init(
-            @alignCast(self.broker_metadata.?.getSendBuffer()),
-            false,
-            null,
-            null,
-        );
-
         return self;
     }
 
@@ -169,6 +160,8 @@ pub const BrokerRuntime = struct {
             .storage_path = self.config.storage_path,
             .group = self.config.group_name,
             .allocator = self.allocator,
+            .send_buffer_directory = self.broker_metadata.?.getMutableSendBufferDirectory(),
+            .broker_mapped_bytes = self.broker_metadata.?.mapped_bytes,
             .routing_registry = &self.routing_registry.?,
             .fc_region = self.broker_metadata.?.getFlowControlRegion(),
             .fc_enabled = self.config.fc_enabled,
@@ -179,11 +172,15 @@ pub const BrokerRuntime = struct {
             .fc_normal_refresh_interval_ms = self.config.fc_normal_refresh_interval_ms,
         });
 
-        self.sender_loop = try SenderEventLoop.init(
-            &self.send_rb.?,
+        self.sender_loop = try SenderEventLoop.initWithDirectoryAndOptions(
+            self.broker_metadata.?.getMutableSendBufferDirectory(),
+            self.broker_metadata.?.mapped_bytes,
             &self.counters.?,
             self.config.node_id,
             self.allocator,
+            self.config.group_name,
+            false,
+            .{},
         );
         if (self.config.fc_peer_send_counters_enabled) {
             self.sender_loop.?.setPeerSendCountersRegion(
@@ -252,7 +249,6 @@ pub const BrokerRuntime = struct {
         self.broker_threads = null;
 
         self.control_rb = null;
-        self.send_rb = null;
 
         self.control_cmd_queue = null;
         self.sender_cmd_queue = null;
@@ -336,12 +332,12 @@ test "BrokerRuntime init and deinit without start" {
     var runtime = try BrokerRuntime.init(allocator, config);
     defer runtime.deinit();
 
-    // Then — init creates metadata, counters, ring buffers; event loops are deferred to start()
+    // Then — init creates metadata, counters, and the control ring; event loops are deferred to start()
     try std.testing.expect(!runtime.isRunning());
     try std.testing.expect(runtime.broker_metadata != null);
     try std.testing.expect(runtime.counters != null);
     try std.testing.expect(runtime.control_rb != null);
-    try std.testing.expect(runtime.send_rb != null);
+    try std.testing.expect(runtime.broker_metadata.?.getSendBufferDirectory().entries.len > 0);
 }
 
 test "BrokerRuntime start and shutdown" {

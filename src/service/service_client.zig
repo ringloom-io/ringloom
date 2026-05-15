@@ -24,10 +24,9 @@ const Clock = ringloom_common.platform.Clock;
 const ServiceCounters = ringloom_common.monitoring.ServiceCounters;
 const ServiceCounter = ringloom_common.monitoring.ServiceCounter;
 
-const frame_parser = ringloom_common.protocol.frame_parser;
-const TcpFrameHeader = frame_parser.TcpFrameHeader;
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const MessageHeader = message_header.MessageHeader;
+const SendBufferEntry = memory.SendBufferEntry;
 
 pub const ServiceClient = struct {
     pub const TargetInstanceInfo = extern struct {
@@ -65,7 +64,10 @@ pub const ServiceClient = struct {
 
     /// IPC context — set during RingLoomEngine initialization.
     broker_meta: ?*BrokerMetadataFile,
-    broker_send_ring_buffer: ?RingBuffer = null,
+    broker_destination_ring_buffers: [constants.default_send_buffer_entry_count]?RingBuffer =
+        [_]?RingBuffer{null} ** constants.default_send_buffer_entry_count,
+    broker_destination_ring_generations: [constants.default_send_buffer_entry_count]u16 =
+        [_]u16{0} ** constants.default_send_buffer_entry_count,
     local_node_id: i16,
     local_service_id: i32,
     service_counters: ?*ServiceCounters = null,
@@ -97,6 +99,8 @@ pub const ServiceClient = struct {
         payload: []u8,
         peer_counter_entry: ?*volatile PeerEntry = null,
         peer_ring_cost: u64 = 0,
+        destination_entry: ?*SendBufferEntry = null,
+        destination_ring_cost: u64 = 0,
         service_counters: ?*ServiceCounters = null,
         logical_payload_len: usize = 0,
 
@@ -104,6 +108,9 @@ pub const ServiceClient = struct {
             self.claim.commit();
             if (self.peer_counter_entry) |entry| {
                 entry.addRingBytesPending(self.peer_ring_cost);
+            }
+            if (self.destination_entry) |entry| {
+                entry.addPending(self.destination_ring_cost);
             }
             if (self.service_counters) |counters| {
                 counters.increment(.messages_sent);
@@ -130,7 +137,6 @@ pub const ServiceClient = struct {
             .allocator = allocator,
             .balancer = .{ .round_robin = .{} },
             .broker_meta = broker_meta,
-            .broker_send_ring_buffer = initBrokerSendRingBuffer(broker_meta),
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
             .service_counters = service_counters,
@@ -157,7 +163,6 @@ pub const ServiceClient = struct {
             .allocator = allocator,
             .balancer = .{ .round_robin = .{} },
             .broker_meta = broker_meta,
-            .broker_send_ring_buffer = initBrokerSendRingBuffer(broker_meta),
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
             .service_counters = service_counters,
@@ -559,11 +564,14 @@ pub const ServiceClient = struct {
 
     /// Returns the estimated remaining bytes in the broker's send ring buffer.
     pub fn sendBufferRemaining(self: *const Self) usize {
-        if (self.broker_send_ring_buffer) |send_rb| {
-            var ring = send_rb;
-            return ring.getCapacity() - ring.size();
+        var total: usize = 0;
+        for (self.broker_destination_ring_buffers) |maybe_ring| {
+            if (maybe_ring) |ring| {
+                var copy = ring;
+                total += copy.getCapacity() - copy.size();
+            }
         }
-        return 0;
+        return total;
     }
 
     /// Returns the total bytes pending in the outbound pipeline for a specific peer.
@@ -600,7 +608,7 @@ pub const ServiceClient = struct {
 
         // Paths 2/4/5: Only apply to remote instances.
         if (instance.node_id != self.local_node_id) {
-            const send_cost = conservativeRingCost(TcpFrameHeader.size + payload_len);
+            const send_cost = conservativeRingCost(MessageHeader.encoded_length + payload_len);
 
             // Path 5: Peer connectivity (cheapest — single byte read).
             if (self.fc_config.check_peer_connectivity) {
@@ -619,7 +627,7 @@ pub const ServiceClient = struct {
             }
 
             // Path 2: Global send ring buffer remaining.
-            const send_remaining = self.sendBufferRemaining();
+            const send_remaining = self.destinationSendBufferRemaining(instance) orelse self.sendBufferRemaining();
             if (send_remaining < send_cost) {
                 try self.applyStrategy(.send_buffer, send_remaining, send_cost, instance);
             }
@@ -685,7 +693,7 @@ pub const ServiceClient = struct {
                 remaining >= @max(required, self.fc_config.min_remaining_bytes)
             else
                 true,
-            .send_buffer => self.sendBufferRemaining() >= required,
+            .send_buffer => (self.destinationSendBufferRemaining(instance) orelse self.sendBufferRemaining()) >= required,
             .peer_congestion => blk: {
                 const threshold = self.fc_config.per_peer_pending_threshold;
                 if (threshold == 0) break :blk true;
@@ -816,7 +824,7 @@ pub const ServiceClient = struct {
             payload.len,
         );
 
-        // Copy the application payload immediately after the TCP frame header.
+        // Copy the application payload immediately after the route envelope.
         if (payload.len > 0) {
             @memcpy(send_claim.payload, payload);
         }
@@ -920,36 +928,42 @@ pub const ServiceClient = struct {
         correlation_id: i64,
         payload_len: usize,
     ) SendError!SendClaim {
-        const send_rb = self.brokerSendRingBuffer() orelse return error.SendBufferFull;
-        const total_len = TcpFrameHeader.size + payload_len;
+        const broker = self.broker_meta orelse return error.SendBufferFull;
+        const handle = broker.findOrAllocateSendBuffer(
+            target_node_id,
+            target_service_id,
+        ) catch return error.SendBufferFull;
+        const send_rb = self.destinationRingBuffer(handle) catch return error.SendBufferFull;
+        const total_len = MessageHeader.encoded_length + payload_len;
 
         if (total_len > send_rb.maxMessageLength()) {
             return error.MessageTooLong;
         }
 
-        var claim = send_rb.tryClaim(constants.application_msg_type_id, total_len) orelse
+        var claim = send_rb.tryClaim(constants.message_envelope_msg_type_id, total_len) orelse
             {
                 self.recordSendError(error.SendBufferFull);
                 return error.SendBufferFull;
             };
 
-        const header: *TcpFrameHeader = @ptrCast(@alignCast(claim.buffer.ptr));
-        header.* = .{
-            .frame_length = @intCast(total_len),
-            .flags = 0,
-            .source_node_id = @intCast(self.local_node_id),
-            .target_node_id = @intCast(target_node_id),
+        MessageHeader.encode(claim.buffer[0..MessageHeader.encoded_length], .{
+            .source_node_id = self.local_node_id,
             .source_service_id = @intCast(self.local_service_id),
+            .target_node_id = target_node_id,
             .target_service_id = @intCast(target_service_id),
             .template_id = template_id,
+            .flags = constants.flag_unfragmented,
             .correlation_id = correlation_id,
-        };
+            .payload_length = @intCast(payload_len),
+        });
 
         return .{
             .claim = claim,
-            .payload = claim.buffer[TcpFrameHeader.size..][0..payload_len],
+            .payload = claim.buffer[MessageHeader.encoded_length..][0..payload_len],
             .peer_counter_entry = self.peerCounterEntry(target_node_id),
             .peer_ring_cost = @intCast(ringCost(total_len)),
+            .destination_entry = self.destinationEntry(handle),
+            .destination_ring_cost = @intCast(ringCost(total_len)),
             .service_counters = self.service_counters,
             .logical_payload_len = payload_len,
         };
@@ -974,21 +988,6 @@ pub const ServiceClient = struct {
         }
     }
 
-    fn brokerSendRingBuffer(self: *Self) ?*RingBuffer {
-        if (self.broker_send_ring_buffer == null) return null;
-        return &self.broker_send_ring_buffer.?;
-    }
-
-    fn initBrokerSendRingBuffer(broker_meta: ?*BrokerMetadataFile) ?RingBuffer {
-        const broker = broker_meta orelse return null;
-        return RingBuffer.init(
-            @alignCast(broker.getSendBuffer()),
-            false,
-            null,
-            null,
-        ) catch null;
-    }
-
     fn initFlowControlRegion(broker_meta: ?*BrokerMetadataFile) ?FlowControlRegion {
         const broker = broker_meta orelse return null;
         return broker.getFlowControlRegion();
@@ -1002,5 +1001,48 @@ pub const ServiceClient = struct {
     fn peerCounterEntry(self: *const Self, node_id: i16) ?*volatile PeerEntry {
         const region = self.peer_send_counters orelse return null;
         return region.findPeer(node_id);
+    }
+
+    fn destinationSendBufferRemaining(self: *const Self, instance: *const ServiceInstance) ?usize {
+        const broker = self.broker_meta orelse return null;
+        const handle = broker.getSendBufferDirectory().findByDestination(
+            instance.node_id,
+            instance.service_id,
+        ) orelse return null;
+        if (handle.index >= constants.default_send_buffer_entry_count) return null;
+        const index: usize = @intCast(handle.index);
+        if (self.broker_destination_ring_generations[index] != handle.generation) return null;
+        if (self.broker_destination_ring_buffers[index]) |ring| {
+            var copy = ring;
+            return copy.getCapacity() - copy.size();
+        }
+        return null;
+    }
+
+    fn destinationRingBuffer(self: *Self, handle: memory.SendBufferHandle) !*RingBuffer {
+        if (handle.index >= constants.default_send_buffer_entry_count) return error.SendBufferFull;
+        const index: usize = @intCast(handle.index);
+        if (self.broker_destination_ring_buffers[index] == null or
+            self.broker_destination_ring_generations[index] != handle.generation)
+        {
+            const broker = self.broker_meta orelse return error.SendBufferFull;
+            const ring_slice = try broker.getSendBufferDirectory().ringSliceForHandle(
+                broker.mapped_bytes,
+                handle,
+            );
+            self.broker_destination_ring_buffers[index] = try RingBuffer.init(
+                ring_slice,
+                false,
+                null,
+                null,
+            );
+            self.broker_destination_ring_generations[index] = handle.generation;
+        }
+        return &self.broker_destination_ring_buffers[index].?;
+    }
+
+    fn destinationEntry(self: *Self, handle: memory.SendBufferHandle) ?*SendBufferEntry {
+        const broker = self.broker_meta orelse return null;
+        return broker.getMutableSendBufferDirectory().validateHandle(handle) catch null;
     }
 };

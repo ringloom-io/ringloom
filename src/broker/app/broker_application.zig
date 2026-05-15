@@ -51,7 +51,6 @@ pub const BrokerApplication = struct {
     broker_metadata: ?BrokerMetadataFile = null,
 
     control_ring_buffer: ?RingBuffer = null,
-    send_ring_buffer: ?RingBuffer = null,
 
     counters: ?CountersManager = null,
 
@@ -193,7 +192,8 @@ pub const BrokerApplication = struct {
             .group = self.config.group_name,
             .allocator = self.allocator,
             .admin_cmd_queue = &self.admin_cmd_queue.?,
-            .send_ring_buffer = &self.send_ring_buffer.?,
+            .send_buffer_directory = self.broker_metadata.?.getMutableSendBufferDirectory(),
+            .broker_mapped_bytes = self.broker_metadata.?.mapped_bytes,
             .peer_node_ids = self.peer_node_ids orelse &.{},
             .routing_registry = &self.routing_registry.?,
             .fc_region = self.broker_metadata.?.getFlowControlRegion(),
@@ -205,8 +205,9 @@ pub const BrokerApplication = struct {
             .fc_normal_refresh_interval_ms = self.config.fc_normal_refresh_interval_ms,
         });
 
-        self.sender_loop = try SenderEventLoop.initWithGroupAndOptions(
-            &self.send_ring_buffer.?,
+        self.sender_loop = try SenderEventLoop.initWithDirectoryAndOptions(
+            self.broker_metadata.?.getMutableSendBufferDirectory(),
+            self.broker_metadata.?.mapped_bytes,
             &self.counters.?,
             self.config.node_id,
             self.allocator,
@@ -339,13 +340,6 @@ pub const BrokerApplication = struct {
 
         self.control_ring_buffer = try RingBuffer.init(
             @alignCast(broker_metadata.getControlBuffer()),
-            false,
-            null,
-            null,
-        );
-
-        self.send_ring_buffer = try RingBuffer.init(
-            @alignCast(broker_metadata.getSendBuffer()),
             false,
             null,
             null,

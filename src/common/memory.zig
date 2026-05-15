@@ -28,6 +28,14 @@ pub const PeerSendCountersRegion = peer_send_counters.PeerSendCountersRegion;
 pub const PeerEntry = peer_send_counters.PeerEntry;
 pub const PeerSendCountersHeader = peer_send_counters.PeerSendCountersHeader;
 
+pub const send_buffer_directory = @import("memory/send_buffer_directory.zig");
+pub const SendBufferDirectory = send_buffer_directory.SendBufferDirectory;
+pub const SendBufferDirectoryHeader = send_buffer_directory.SendBufferDirectoryHeader;
+pub const SendBufferEntry = send_buffer_directory.SendBufferEntry;
+pub const SendBufferEntryState = send_buffer_directory.SendBufferEntryState;
+pub const SendBufferPressureState = send_buffer_directory.SendBufferPressureState;
+pub const SendBufferHandle = send_buffer_directory.SendBufferHandle;
+
 pub const service_scanner = @import("memory/service_scanner.zig");
 pub const ServiceScanner = service_scanner.ServiceScanner;
 pub const ServiceInstance = service_scanner.ServiceInstance;
@@ -46,6 +54,7 @@ comptime {
     _ = @import("memory/service_metadata.zig");
     _ = @import("memory/flow_control.zig");
     _ = @import("memory/peer_send_counters.zig");
+    _ = @import("memory/send_buffer_directory.zig");
     _ = @import("memory/service_scanner.zig");
     _ = @import("memory/metadata_descriptor_provider.zig");
     _ = @import("memory/buffers_provider.zig");

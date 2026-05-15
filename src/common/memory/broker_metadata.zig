@@ -9,6 +9,9 @@ const constants = @import("constants.zig");
 const platform = @import("../platform.zig");
 const FlowControlRegion = @import("flow_control.zig").FlowControlRegion;
 const PeerSendCountersRegion = @import("peer_send_counters.zig").PeerSendCountersRegion;
+const send_buffers = @import("send_buffer_directory.zig");
+const SendBufferDirectory = send_buffers.SendBufferDirectory;
+const SendBufferHandle = send_buffers.SendBufferHandle;
 const counters = @import("../concurrent/counters.zig");
 
 /// Overlay for the first 32 bytes of the broker metadata header.
@@ -21,10 +24,14 @@ pub const BrokerMetadataHeader = extern struct {
     _padding0: i16 = 0,
     pid: i64,
     start_timestamp_ms: i64,
+    metadata_version: u32 = constants.metadata_version_v2,
+    send_buffer_entry_count: u32 = constants.default_send_buffer_entry_count,
+    send_directory_offset: u64 = 0,
+    send_directory_length: u64 = 0,
+    send_region_offset: u64 = 0,
+    send_region_length: u64 = 0,
 
     comptime {
-        // The fixed fields must pack to exactly 32 bytes.
-        std.debug.assert(@sizeOf(BrokerMetadataHeader) == 32);
         // Ensure the struct doesn't grow past the volatile field offsets.
         std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.heartbeat_offset_within_header);
         std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.next_service_id_offset_within_header);
@@ -43,8 +50,11 @@ pub const BrokerMetadataFile = struct {
     /// Byte slice covering the control ring buffer region.
     control_buffer: []u8,
 
-    /// Byte slice covering the send ring buffer region.
-    send_buffer: []u8,
+    /// Send-buffer directory keyed by remote destination service.
+    send_buffer_directory: SendBufferDirectory,
+
+    /// Byte slice covering all fixed per-destination send ring slots.
+    send_region: []u8,
 
     /// Flow control counters region (null if disabled).
     fc_region: ?FlowControlRegion = null,
@@ -120,7 +130,10 @@ pub const BrokerMetadataFile = struct {
         // data capacity (must be power-of-two); we add the trailer here.
         const trailer = constants.ring_buffer_trailer_length;
         const ctrl_region = control_buffer_length + trailer;
-        const msgs_region = messages_buffer_length + trailer;
+        const send_entry_count = constants.default_send_buffer_entry_count;
+        const send_directory_len = SendBufferDirectory.regionSize(send_entry_count);
+        const send_slot_len = SendBufferDirectory.slotLength(messages_buffer_length);
+        const send_region_len = send_slot_len * @as(usize, send_entry_count);
 
         // Compute flow control region sizes.
         const fc_buf_len: usize = if (fc_options.fc_max_entries > 0)
@@ -139,7 +152,11 @@ pub const BrokerMetadataFile = struct {
         );
         const error_log_len = constants.alignUp(fc_options.error_log_buffer_length, @sizeOf(i64));
 
-        const base_size = constants.metadata_header_length + ctrl_region + msgs_region + fc_buf_len + peer_send_len;
+        const send_directory_offset = constants.metadata_header_length + ctrl_region;
+        const send_region_offset = send_directory_offset + send_directory_len;
+        const fc_region_offset = send_region_offset + send_region_len;
+        const peer_send_region_offset = fc_region_offset + fc_buf_len;
+        const base_size = peer_send_region_offset + peer_send_len;
         const monitoring_tail_offset = constants.alignUp(base_size, constants.cache_line_pad);
         const monitoring_tail_len = counter_values_len + counter_metadata_len + error_log_len;
 
@@ -166,11 +183,18 @@ pub const BrokerMetadataFile = struct {
         // Zero-fill.
         @memset(mapped, 0);
 
-        const fc_region_offset = constants.metadata_header_length + ctrl_region + msgs_region;
-        const peer_send_region_offset = fc_region_offset + fc_buf_len;
         const counter_values_offset = monitoring_tail_offset;
         const counter_metadata_offset = counter_values_offset + counter_values_len;
         const error_log_offset = counter_metadata_offset + counter_metadata_len;
+
+        const directory_slice = mapped[send_directory_offset..][0..send_directory_len];
+        const send_directory = SendBufferDirectory.initNew(
+            directory_slice,
+            send_entry_count,
+            send_region_offset,
+            send_region_len,
+            messages_buffer_length,
+        ) catch return error.SendBufferDirectoryInitFailed;
 
         // Initialize FC regions if requested.
         var fc_region: ?FlowControlRegion = null;
@@ -191,7 +215,8 @@ pub const BrokerMetadataFile = struct {
             .mapped_bytes = mapped,
             .header = @ptrCast(@alignCast(mapped.ptr)),
             .control_buffer = mapped[constants.metadata_header_length..][0..ctrl_region],
-            .send_buffer = mapped[constants.metadata_header_length + ctrl_region ..][0..msgs_region],
+            .send_buffer_directory = send_directory,
+            .send_region = mapped[send_region_offset..][0..send_region_len],
             .fc_region = fc_region,
             .peer_send_counters = peer_send_counters,
             .counter_values_buffer = @alignCast(mapped[counter_values_offset..][0..counter_values_len]),
@@ -207,6 +232,12 @@ pub const BrokerMetadataFile = struct {
         self.header.node_id = node_id;
         self.header.pid = platform.getPid();
         self.header.start_timestamp_ms = platform.Clock.epochMillis();
+        self.header.metadata_version = constants.metadata_version_v2;
+        self.header.send_buffer_entry_count = send_entry_count;
+        self.header.send_directory_offset = @intCast(send_directory_offset);
+        self.header.send_directory_length = @intCast(send_directory_len);
+        self.header.send_region_offset = @intCast(send_region_offset);
+        self.header.send_region_length = @intCast(send_region_len);
 
         // Store FC region sizes in the header (at fixed offsets beyond 32-byte struct).
         self.storeFcBufferLength(@intCast(fc_buf_len));
@@ -249,6 +280,8 @@ pub const BrokerMetadataFile = struct {
             return error.FileTooSmall;
 
         const header: *BrokerMetadataHeader = @ptrCast(@alignCast(mapped.ptr));
+        if (header.metadata_version != constants.metadata_version_v2)
+            return error.InvalidMetadataVersion;
 
         const ctrl_len: usize = @intCast(header.control_buffer_length);
         const msgs_len: usize = @intCast(header.messages_buffer_length);
@@ -260,16 +293,29 @@ pub const BrokerMetadataFile = struct {
 
         const trailer = constants.ring_buffer_trailer_length;
         const ctrl_region = ctrl_len + trailer;
-        const msgs_region = msgs_len + trailer;
+        const send_directory_offset: usize = @intCast(header.send_directory_offset);
+        const send_directory_len: usize = @intCast(header.send_directory_length);
+        const send_region_offset: usize = @intCast(header.send_region_offset);
+        const send_region_len: usize = @intCast(header.send_region_length);
 
-        const base_size = constants.metadata_header_length + ctrl_region + msgs_region;
+        if (send_directory_offset < constants.metadata_header_length + ctrl_region)
+            return error.FileSizeMismatch;
+        if (send_region_offset < send_directory_offset + send_directory_len)
+            return error.FileSizeMismatch;
+
+        const directory_slice = mapped[send_directory_offset..][0..send_directory_len];
+        const send_directory = SendBufferDirectory.initExisting(directory_slice) catch
+            return error.SendBufferDirectoryInitFailed;
+
+        const base_size = send_region_offset + send_region_len;
 
         // Read FC/monitoring region lengths from header.
         var self = BrokerMetadataFile{
             .mapped_bytes = mapped,
             .header = header,
             .control_buffer = mapped[constants.metadata_header_length..][0..ctrl_region],
-            .send_buffer = mapped[constants.metadata_header_length + ctrl_region ..][0..msgs_region],
+            .send_buffer_directory = send_directory,
+            .send_region = mapped[send_region_offset..][0..send_region_len],
             .counter_values_buffer = undefined,
             .counter_metadata_buffer = undefined,
             .error_log_buffer = undefined,
@@ -453,9 +499,37 @@ pub const BrokerMetadataFile = struct {
         return self.control_buffer;
     }
 
-    /// Returns the byte slice backing the send ring buffer.
+    /// Returns the per-destination send-buffer directory.
+    pub fn getSendBufferDirectory(self: *const BrokerMetadataFile) *const SendBufferDirectory {
+        return &self.send_buffer_directory;
+    }
+
+    pub fn getMutableSendBufferDirectory(self: *BrokerMetadataFile) *SendBufferDirectory {
+        return &self.send_buffer_directory;
+    }
+
+    /// Returns the fixed per-destination send region.
+    pub fn getSendRegion(self: *const BrokerMetadataFile) []u8 {
+        return self.send_region;
+    }
+
+    /// Compatibility accessor for tooling that still expects a single send
+    /// buffer. Production send paths use `getSendBufferDirectory`.
     pub fn getSendBuffer(self: *const BrokerMetadataFile) []u8 {
-        return self.send_buffer;
+        const len = SendBufferDirectory.slotLength(@intCast(self.header.messages_buffer_length));
+        return self.send_region[0..@min(len, self.send_region.len)];
+    }
+
+    pub fn findOrAllocateSendBuffer(
+        self: *BrokerMetadataFile,
+        target_node_id: i16,
+        target_service_id: i32,
+    ) !SendBufferHandle {
+        return self.send_buffer_directory.findOrAllocateDestination(
+            self.mapped_bytes,
+            target_node_id,
+            target_service_id,
+        );
     }
 
     pub fn getCounterValuesBuffer(self: *const BrokerMetadataFile) []align(constants.cache_line_pad) u8 {
@@ -585,7 +659,7 @@ pub const BrokerMetadataFile = struct {
 const testing = std.testing;
 
 test "BrokerMetadataHeader has correct size" {
-    try testing.expectEqual(@as(usize, 32), @sizeOf(BrokerMetadataHeader));
+    try testing.expectEqual(@as(usize, 72), @sizeOf(BrokerMetadataHeader));
 }
 
 test "create broker metadata file and verify layout" {
@@ -612,19 +686,31 @@ test "create broker metadata file and verify layout" {
     try testing.expectEqual(@as(i16, 42), file.header.node_id);
     try testing.expect(file.header.pid > 0);
     try testing.expect(file.header.start_timestamp_ms > 0);
+    try testing.expectEqual(constants.metadata_version_v2, file.header.metadata_version);
+    try testing.expectEqual(constants.default_send_buffer_entry_count, file.header.send_buffer_entry_count);
 
     // Verify buffer slice sizes (include ring buffer trailer).
     const trailer = constants.ring_buffer_trailer_length;
     try testing.expectEqual(@as(usize, 64 * 1024 + trailer), file.control_buffer.len);
-    try testing.expectEqual(@as(usize, 1024 * 1024 + trailer), file.send_buffer.len);
+    try testing.expectEqual(
+        SendBufferDirectory.slotLength(1024 * 1024) * constants.default_send_buffer_entry_count,
+        file.send_region.len,
+    );
 
     // Verify control buffer starts at offset 512.
     const control_offset = @intFromPtr(file.control_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
     try testing.expectEqual(@as(usize, 512), control_offset);
 
-    // Verify send buffer starts right after control buffer.
-    const send_offset = @intFromPtr(file.send_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
-    try testing.expectEqual(@as(usize, 512 + 64 * 1024 + trailer), send_offset);
+    // Verify send directory starts right after control buffer and send region
+    // follows the directory.
+    try testing.expectEqual(
+        @as(u64, 512 + 64 * 1024 + trailer),
+        file.header.send_directory_offset,
+    );
+    try testing.expectEqual(
+        file.header.send_directory_offset + file.header.send_directory_length,
+        file.header.send_region_offset,
+    );
 
     // Verify nextServiceId initialized to 1.
     try testing.expectEqual(@as(i32, 1), file.loadNextServiceId());
@@ -696,12 +782,21 @@ test "two threads share a broker metadata file" {
     const read_pattern = std.mem.bytesToValue(u64, service_view.control_buffer[0..8]);
     try testing.expectEqual(pattern, read_pattern);
 
-    // Service writes to the send buffer.
+    // Service provisions and writes to a destination send buffer.
     const msg: u64 = 0x1234567890ABCDEF;
-    @memcpy(service_view.send_buffer[0..8], std.mem.asBytes(&msg));
+    const handle = try service_view.findOrAllocateSendBuffer(2, 7);
+    const service_ring = try service_view.send_buffer_directory.ringSliceForHandle(
+        service_view.mapped_bytes,
+        handle,
+    );
+    @memcpy(service_ring[0..8], std.mem.asBytes(&msg));
 
     // Broker reads it back.
-    const read_msg = std.mem.bytesToValue(u64, broker_file.send_buffer[0..8]);
+    const broker_ring = try broker_file.send_buffer_directory.ringSliceForHandle(
+        broker_file.mapped_bytes,
+        handle,
+    );
+    const read_msg = std.mem.bytesToValue(u64, broker_ring[0..8]);
     try testing.expectEqual(msg, read_msg);
 }
 

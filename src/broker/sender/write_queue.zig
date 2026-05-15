@@ -66,6 +66,25 @@ pub const WriteQueue = struct {
         self.count += 1;
     }
 
+    /// Enqueue a complete frame assembled from two slices without requiring
+    /// callers to allocate a temporary contiguous frame buffer.
+    pub fn enqueueParts(self: *Self, header: []const u8, payload: []const u8) error{Overflow}!void {
+        const frame_len = header.len + payload.len;
+        if (self.count >= self.capacity) return error.Overflow;
+        if (frame_len > self.max_frame_size) return error.Overflow;
+
+        const slot_index = self.tail & self.mask;
+        const offset = @as(usize, slot_index) * @as(usize, self.max_frame_size);
+        @memcpy(self.slots[offset..][0..header.len], header);
+        if (payload.len > 0) {
+            @memcpy(self.slots[offset + header.len ..][0..payload.len], payload);
+        }
+        self.lengths[slot_index] = @intCast(frame_len);
+
+        self.tail +%= 1;
+        self.count += 1;
+    }
+
     /// Drop the oldest enqueued message to make room.
     pub fn dropOldest(self: *Self) u32 {
         if (self.count == 0) return 0;

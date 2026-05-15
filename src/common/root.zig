@@ -71,6 +71,7 @@ comptime {
     _ = @import("memory/service_metadata.zig");
     _ = @import("memory/flow_control.zig");
     _ = @import("memory/peer_send_counters.zig");
+    _ = @import("memory/send_buffer_directory.zig");
     _ = @import("memory/service_scanner.zig");
     _ = @import("memory/metadata_descriptor_provider.zig");
     _ = @import("memory/buffers_provider.zig");

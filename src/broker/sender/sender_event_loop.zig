@@ -17,10 +17,13 @@ const platform = ringloom_common.platform;
 const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const CountersManager = ringloom_common.concurrent.counters.CountersManager;
 const PeerSendCountersRegion = ringloom_common.memory.PeerSendCountersRegion;
+const SendBufferDirectory = ringloom_common.memory.SendBufferDirectory;
+const SendBufferEntry = ringloom_common.memory.SendBufferEntry;
 
 const frame_parser = ringloom_common.protocol.frame_parser;
 const TcpFrameHeader = frame_parser.TcpFrameHeader;
 const latency_trace = ringloom_common.message.latency_trace;
+const MessageHeader = ringloom_common.message.message_header.MessageHeader;
 
 const tcp = @import("ringloom_tcp");
 const HandshakeFrame = tcp.HandshakeFrame;
@@ -169,8 +172,18 @@ const PeerMap = struct {
 // ── Sender Event Loop ─────────────────────────────────────────────────
 
 pub const SenderEventLoop = struct {
-    /// The MPSC ring buffer that local services write cross-host messages into.
-    send_ring_buffer: *RingBuffer,
+    /// Legacy broker-wide MPSC ring buffer. Production v2 paths use
+    /// `send_buffer_directory`; this remains for compatibility tests only.
+    send_ring_buffer: ?*RingBuffer,
+
+    /// V2 per-destination send-buffer directory.
+    send_buffer_directory: ?*SendBufferDirectory,
+
+    /// Broker metadata mapping used to resolve destination ring slices.
+    broker_mapped_bytes: ?[]u8,
+
+    /// Next destination directory index to consider for fair scanning.
+    round_robin_index: u32,
 
     /// Per-peer sender state, keyed by node ID.
     peers: PeerMap,
@@ -259,6 +272,49 @@ pub const SenderEventLoop = struct {
     ) !Self {
         var self = Self{
             .send_ring_buffer = send_ring_buffer,
+            .send_buffer_directory = null,
+            .broker_mapped_bytes = null,
+            .round_robin_index = 0,
+            .peers = PeerMap.init(),
+            .counters = counters,
+            .counter_ids = SenderCounters.allocate(counters),
+            .last_heartbeat_ns = 0,
+            .local_node_id = local_node_id,
+            .running = AtomicBool.init(true),
+            .allocator = allocator,
+            .pending_send_count = 0,
+            .group_name_hash = HandshakeFrame.hashGroupName(group_name),
+            .benchmark_latency_tracing_enabled = benchmark_latency_tracing_enabled,
+            .options = options,
+            .io_ring = null,
+            .peer_send_counters = null,
+        };
+
+        if (options.io_uring_enabled) {
+            self.enableIoUringSender() catch |err| {
+                self.counters.increment(self.counter_ids.iouring_sender_fallbacks);
+                logIoUringSenderFallback(err);
+            };
+        }
+
+        return self;
+    }
+
+    pub fn initWithDirectoryAndOptions(
+        send_buffer_directory: *SendBufferDirectory,
+        broker_mapped_bytes: []u8,
+        counters: *CountersManager,
+        local_node_id: u8,
+        allocator: std.mem.Allocator,
+        group_name: []const u8,
+        benchmark_latency_tracing_enabled: bool,
+        options: SenderOptions,
+    ) !Self {
+        var self = Self{
+            .send_ring_buffer = null,
+            .send_buffer_directory = send_buffer_directory,
+            .broker_mapped_bytes = broker_mapped_bytes,
+            .round_robin_index = 0,
             .peers = PeerMap.init(),
             .counters = counters,
             .counter_ids = SenderCounters.allocate(counters),
@@ -372,14 +428,16 @@ pub const SenderEventLoop = struct {
         // ── Phase 2: Drain send ring buffer ──────────────────────────
         // Limit drain to available write queue space to apply backpressure
         // when TCP can't keep up, preventing write queue overflow.
-        {
+        if (self.send_buffer_directory != null) {
+            work_count += self.drainDestinationBuffers(constants.send_batch_limit);
+        } else if (self.send_ring_buffer) |send_ring_buffer| {
             const drain_limit = self.availableWriteQueueSpace();
             if (drain_limit > 0) {
                 tls_self = self;
                 defer {
                     tls_self = null;
                 }
-                work_count += self.send_ring_buffer.read(
+                work_count += send_ring_buffer.read(
                     onOutboundMessageThunk,
                     @min(constants.send_batch_limit, drain_limit),
                 );
@@ -415,6 +473,7 @@ pub const SenderEventLoop = struct {
     // ── Ring Buffer Read Callback ─────────────────────────────────────
 
     threadlocal var tls_self: ?*Self = null;
+    threadlocal var tls_destination_entry: ?*SendBufferEntry = null;
 
     fn onOutboundMessageThunk(msg_type_id: i32, payload: []const u8) void {
         if (tls_self) |self| {
@@ -424,8 +483,85 @@ pub const SenderEventLoop = struct {
 
     /// Process a single outbound message from the send ring buffer.
     pub fn onOutboundMessage(self: *Self, msg_type_id: i32, payload: []const u8) void {
-        _ = msg_type_id;
+        if (msg_type_id == constants.message_envelope_msg_type_id) {
+            self.onOutboundEnvelope(payload);
+            return;
+        }
 
+        self.onLegacyTcpFrame(payload);
+    }
+
+    fn onOutboundEnvelope(self: *Self, payload: []const u8) void {
+        if (payload.len < MessageHeader.encoded_length) {
+            self.counters.increment(self.counter_ids.malformed_messages_dropped);
+            return;
+        }
+
+        const envelope = MessageHeader.decode(payload[0..MessageHeader.encoded_length]);
+        if (envelope.payload_length < 0) {
+            self.counters.increment(self.counter_ids.malformed_messages_dropped);
+            return;
+        }
+        const body_len: usize = @intCast(envelope.payload_length);
+        if (body_len != payload.len - MessageHeader.encoded_length) {
+            self.counters.increment(self.counter_ids.malformed_messages_dropped);
+            return;
+        }
+        if (envelope.target_node_id <= 0 or envelope.target_node_id > std.math.maxInt(u8)) {
+            self.counters.increment(self.counter_ids.malformed_messages_dropped);
+            return;
+        }
+
+        const target_node_id: u8 = @intCast(envelope.target_node_id);
+        if (tls_destination_entry) |entry| {
+            entry.subtractPending(@intCast(ringCost(payload.len)));
+        }
+
+        const peer = self.peers.get(target_node_id) orelse {
+            self.counters.increment(self.counter_ids.unknown_peer_messages_dropped);
+            return;
+        };
+
+        if (peer.state != .connected) {
+            self.counters.increment(self.counter_ids.peer_not_connected_drops);
+            peer.total_bytes_dropped += payload.len;
+            if (tls_destination_entry) |entry| entry.addDropped();
+            return;
+        }
+
+        const body = payload[MessageHeader.encoded_length..];
+        if (self.benchmark_latency_tracing_enabled) {
+            latency_trace.stampSenderDequeue(
+                @constCast(body),
+                @intCast(Clock.monotonicNanosStable()),
+            );
+        }
+
+        var tcp_header = TcpFrameHeader{
+            .frame_length = @intCast(constants.tcp_header_length + body.len),
+            .flags = envelope.flags & constants.flag_admin,
+            .source_node_id = @intCast(envelope.source_node_id),
+            .target_node_id = target_node_id,
+            .source_service_id = @intCast(envelope.source_service_id),
+            .target_service_id = @intCast(envelope.target_service_id),
+            .template_id = envelope.template_id,
+            .correlation_id = envelope.correlation_id,
+        };
+        const tcp_header_bytes = std.mem.asBytes(&tcp_header);
+
+        peer.write_queue.enqueueParts(tcp_header_bytes, body) catch {
+            const dropped_len = peer.write_queue.dropOldest();
+            peer.total_bytes_dropped += dropped_len;
+            self.counters.increment(self.counter_ids.peer_queue_overflow_drops);
+            peer.write_queue.enqueueParts(tcp_header_bytes, body) catch unreachable;
+        };
+
+        self.pending_send_count += 1;
+        self.counters.increment(self.counter_ids.frames_sent);
+        self.counters.add(self.counter_ids.bytes_sent, @intCast(constants.tcp_header_length + body.len));
+    }
+
+    fn onLegacyTcpFrame(self: *Self, payload: []const u8) void {
         // Payload must contain at least a complete TCP frame header (24 bytes).
         if (payload.len < constants.tcp_header_length) {
             self.counters.increment(self.counter_ids.malformed_messages_dropped);
@@ -467,6 +603,56 @@ pub const SenderEventLoop = struct {
         self.pending_send_count += 1;
         self.counters.increment(self.counter_ids.frames_sent);
         self.counters.add(self.counter_ids.bytes_sent, @intCast(payload.len));
+    }
+
+    fn drainDestinationBuffers(self: *Self, limit: u32) u32 {
+        const directory = self.send_buffer_directory orelse return 0;
+        const mapped = self.broker_mapped_bytes orelse return 0;
+        if (directory.entries.len == 0 or limit == 0) return 0;
+
+        var work_count: u32 = 0;
+        var visited: u32 = 0;
+        const entry_count: u32 = @intCast(directory.entries.len);
+        var index = self.round_robin_index % entry_count;
+
+        while (visited < entry_count and work_count < limit) : (visited += 1) {
+            const entry = &directory.entries[index];
+            defer index = (index + 1) % entry_count;
+
+            const state = entry.loadState();
+            if (state != .active and state != .draining) continue;
+            if (!self.canDrainDestination(entry)) continue;
+
+            const ring_slice = directory.ringSliceForEntry(mapped, entry) catch continue;
+            var ring = RingBuffer.init(ring_slice, false, null, null) catch continue;
+
+            tls_self = self;
+            tls_destination_entry = entry;
+            const read_count = ring.read(onOutboundMessageThunk, 1);
+            tls_destination_entry = null;
+            tls_self = null;
+
+            if (read_count > 0) {
+                work_count += read_count;
+                self.round_robin_index = (index + 1) % entry_count;
+            }
+        }
+
+        return work_count;
+    }
+
+    fn canDrainDestination(self: *Self, entry: *const SendBufferEntry) bool {
+        switch (entry.loadPressureState()) {
+            .flow_blocked, .congested, .closed => return false,
+            .unknown, .normal => {},
+        }
+
+        if (entry.target_node_id <= 0 or entry.target_node_id > std.math.maxInt(u8)) {
+            return true;
+        }
+        const peer = self.peers.get(@intCast(entry.target_node_id)) orelse return true;
+        if (peer.state != .connected) return true;
+        return peer.write_queue.count < peer.write_queue.capacity;
     }
 
     // ── Heartbeats ────────────────────────────────────────────────────
@@ -964,9 +1150,11 @@ pub const SenderEventLoop = struct {
     // ── Read callback wiring ──────────────────────────────────────────
 
     pub fn readFromRingBuffer(self: *Self, limit: u32) u32 {
+        if (self.send_buffer_directory != null) return self.drainDestinationBuffers(limit);
+        const send_ring_buffer = self.send_ring_buffer orelse return 0;
         tls_self = self;
         defer tls_self = null;
-        return self.send_ring_buffer.read(onOutboundMessageThunk, limit);
+        return send_ring_buffer.read(onOutboundMessageThunk, limit);
     }
 
     fn publishPeerSendCounters(self: *Self, now_ns: i64) void {

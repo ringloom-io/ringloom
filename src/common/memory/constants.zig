@@ -55,6 +55,10 @@ pub const ring_buffer_record_header_length: usize = platform_constants.ring_buff
 /// Default buffer sizes.
 pub const default_control_buffer_length: usize = platform_constants.default_control_buffer_length;
 pub const default_send_buffer_length: usize = platform_constants.default_send_buffer_length;
+pub const default_send_buffer_entry_count: u32 = 16;
+pub const metadata_version_v2: u32 = 2;
+pub const send_buffer_directory_header_length: usize = 64;
+pub const send_buffer_entry_length: usize = 128;
 pub const default_messages_buffer_length: usize = platform_constants.default_messages_buffer_length;
 pub const default_counter_values_buffer_length: usize = platform_constants.default_counter_values_buffer_length;
 pub const default_error_log_buffer_length: usize = platform_constants.default_error_log_buffer_length;

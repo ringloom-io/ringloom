@@ -6,9 +6,9 @@ This folder tracks the implementation plan for `docs/architecture-v2.md`. The wo
 
 | Status | Step | Plan file | Integration role |
 |---|---:|---|---|
-| [ ] | 1 | [Analysis and cutover boundaries](01-analysis-and-cutover.md) | Establish source inventory, deletion plan, and CI strategy |
-| [ ] | 2 | [Per-destination send buffers](02-send-buffer-metadata.md) | Replace the broker-wide send ring with destination buffers |
-| [ ] | 3 | [UDP protocol and term logs](03-udp-protocol-codecs.md) | Define frame codecs, stream identity, and retained send logs |
+| [x] | 1 | [Analysis and cutover boundaries](01-analysis-and-cutover.md) | Establish source inventory, deletion plan, and CI strategy |
+| [x] | 2 | [Per-destination send buffers](02-send-buffer-metadata.md) | Replace the broker-wide send ring with destination buffers |
+| [x] | 3 | [UDP protocol and term logs](03-udp-protocol-codecs.md) | Define frame codecs, stream identity, and retained send logs |
 | [ ] | 4 | [POSIX UDP endpoint](04-posix-udp-engine.md) | Provide portable UDP send/receive engine |
 | [ ] | 5 | [AF_XDP and eBPF endpoint](05-af-xdp-ebpf-engine.md) | Add optional kernel bypass and safe fallback |
 | [ ] | 6 | [Sender reliability and scheduler](06-sender-reliability-scheduler.md) | Drain destination buffers fairly and retransmit reliably |
@@ -88,4 +88,3 @@ A step is complete only when:
 2. The tests listed in that step exist and pass.
 3. Counters or error paths added by the step are observable in unit or e2e tests where practical.
 4. No obsolete v1 behavior remains reachable unless a later step explicitly owns its removal.
-

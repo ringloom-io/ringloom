@@ -4,6 +4,9 @@ const std = @import("std");
 const testing = std.testing;
 const ServiceClient = @import("service_client.zig").ServiceClient;
 const ServiceInstance = @import("service_instance.zig").ServiceInstance;
+const ringloom_common = @import("ringloom_common");
+const BrokerMetadataFile = ringloom_common.memory.BrokerMetadataFile;
+const RingBuffer = ringloom_common.concurrent.RingBuffer;
 
 test "round-robin load balancer cycles through instances" {
     // Given: a ServiceClient with 3 instances.
@@ -169,4 +172,72 @@ test "ServiceClient tracks duplicate service ids on different nodes" {
 
     try testing.expect(client.findInstance(1, 11) == null);
     try testing.expect(client.findInstance(2, 11) != null);
+}
+
+test "ServiceClient remote sends use distinct destination buffers" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(storage_path);
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
+
+    var broker = try BrokerMetadataFile.create(storage_path, "test-group", 1, 4096, 4096);
+    defer broker.close();
+
+    var client = ServiceClient.init(testing.allocator, "remote-test", &broker, 1, 100, null);
+    defer client.deinit();
+    try client.addInstance(.{ .service_id = 7, .service_name = "remote-test", .node_id = 2 });
+    try client.addInstance(.{ .service_id = 8, .service_name = "remote-test", .node_id = 2 });
+
+    try client.sendToMessage(2, 7, 42, "alpha");
+    try client.sendToMessage(2, 8, 43, "bravo");
+
+    const directory = broker.getSendBufferDirectory();
+    const handle_a = directory.findByDestination(2, 7).?;
+    const handle_b = directory.findByDestination(2, 8).?;
+    try testing.expect(handle_a.index != handle_b.index);
+
+    var ring_a = try RingBuffer.init(try directory.ringSliceForHandle(broker.mapped_bytes, handle_a), false, null, null);
+    var ring_b = try RingBuffer.init(try directory.ringSliceForHandle(broker.mapped_bytes, handle_b), false, null, null);
+    try testing.expect(ring_a.size() > 0);
+    try testing.expect(ring_b.size() > 0);
+}
+
+test "ServiceClient full destination buffer does not block another destination" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(storage_path);
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
+
+    var broker = try BrokerMetadataFile.create(storage_path, "test-group", 1, 4096, 1024);
+    defer broker.close();
+
+    var client = ServiceClient.init(testing.allocator, "remote-test", &broker, 1, 100, null);
+    defer client.deinit();
+    try client.addInstance(.{ .service_id = 7, .service_name = "remote-test", .node_id = 2 });
+    try client.addInstance(.{ .service_id = 8, .service_name = "remote-test", .node_id = 2 });
+
+    const payload = [_]u8{0xaa} ** 64;
+    var filled_a = false;
+    for (0..64) |_| {
+        client.sendToMessage(2, 7, 42, &payload) catch |err| switch (err) {
+            error.SendBufferFull => {
+                filled_a = true;
+                break;
+            },
+            else => return err,
+        };
+    }
+    try testing.expect(filled_a);
+
+    try client.sendToMessage(2, 8, 43, "still-progresses");
+    const handle_b = broker.getSendBufferDirectory().findByDestination(2, 8).?;
+    var ring_b = try RingBuffer.init(
+        try broker.getSendBufferDirectory().ringSliceForHandle(broker.mapped_bytes, handle_b),
+        false,
+        null,
+        null,
+    );
+    try testing.expect(ring_b.size() > 0);
 }

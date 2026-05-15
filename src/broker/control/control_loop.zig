@@ -31,7 +31,8 @@ const admin = @import("../cluster/admin_messages.zig");
 const admin_dispatch = @import("../cluster/admin_dispatch.zig");
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
 const AdminCommand = admin_dispatch.AdminCommand;
-const TcpFrameHeader = ringloom_common.protocol.frame_parser.TcpFrameHeader;
+const MessageHeader = ringloom_common.message.message_header.MessageHeader;
+const SendBufferDirectory = memory.SendBufferDirectory;
 const RoutingRegistry = @import("../receiver/message_router.zig").ServiceRegistry;
 const FlowControlRegion = memory.FlowControlRegion;
 const PressureState = memory.PressureState;
@@ -106,7 +107,13 @@ pub const ControlLoop = struct {
     /// Admin command queue — receiver posts admin messages here.
     admin_cmd_queue: ?*AdminCommandQueue(64),
 
-    /// Send ring buffer — used for broadcasting admin messages to peers.
+    /// Destination send-buffer directory — used for broadcasting admin messages to peers.
+    send_buffer_directory: ?*SendBufferDirectory,
+
+    /// Broker metadata mapping used to resolve destination ring slices.
+    broker_mapped_bytes: ?[]u8,
+
+    /// Legacy send ring buffer retained only for older tests while v2 wiring lands.
     send_ring_buffer: ?*RingBuffer,
 
     /// Peer node IDs — used to iterate peers for broadcasting.
@@ -159,6 +166,8 @@ pub const ControlLoop = struct {
         group: []const u8,
         allocator: std.mem.Allocator,
         admin_cmd_queue: ?*AdminCommandQueue(64) = null,
+        send_buffer_directory: ?*SendBufferDirectory = null,
+        broker_mapped_bytes: ?[]u8 = null,
         send_ring_buffer: ?*RingBuffer = null,
         peer_node_ids: []const u8 = &.{},
         routing_registry: ?*RoutingRegistry = null,
@@ -189,6 +198,8 @@ pub const ControlLoop = struct {
             .next_service_rebroadcast_ns = 0,
             .allocator = opts.allocator,
             .admin_cmd_queue = opts.admin_cmd_queue,
+            .send_buffer_directory = opts.send_buffer_directory,
+            .broker_mapped_bytes = opts.broker_mapped_bytes,
             .send_ring_buffer = opts.send_ring_buffer,
             .peer_node_ids = opts.peer_node_ids,
             .routing_registry = opts.routing_registry,
@@ -696,39 +707,34 @@ pub const ControlLoop = struct {
         template_id: u16,
         body: BodyType,
     ) void {
-        const srb = self.send_ring_buffer orelse return;
         if (self.peer_node_ids.len == 0) return;
 
         // Encode admin payload (AdminMessageHeader + body) into scratch buffer
         const admin_payload_len = admin.encodeAdminMessage(
-            self.encode_buf[TcpFrameHeader.size..],
+            self.encode_buf[MessageHeader.encoded_length..],
             BodyType,
             template_id,
             body,
         );
 
-        const frame_length: u32 = @intCast(TcpFrameHeader.size + admin_payload_len);
+        const frame_length: usize = MessageHeader.encoded_length + admin_payload_len;
 
         for (self.peer_node_ids) |peer_id| {
-            const header = TcpFrameHeader{
-                .frame_length = frame_length,
+            MessageHeader.encode(self.encode_buf[0..MessageHeader.encoded_length], .{
                 .flags = constants.flag_admin,
-                .source_node_id = self.local_node_id,
-                .target_node_id = peer_id,
+                .source_node_id = @intCast(self.local_node_id),
+                .target_node_id = @intCast(peer_id),
                 .source_service_id = 0,
                 .target_service_id = 0,
-            };
-            const header_bytes: *const [TcpFrameHeader.size]u8 = @ptrCast(&header);
-            @memcpy(self.encode_buf[0..TcpFrameHeader.size], header_bytes);
+                .template_id = template_id,
+                .payload_length = @intCast(admin_payload_len),
+            });
 
-            srb.write(1, self.encode_buf[0..frame_length]) catch {
-                log.warn("send ring buffer full — dropping admin broadcast to node {}", .{peer_id});
-            };
+            self.writeAdminEnvelopeToDestination(peer_id, frame_length, template_id);
         }
     }
 
     fn broadcastAdminPayload(self: *Self, template_id: u16, payload: []const u8) void {
-        const srb = self.send_ring_buffer orelse return;
         if (self.peer_node_ids.len == 0) return;
 
         const header_len = @sizeOf(admin.AdminMessageHeader);
@@ -740,28 +746,51 @@ pub const ControlLoop = struct {
             .version = admin.SCHEMA_VERSION,
         };
         const header_bytes: *const [header_len]u8 = @ptrCast(&header);
-        @memcpy(self.encode_buf[TcpFrameHeader.size..][0..header_len], header_bytes);
-        @memcpy(self.encode_buf[TcpFrameHeader.size + header_len ..][0..payload.len], payload);
+        @memcpy(self.encode_buf[MessageHeader.encoded_length..][0..header_len], header_bytes);
+        @memcpy(self.encode_buf[MessageHeader.encoded_length + header_len ..][0..payload.len], payload);
 
-        const frame_length: u32 = @intCast(TcpFrameHeader.size + admin_payload_len);
+        const frame_length: usize = MessageHeader.encoded_length + admin_payload_len;
         for (self.peer_node_ids) |peer_id| {
-            const tcp_header = TcpFrameHeader{
-                .frame_length = frame_length,
+            MessageHeader.encode(self.encode_buf[0..MessageHeader.encoded_length], .{
                 .flags = constants.flag_admin,
-                .source_node_id = self.local_node_id,
-                .target_node_id = peer_id,
+                .source_node_id = @intCast(self.local_node_id),
+                .target_node_id = @intCast(peer_id),
                 .source_service_id = 0,
                 .target_service_id = 0,
-            };
-            const tcp_header_bytes: *const [TcpFrameHeader.size]u8 = @ptrCast(&tcp_header);
-            @memcpy(self.encode_buf[0..TcpFrameHeader.size], tcp_header_bytes);
-            srb.write(1, self.encode_buf[0..frame_length]) catch {
-                log.warn("send ring buffer full — dropping admin payload {} to node {}", .{
-                    template_id,
-                    peer_id,
-                });
-            };
+                .template_id = template_id,
+                .payload_length = @intCast(admin_payload_len),
+            });
+            self.writeAdminEnvelopeToDestination(peer_id, frame_length, template_id);
         }
+    }
+
+    fn writeAdminEnvelopeToDestination(self: *Self, peer_id: u8, frame_length: usize, template_id: u16) void {
+        const directory = self.send_buffer_directory orelse return;
+        const mapped = self.broker_mapped_bytes orelse return;
+        const handle = directory.findOrAllocateDestination(mapped, @intCast(peer_id), 0) catch {
+            log.warn("send-buffer directory full — dropping admin payload {} to node {}", .{
+                template_id,
+                peer_id,
+            });
+            return;
+        };
+        const ring_slice = directory.ringSliceForHandle(mapped, handle) catch return;
+        var ring = RingBuffer.init(ring_slice, false, null, null) catch return;
+        ring.write(constants.message_envelope_msg_type_id, self.encode_buf[0..frame_length]) catch {
+            log.warn("destination send buffer full — dropping admin payload {} to node {}", .{
+                template_id,
+                peer_id,
+            });
+            return;
+        };
+        if (directory.validateHandle(handle)) |entry| {
+            entry.addPending(@intCast(ringCost(frame_length)));
+        } else |_| {}
+    }
+
+    fn ringCost(payload_len: usize) usize {
+        return (8 + payload_len + (constants.ring_buffer_alignment - 1)) &
+            ~@as(usize, constants.ring_buffer_alignment - 1);
     }
 
     fn broadcastAllLocalServices(self: *Self) void {
