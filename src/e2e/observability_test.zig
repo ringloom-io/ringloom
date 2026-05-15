@@ -1,8 +1,9 @@
 const std = @import("std");
-const net = @import("ringloom_tcp").socket;
 const testing_mod = @import("ringloom_testing");
+const ringloom_udp = @import("ringloom_udp");
 const platform = @import("ringloom_common").platform;
 const Clock = platform.Clock;
+const linux = std.os.linux;
 
 const TestHarness = testing_mod.TestHarness;
 const ProcessHandle = testing_mod.ProcessHandle;
@@ -51,7 +52,7 @@ test "observability exporter exposes broker and service metadata metrics" {
     try std.testing.expect(std.mem.indexOf(u8, metrics, "owner_type=\"broker\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, metrics, "service_name=\"echo\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_counter") != null);
-    try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_broker_bytes_sent_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_broker_udp_bytes_sent_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_service_messages_sent_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_ring_capacity_bytes") != null);
     try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_ring_free_bytes") != null);
@@ -75,16 +76,13 @@ fn scrapeMetrics(allocator: std.mem.Allocator, port: u16, timeout_ms: u64) ![]u8
 }
 
 fn tryScrapeMetrics(allocator: std.mem.Allocator, port: u16) ?[]u8 {
-    const addr = net.Address.parseIp4("127.0.0.1", port) catch return null;
-    const fd = net.socket(
-        addr.any.family,
-        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC,
-        0,
-    ) catch return null;
+    const addr = ringloom_udp.Address.parseIp4("127.0.0.1", port) catch return null;
+    const fd = openTcpSocket() catch return null;
     defer platform.closeFd(fd);
 
-    net.connect(fd, &addr.any, addr.getOsSockLen()) catch return null;
-    _ = net.write(fd, "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n") catch return null;
+    const sockaddr = addr.toSockaddr();
+    connectTcpSocket(fd, sockaddr) catch return null;
+    writeAllFd(fd, "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n") catch return null;
 
     var response: std.ArrayList(u8) = .empty;
     errdefer response.deinit(allocator);
@@ -99,4 +97,39 @@ fn tryScrapeMetrics(allocator: std.mem.Allocator, port: u16) ?[]u8 {
         return null;
     }
     return response.toOwnedSlice(allocator) catch null;
+}
+
+fn openTcpSocket() !std.posix.fd_t {
+    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => return @intCast(rc),
+        .ACCES => return error.PermissionDenied,
+        .AFNOSUPPORT => return error.AddressFamilyNotSupported,
+        .NOBUFS, .NOMEM => return error.SystemResources,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+}
+
+fn connectTcpSocket(fd: std.posix.fd_t, address: std.posix.sockaddr.in) !void {
+    const rc = linux.connect(fd, @ptrCast(&address), @sizeOf(std.posix.sockaddr.in));
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => return,
+        .CONNREFUSED => return error.ConnectionRefused,
+        .INTR => return error.Interrupted,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+}
+
+fn writeAllFd(fd: std.posix.fd_t, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const remaining = bytes[offset..];
+        const rc = linux.write(fd, remaining.ptr, remaining.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => offset += rc,
+            .INTR => continue,
+            .AGAIN => continue,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
 }

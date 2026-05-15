@@ -113,14 +113,14 @@ pub const ControlLoop = struct {
     /// Broker metadata mapping used to resolve destination ring slices.
     broker_mapped_bytes: ?[]u8,
 
-    /// Legacy send ring buffer retained only for older tests while v2 wiring lands.
+    /// Broker send ring buffer retained for local control-plane compatibility.
     send_ring_buffer: ?*RingBuffer,
 
     /// Peer node IDs — used to iterate peers for broadcasting.
     peer_node_ids: []const u8,
 
     /// Receiver's routing registry — maps service IDs to message ring buffers.
-    /// Updated on service register/deregister so incoming TCP messages can be
+    /// Updated on service register/deregister so incoming UDP messages can be
     /// routed to local services. Accessed from the receiver thread (reads) and
     /// the control thread (writes). The receiver is stopped before the control
     /// loop during shutdown, so cleanup in onClose is safe.
@@ -251,7 +251,7 @@ pub const ControlLoop = struct {
 
             // 3c. Reconcile service discovery. ServiceAdded admin messages are
             // idempotent, so periodic broadcasts repair announcements dropped
-            // during TCP setup or broker startup races.
+            // during UDP setup or broker startup races.
             if (self.peer_node_ids.len > 0 and now_ns > self.next_service_rebroadcast_ns) {
                 self.broadcastAllLocalServices();
                 self.broadcastAllLocalCapacities();
@@ -416,7 +416,7 @@ pub const ControlLoop = struct {
             0,
         );
 
-        // 3.5. Register in the receiver's routing registry so incoming TCP
+        // 3.5. Register in the receiver's routing registry so incoming UDP
         //      messages for this service can be delivered to its ring buffer.
         self.registerInRoutingRegistry(data.service_id, service_name, buffers);
 
@@ -523,7 +523,7 @@ pub const ControlLoop = struct {
             service_id,
         });
 
-        // 2. Deregister from the receiver's routing registry (prevents new TCP
+        // 2. Deregister from the receiver's routing registry (prevents new UDP
         //    lookups). The heap-allocated RingBuffer is NOT freed here — the
         //    receiver thread may still hold a cached pointer. It will be freed
         //    on re-registration of the same service ID or during onClose (after
@@ -644,7 +644,7 @@ pub const ControlLoop = struct {
 
     /// When a new peer connects, re-broadcast all local services so they
     /// learn about us (handles the late-join case where the initial broadcast
-    /// was lost because the TCP link wasn't up yet).
+    /// was lost because the UDP session wasn't up yet).
     fn handlePeerConnected(self: *Self, node_id: u8) void {
         log.info("peer connected notification: node={}, re-broadcasting {} local services", .{
             node_id,
@@ -956,7 +956,7 @@ pub const ControlLoop = struct {
     // ─────────────────────────────────────────────────────────────
 
     /// Register a local service in the receiver's routing registry so that
-    /// incoming TCP messages can be delivered to its shared-memory ring buffer.
+    /// incoming UDP messages can be delivered to its shared-memory ring buffer.
     fn registerInRoutingRegistry(
         self: *Self,
         service_id: i32,
@@ -967,7 +967,7 @@ pub const ControlLoop = struct {
 
         // Service IDs must fit in the routing registry's fixed-size table.
         if (service_id < 0 or service_id >= constants.default_max_services) {
-            log.warn("service id {} out of routing range [0, {}); TCP routing disabled for {s}", .{
+            log.warn("service id {} out of routing range [0, {}); UDP routing disabled for {s}", .{
                 service_id,
                 constants.default_max_services,
                 service_name,

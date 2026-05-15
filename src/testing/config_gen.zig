@@ -10,8 +10,9 @@
 //! Broker properties (`broker_<node_id>.properties`):
 //! ```text
 //! broker.node.id=1
-//! broker.local.host.port=127.0.0.1:19001
-//! broker.member.host.ports=2@10.0.0.2:19002,3@10.0.0.3:19003
+//! broker.transport=udp
+//! broker.udp.local.host.port=127.0.0.1:19001
+//! broker.udp.member.host.ports=2@10.0.0.2:19002,3@10.0.0.3:19003
 //! broker.group.name=ringloom-test
 //! broker.storage.path=/tmp/ringloom-e2e-…/storage
 //! broker.control.buffer.size=65536
@@ -115,10 +116,12 @@ pub const ConfigGen = struct {
 
         try writer.writer.print("# Auto-generated broker config for node {d}\n", .{spec.node_id});
         try writer.writer.print("broker.node.id={d}\n", .{spec.node_id});
-        try writer.writer.print("broker.local.host.port={s}:{d}\n", .{ spec.host, spec.port });
+        try writer.writer.print("broker.transport={s}\n", .{spec.transport});
+        try writer.writer.print("broker.transport.engine={s}\n", .{spec.transport_engine});
+        try writer.writer.print("broker.udp.local.host.port={s}:{d}\n", .{ spec.host, spec.port });
 
         if (peers_str.len > 0) {
-            try writer.writer.print("broker.member.host.ports={s}\n", .{peers_str});
+            try writer.writer.print("broker.udp.member.host.ports={s}\n", .{peers_str});
         }
 
         try writer.writer.print("broker.group.name={s}\n", .{spec.group_name});
@@ -134,16 +137,28 @@ pub const ConfigGen = struct {
         if (spec.receiver_cpu_affinity) |core| {
             try writer.writer.print("broker.receiver.cpu.affinity={d}\n", .{core});
         }
-        if (spec.io_uring_sqpoll) {
-            try writer.writer.writeAll("broker.io.uring.sqpoll=true\n");
+        try writer.writer.print("broker.udp.mtu={d}\n", .{spec.udp_mtu});
+        try writer.writer.print("broker.udp.term.length={d}\n", .{spec.udp_term_length});
+        try writer.writer.print("broker.udp.receiver.window.length={d}\n", .{spec.udp_receiver_window_length});
+        try writer.writer.print("broker.udp.heartbeat.interval.ms={d}\n", .{spec.udp_heartbeat_interval_ms});
+        try writer.writer.print("broker.udp.session.timeout.ms={d}\n", .{spec.udp_session_timeout_ms});
+        try writer.writer.print("broker.udp.nak.initial.delay.us={d}\n", .{spec.udp_nak_initial_delay_us});
+        try writer.writer.print("broker.udp.nak.retry.delay.us={d}\n", .{spec.udp_nak_retry_delay_us});
+        try writer.writer.print("broker.send.buffers.max.entries={d}\n", .{spec.send_buffers_max_entries});
+        try writer.writer.print("broker.send.buffers.default.size={d}\n", .{spec.send_buffers_default_size});
+        try writer.writer.print("broker.send.buffers.max.total.bytes={d}\n", .{spec.send_buffers_max_total_bytes});
+        if (spec.af_xdp_interface) |interface| {
+            try writer.writer.print("broker.af_xdp.interface={s}\n", .{interface});
         }
-        if (spec.io_uring_receiver_enabled) {
-            try writer.writer.writeAll("broker.io.uring.receiver.enabled=true\n");
+        if (spec.af_xdp_ports.len > 0) {
+            try writer.writer.writeAll("broker.af_xdp.ports=");
+            for (spec.af_xdp_ports, 0..) |port, i| {
+                if (i > 0) try writer.writer.writeByte(',');
+                try writer.writer.print("{d}", .{port});
+            }
+            try writer.writer.writeByte('\n');
         }
-        try writer.writer.print("broker.io.uring.queue.depth={d}\n", .{spec.io_uring_queue_depth});
-        try writer.writer.print("broker.io.uring.cq.depth={d}\n", .{spec.io_uring_cq_depth});
-        try writer.writer.print("broker.io.uring.recv.buffer.size={d}\n", .{spec.io_uring_recv_buffer_size});
-        try writer.writer.print("broker.io.uring.recv.buffer.count={d}\n", .{spec.io_uring_recv_buffer_count});
+        try writer.writer.print("broker.af_xdp.rx.queue={d}\n", .{spec.af_xdp_rx_queue});
         if (spec.benchmark_latency_tracing_enabled) {
             try writer.writer.writeAll("broker.benchmark.latency.tracing.enabled=true\n");
         }
@@ -222,7 +237,9 @@ test "writeBrokerConfig generates valid properties file" {
     defer allocator.free(content);
 
     try std.testing.expect(mem.indexOf(u8, content, "broker.node.id=1") != null);
-    try std.testing.expect(mem.indexOf(u8, content, "broker.local.host.port=127.0.0.1:19001") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.transport=udp") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.transport.engine=posix") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.udp.local.host.port=127.0.0.1:19001") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.group.name=ringloom-test") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.storage.path=/tmp/storage") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.control.buffer.size=65536") != null);
@@ -276,7 +293,7 @@ test "writeBrokerConfig includes peer endpoints" {
     const content = try readFileContent(allocator, path);
     defer allocator.free(content);
 
-    try std.testing.expect(mem.indexOf(u8, content, "broker.member.host.ports=2@10.0.0.2:19002,3@10.0.0.3:19003") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.udp.member.host.ports=2@10.0.0.2:19002,3@10.0.0.3:19003") != null);
 }
 
 test "writeBrokerConfig omits peer line when no peers" {
@@ -298,7 +315,7 @@ test "writeBrokerConfig omits peer line when no peers" {
     const content = try readFileContent(allocator, path);
     defer allocator.free(content);
 
-    try std.testing.expect(mem.indexOf(u8, content, "broker.member.host.ports") == null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.udp.member.host.ports") == null);
 }
 
 test "writeBrokerConfig respects custom spec values" {
@@ -330,7 +347,7 @@ test "writeBrokerConfig respects custom spec values" {
     defer allocator.free(content);
 
     try std.testing.expect(mem.indexOf(u8, content, "broker.node.id=5") != null);
-    try std.testing.expect(mem.indexOf(u8, content, "broker.local.host.port=192.168.1.10:25000") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.udp.local.host.port=192.168.1.10:25000") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.group.name=custom-group") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.storage.path=/mnt/fast") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.control.buffer.size=131072") != null);

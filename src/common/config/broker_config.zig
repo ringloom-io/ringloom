@@ -39,6 +39,36 @@ pub const IdleStrategyName = enum {
     }
 };
 
+pub const TransportKind = enum {
+    udp,
+
+    pub fn fromString(s: []const u8) ?TransportKind {
+        const map = std.StaticStringMap(TransportKind).initComptime(.{
+            .{ "udp", .udp },
+            .{ "UDP", .udp },
+        });
+        return map.get(s);
+    }
+};
+
+pub const TransportEngine = enum {
+    posix,
+    prefer_af_xdp,
+    require_af_xdp,
+
+    pub fn fromString(s: []const u8) ?TransportEngine {
+        const map = std.StaticStringMap(TransportEngine).initComptime(.{
+            .{ "posix", .posix },
+            .{ "POSIX", .posix },
+            .{ "prefer_af_xdp", .prefer_af_xdp },
+            .{ "PREFER_AF_XDP", .prefer_af_xdp },
+            .{ "require_af_xdp", .require_af_xdp },
+            .{ "REQUIRE_AF_XDP", .require_af_xdp },
+        });
+        return map.get(s);
+    }
+};
+
 pub const PeerEndpoint = struct {
     node_id: u8,
     host: []const u8,
@@ -62,15 +92,30 @@ pub const BrokerConfig = struct {
     control_buffer_size: u32 = 65_536,
     messages_buffer_size: u32 = 1_048_576,
 
-    // ── TCP transport ───────────────────────────────────────────
-    tcp_send_buffer_size: u32 = 262_144,
-    tcp_recv_buffer_size: u32 = 262_144,
-    max_frame_length: u32 = 65_536,
-    peer_write_queue_capacity: u32 = 4_096,
-    heartbeat_interval_ms: u64 = 500,
-    heartbeat_timeout_ms: u64 = 2_000,
-    reconnect_initial_delay_ms: u64 = 100,
-    reconnect_max_delay_ms: u64 = 1_000,
+    // ── V2 UDP transport ─────────────────────────────────────────
+    transport: TransportKind = .udp,
+    transport_engine: TransportEngine = .posix,
+    udp_mtu: u16 = 1408,
+    udp_term_length: u32 = 64 * 1024,
+    udp_receiver_window_length: u32 = 32 * 1024,
+    udp_heartbeat_interval_ms: u64 = 500,
+    udp_session_timeout_ms: u64 = 2_000,
+    udp_nak_initial_delay_us: u32 = 50,
+    udp_nak_retry_delay_us: u32 = 250,
+
+    // ── Per-destination send buffers ─────────────────────────────
+    send_buffers_max_entries: u32 = 256,
+    send_buffers_default_size: u32 = 1_048_576,
+    send_buffers_max_total_bytes: u64 = 256 * 1_048_576,
+    send_buffers_idle_timeout_ms: u64 = 60_000,
+    send_buffers_drain_timeout_ms: u64 = 5_000,
+
+    // ── Optional AF_XDP transport engine ─────────────────────────
+    af_xdp_interface: ?[]const u8 = null,
+    af_xdp_ports: []const u16 = &.{},
+    af_xdp_rx_queue: u32 = 0,
+    af_xdp_umem_frame_count: u32 = 4096,
+    af_xdp_umem_frame_size: u32 = 2048,
 
     // ── Threading ───────────────────────────────────────────────
     threading_mode: ThreadingMode = .dedicated,
@@ -98,21 +143,6 @@ pub const BrokerConfig = struct {
     fc_peer_send_counters_enabled: bool = false,
     fc_peer_send_counters_max_peers: u32 = 32,
 
-    // ── io_uring (Linux only) ───────────────────────────────────
-    io_uring_queue_depth: u32 = 256,
-    io_uring_cq_depth: u32 = 1024,
-    io_uring_sqpoll: bool = false,
-    io_uring_single_issuer: bool = true,
-    io_uring_coop_taskrun: bool = true,
-    io_uring_registered_buffers: u32 = 64,
-    io_uring_sender_enabled: bool = false,
-    io_uring_sender_cqe_batch_size: u32 = 64,
-    io_uring_receiver_enabled: bool = false,
-    io_uring_receiver_cqe_batch_size: u32 = 256,
-    io_uring_recv_buffer_size: u32 = 16_384,
-    io_uring_recv_buffer_count: u32 = 256,
-    sender_writev_batch_size: u32 = 64,
-    sender_write_budget_per_peer: u32 = 256,
     benchmark_latency_tracing_enabled: bool = false,
 
     // ── Computed (set during validation, not from file) ─────────

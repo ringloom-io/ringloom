@@ -21,7 +21,10 @@ pub const SendBufferPressureState = enum(u8) {
     normal = 1,
     flow_blocked = 2,
     congested = 3,
-    closed = 4,
+    term_blocked = 4,
+    peer_down = 5,
+    draining = 6,
+    closed = 7,
 };
 
 pub const SendBufferHandle = extern struct {

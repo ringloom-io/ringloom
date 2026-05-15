@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = @import("ringloom_tcp").socket;
+const udp = @import("ringloom_udp");
 
 const ringloom_common = @import("ringloom_common");
 const config_mod = @import("ringloom_common").config.broker_config;
@@ -214,17 +214,14 @@ pub const BrokerApplication = struct {
             self.config.group_name,
             self.config.benchmark_latency_tracing_enabled,
             .{
-                .io_uring_enabled = self.config.io_uring_sender_enabled,
-                .io_uring_queue_depth = @intCast(self.config.io_uring_queue_depth),
-                .io_uring_cq_depth = self.config.io_uring_cq_depth,
-                .io_uring_sqpoll = self.config.io_uring_sqpoll,
-                .io_uring_single_issuer = self.config.io_uring_single_issuer,
-                .io_uring_coop_taskrun = self.config.io_uring_coop_taskrun,
-                .io_uring_cqe_batch_size = self.config.io_uring_sender_cqe_batch_size,
-                .writev_batch_size = self.config.sender_writev_batch_size,
-                .write_budget_per_peer = self.config.sender_write_budget_per_peer,
+                .mtu = self.config.udp_mtu,
+                .term_length = self.config.udp_term_length,
+                .receiver_window_length = self.config.udp_receiver_window_length,
+                .heartbeat_interval_ns = @as(i64, @intCast(self.config.udp_heartbeat_interval_ms)) * std.time.ns_per_ms,
+                .setup_interval_ns = @as(i64, @intCast(self.config.udp_heartbeat_interval_ms)) * std.time.ns_per_ms,
             },
         );
+        try self.sender_loop.?.configureEndpoint(self.config.local_host, 0);
         if (self.config.fc_peer_send_counters_enabled) {
             self.sender_loop.?.setPeerSendCountersRegion(
                 self.broker_metadata.?.getPeerSendCountersRegion(),
@@ -244,26 +241,25 @@ pub const BrokerApplication = struct {
             &self.admin_cmd_queue.?,
             self.config.benchmark_latency_tracing_enabled,
             .{
-                .enabled = self.config.io_uring_receiver_enabled,
-                .queue_depth = @intCast(self.config.io_uring_queue_depth),
-                .cq_depth = self.config.io_uring_cq_depth,
-                .sqpoll = self.config.io_uring_sqpoll,
-                .single_issuer = self.config.io_uring_single_issuer,
-                .coop_taskrun = self.config.io_uring_coop_taskrun,
-                .cqe_batch_size = self.config.io_uring_receiver_cqe_batch_size,
-                .recv_buffer_size = self.config.io_uring_recv_buffer_size,
-                .recv_buffer_count = @intCast(self.config.io_uring_recv_buffer_count),
+                .mtu = self.config.udp_mtu,
+                .term_length = self.config.udp_term_length,
+                .receiver_window_length = self.config.udp_receiver_window_length,
+                .max_message_length = self.config.messages_buffer_size / 8,
+                .heartbeat_timeout_ns = @as(i64, @intCast(self.config.udp_session_timeout_ms)) * std.time.ns_per_ms,
+                .nak_initial_delay_ns = @as(i64, @intCast(self.config.udp_nak_initial_delay_us)) * std.time.ns_per_us,
+                .nak_retry_delay_ns = @as(i64, @intCast(self.config.udp_nak_retry_delay_us)) * std.time.ns_per_us,
+                .status_interval_ns = @as(i64, @intCast(self.config.udp_heartbeat_interval_ms)) * std.time.ns_per_ms,
             },
         );
 
-        // Wire up TCP: add peer endpoints to the sender, init listener on receiver.
+        // Wire up reliable UDP peers and receiver endpoint.
         for (self.config.peer_endpoints) |ep| {
-            const addr = net.Address.parseIp4(ep.host, ep.port) catch continue;
+            const addr = udp.Address.parseIp4(ep.host, ep.port) catch continue;
             self.sender_loop.?.addPeer(ep.node_id, addr) catch continue;
         }
         if (self.config.peer_endpoints.len > 0) {
             self.receiver_loop.?.initListener(self.config.local_host, self.config.local_port) catch |err| {
-                std.log.warn("Failed to init TCP listener: {}", .{err});
+                std.log.warn("Failed to init UDP endpoint: {}", .{err});
             };
         }
 

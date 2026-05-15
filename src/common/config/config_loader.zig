@@ -5,6 +5,8 @@ const BrokerConfig = @import("broker_config.zig").BrokerConfig;
 const PeerEndpoint = @import("broker_config.zig").PeerEndpoint;
 const ThreadingMode = @import("broker_config.zig").ThreadingMode;
 const IdleStrategyName = @import("broker_config.zig").IdleStrategyName;
+const TransportKind = @import("broker_config.zig").TransportKind;
+const TransportEngine = @import("broker_config.zig").TransportEngine;
 
 pub const ConfigError = error{
     FileNotFound,
@@ -88,7 +90,8 @@ pub const ConfigLoader = struct {
         config.node_id = std.fmt.parseInt(u8, node_id_str, 10) catch
             return ConfigError.InvalidValue;
 
-        const local_hp = props.get("broker.local.host.port") orelse
+        const local_hp = props.get("broker.udp.local.host.port") orelse
+            props.get("broker.local.host.port") orelse
             return ConfigError.MissingRequiredProperty;
         const colon_pos = std.mem.lastIndexOfScalar(u8, local_hp, ':') orelse
             return ConfigError.InvalidValue;
@@ -98,7 +101,7 @@ pub const ConfigLoader = struct {
             return ConfigError.InvalidValue;
 
         // ── Peers ───────────────────────────────────────────────
-        if (props.get("broker.member.host.ports")) |peer_str| {
+        if (props.get("broker.udp.member.host.ports") orelse props.get("broker.member.host.ports")) |peer_str| {
             config.peer_endpoints = parsePeerEndpoints(self.allocator, peer_str) catch |err| switch (err) {
                 error.InvalidPeerFormat => return ConfigError.InvalidPeerFormat,
                 error.InvalidNodeId => return ConfigError.InvalidNodeId,
@@ -119,30 +122,44 @@ pub const ConfigLoader = struct {
         if (props.get("broker.messages.buffer.size")) |v|
             config.messages_buffer_size = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
-        if (props.get("broker.tcp.send.buffer.size")) |v|
-            config.tcp_send_buffer_size = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.tcp.recv.buffer.size")) |v|
-            config.tcp_recv_buffer_size = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.max.frame.length")) |v|
-            config.max_frame_length = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.peer.write.queue.capacity")) |v|
-            config.peer_write_queue_capacity = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.heartbeat.interval.ms")) |v|
-            config.heartbeat_interval_ms = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.heartbeat.timeout.ms")) |v|
-            config.heartbeat_timeout_ms = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.reconnect.initial.delay.ms")) |v|
-            config.reconnect_initial_delay_ms = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.reconnect.max.delay.ms")) |v|
-            config.reconnect_max_delay_ms = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
+        if (props.get("broker.transport")) |v|
+            config.transport = TransportKind.fromString(v) orelse return ConfigError.InvalidValue;
+        if (props.get("broker.transport.engine")) |v|
+            config.transport_engine = TransportEngine.fromString(v) orelse return ConfigError.InvalidValue;
+        if (props.get("broker.udp.mtu")) |v|
+            config.udp_mtu = std.fmt.parseInt(u16, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.udp.term.length")) |v|
+            config.udp_term_length = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.udp.receiver.window.length")) |v|
+            config.udp_receiver_window_length = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.udp.heartbeat.interval.ms")) |v|
+            config.udp_heartbeat_interval_ms = std.fmt.parseInt(u64, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.udp.session.timeout.ms")) |v|
+            config.udp_session_timeout_ms = std.fmt.parseInt(u64, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.udp.nak.initial.delay.us")) |v|
+            config.udp_nak_initial_delay_us = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.udp.nak.retry.delay.us")) |v|
+            config.udp_nak_retry_delay_us = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.send.buffers.max.entries")) |v|
+            config.send_buffers_max_entries = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.send.buffers.default.size")) |v|
+            config.send_buffers_default_size = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.send.buffers.max.total.bytes")) |v|
+            config.send_buffers_max_total_bytes = std.fmt.parseInt(u64, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.send.buffers.idle.timeout.ms")) |v|
+            config.send_buffers_idle_timeout_ms = std.fmt.parseInt(u64, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.send.buffers.drain.timeout.ms")) |v|
+            config.send_buffers_drain_timeout_ms = std.fmt.parseInt(u64, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.af_xdp.interface")) |v|
+            config.af_xdp_interface = self.allocator.dupe(u8, v) catch return ConfigError.IoError;
+        if (props.get("broker.af_xdp.ports")) |v|
+            config.af_xdp_ports = parsePortList(self.allocator, v) catch return ConfigError.InvalidValue;
+        if (props.get("broker.af_xdp.rx.queue")) |v|
+            config.af_xdp_rx_queue = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.af_xdp.umem.frame.count")) |v|
+            config.af_xdp_umem_frame_count = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.af_xdp.umem.frame.size")) |v|
+            config.af_xdp_umem_frame_size = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
 
         if (props.get("broker.threading.mode")) |v|
             config.threading_mode = ThreadingMode.fromString(v) orelse
@@ -171,43 +188,6 @@ pub const ConfigLoader = struct {
             config.max_peers = std.fmt.parseInt(u8, v, 10) catch
                 return ConfigError.InvalidValue;
 
-        if (props.get("broker.io.uring.queue.depth")) |v|
-            config.io_uring_queue_depth = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.cq.depth")) |v|
-            config.io_uring_cq_depth = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.sqpoll")) |v|
-            config.io_uring_sqpoll = std.mem.eql(u8, v, "true");
-        if (props.get("broker.io.uring.single.issuer")) |v|
-            config.io_uring_single_issuer = std.mem.eql(u8, v, "true");
-        if (props.get("broker.io.uring.coop.taskrun")) |v|
-            config.io_uring_coop_taskrun = std.mem.eql(u8, v, "true");
-        if (props.get("broker.io.uring.registered.buffers")) |v|
-            config.io_uring_registered_buffers = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.sender.enabled")) |v|
-            config.io_uring_sender_enabled = std.mem.eql(u8, v, "true");
-        if (props.get("broker.io.uring.sender.cqe.batch.size")) |v|
-            config.io_uring_sender_cqe_batch_size = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.receiver.enabled")) |v|
-            config.io_uring_receiver_enabled = std.mem.eql(u8, v, "true");
-        if (props.get("broker.io.uring.receiver.cqe.batch.size")) |v|
-            config.io_uring_receiver_cqe_batch_size = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.recv.buffer.size")) |v|
-            config.io_uring_recv_buffer_size = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.recv.buffer.count")) |v|
-            config.io_uring_recv_buffer_count = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.sender.writev.batch.size")) |v|
-            config.sender_writev_batch_size = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.sender.write.budget.per.peer")) |v|
-            config.sender_write_budget_per_peer = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
         if (props.get("broker.benchmark.latency.tracing.enabled")) |v|
             config.benchmark_latency_tracing_enabled = std.mem.eql(u8, v, "true");
 
@@ -269,6 +249,27 @@ fn parsePeerEndpoints(
     return endpoints[0..idx];
 }
 
+fn parsePortList(allocator: std.mem.Allocator, value: []const u8) ![]const u16 {
+    if (value.len == 0) return &[_]u16{};
+
+    var count: usize = 1;
+    for (value) |c| {
+        if (c == ',') count += 1;
+    }
+
+    const ports = try allocator.alloc(u16, count);
+    errdefer allocator.free(ports);
+    var idx: usize = 0;
+    var iter = std.mem.splitScalar(u8, value, ',');
+    while (iter.next()) |entry_raw| {
+        const entry = std.mem.trim(u8, entry_raw, &std.ascii.whitespace);
+        if (entry.len == 0) continue;
+        ports[idx] = std.fmt.parseInt(u16, entry, 10) catch return error.InvalidPort;
+        idx += 1;
+    }
+    return ports[0..idx];
+}
+
 fn parseProperties(
     allocator: std.mem.Allocator,
     content: []const u8,
@@ -319,20 +320,31 @@ fn applyEnvOverrides(
 ) !void {
     const keys = [_][]const u8{
         "broker.node.id",
-        "broker.local.host.port",
-        "broker.member.host.ports",
+        "broker.udp.local.host.port",
+        "broker.udp.member.host.ports",
         "broker.group.name",
         "broker.storage.path",
         "broker.control.buffer.size",
         "broker.messages.buffer.size",
-        "broker.tcp.send.buffer.size",
-        "broker.tcp.recv.buffer.size",
-        "broker.max.frame.length",
-        "broker.peer.write.queue.capacity",
-        "broker.heartbeat.interval.ms",
-        "broker.heartbeat.timeout.ms",
-        "broker.reconnect.initial.delay.ms",
-        "broker.reconnect.max.delay.ms",
+        "broker.transport",
+        "broker.transport.engine",
+        "broker.udp.mtu",
+        "broker.udp.term.length",
+        "broker.udp.receiver.window.length",
+        "broker.udp.heartbeat.interval.ms",
+        "broker.udp.session.timeout.ms",
+        "broker.udp.nak.initial.delay.us",
+        "broker.udp.nak.retry.delay.us",
+        "broker.send.buffers.max.entries",
+        "broker.send.buffers.default.size",
+        "broker.send.buffers.max.total.bytes",
+        "broker.send.buffers.idle.timeout.ms",
+        "broker.send.buffers.drain.timeout.ms",
+        "broker.af_xdp.interface",
+        "broker.af_xdp.ports",
+        "broker.af_xdp.rx.queue",
+        "broker.af_xdp.umem.frame.count",
+        "broker.af_xdp.umem.frame.size",
         "broker.threading.mode",
         "broker.idle.strategy",
         "broker.counter.values.buffer.size",
@@ -341,20 +353,6 @@ fn applyEnvOverrides(
         "broker.max.peers",
         "broker.sender.cpu.affinity",
         "broker.receiver.cpu.affinity",
-        "broker.io.uring.queue.depth",
-        "broker.io.uring.cq.depth",
-        "broker.io.uring.sqpoll",
-        "broker.io.uring.single.issuer",
-        "broker.io.uring.coop.taskrun",
-        "broker.io.uring.registered.buffers",
-        "broker.io.uring.sender.enabled",
-        "broker.io.uring.sender.cqe.batch.size",
-        "broker.io.uring.receiver.enabled",
-        "broker.io.uring.receiver.cqe.batch.size",
-        "broker.io.uring.recv.buffer.size",
-        "broker.io.uring.recv.buffer.count",
-        "broker.sender.writev.batch.size",
-        "broker.sender.write.budget.per.peer",
         "broker.benchmark.latency.tracing.enabled",
     };
 
@@ -405,37 +403,50 @@ fn validate(config: *BrokerConfig) ConfigError!void {
     if (config.messages_buffer_size < 4096)
         return ConfigError.BufferSizeTooSmall;
 
-    // ── TCP frame size range check ──────────────────────────────
-    if (config.max_frame_length < 256 or config.max_frame_length > 1_048_576)
+    // ── UDP transport validation ────────────────────────────────
+    const data_header_len = 64;
+    if (config.udp_mtu < data_header_len + 64 or config.udp_mtu > 65_507)
+        return ConfigError.InvalidValue;
+    if (config.udp_term_length < 4096 or !std.math.isPowerOfTwo(config.udp_term_length))
+        return ConfigError.InvalidValue;
+    if (config.udp_receiver_window_length == 0 or
+        config.udp_receiver_window_length > config.udp_term_length / 2)
+    {
+        return ConfigError.InvalidValue;
+    }
+    config.udp_receiver_window_length = alignToPowerOfTwo(config.udp_receiver_window_length);
+    if (config.udp_receiver_window_length > config.udp_term_length / 2)
+        return ConfigError.InvalidValue;
+    if (config.udp_heartbeat_interval_ms == 0 or config.udp_session_timeout_ms <= config.udp_heartbeat_interval_ms)
+        return ConfigError.InvalidValue;
+    if (config.udp_nak_initial_delay_us == 0 or config.udp_nak_retry_delay_us == 0)
         return ConfigError.InvalidValue;
 
-    if (config.io_uring_queue_depth == 0 or config.io_uring_queue_depth > 32768)
+    config.send_buffers_default_size = alignToPowerOfTwo(config.send_buffers_default_size);
+    if (config.send_buffers_max_entries == 0 or config.send_buffers_default_size < 4096)
         return ConfigError.InvalidValue;
-    config.io_uring_queue_depth = alignToPowerOfTwo(config.io_uring_queue_depth);
-    if (config.io_uring_cq_depth == 0)
-        config.io_uring_cq_depth = config.io_uring_queue_depth * 4;
-    config.io_uring_cq_depth = alignToPowerOfTwo(config.io_uring_cq_depth);
-    if (config.io_uring_cq_depth < config.io_uring_queue_depth)
-        config.io_uring_cq_depth = config.io_uring_queue_depth;
-    if (config.io_uring_sender_cqe_batch_size == 0 or config.io_uring_sender_cqe_batch_size > 256)
+    const total_send_budget = @as(u64, config.send_buffers_max_entries) *
+        @as(u64, config.send_buffers_default_size);
+    if (total_send_budget > config.send_buffers_max_total_bytes)
         return ConfigError.InvalidValue;
-    if (config.io_uring_receiver_cqe_batch_size == 0 or config.io_uring_receiver_cqe_batch_size > 256)
+
+    if (config.transport_engine == .require_af_xdp and !containsPort(config.af_xdp_ports, config.local_port)) {
         return ConfigError.InvalidValue;
-    if (config.io_uring_recv_buffer_size < 1024 or config.io_uring_recv_buffer_size > config.max_frame_length)
-        return ConfigError.InvalidValue;
-    config.io_uring_recv_buffer_size = alignToPowerOfTwo(config.io_uring_recv_buffer_size);
-    if (config.io_uring_recv_buffer_count == 0 or config.io_uring_recv_buffer_count > 32768)
-        return ConfigError.InvalidValue;
-    config.io_uring_recv_buffer_count = alignToPowerOfTwo(config.io_uring_recv_buffer_count);
-    if (config.sender_writev_batch_size == 0 or config.sender_writev_batch_size > 1024)
-        return ConfigError.InvalidValue;
-    if (config.sender_write_budget_per_peer == 0 or config.sender_write_budget_per_peer > 4096)
+    }
+    if (config.af_xdp_umem_frame_count == 0 or config.af_xdp_umem_frame_size < config.udp_mtu)
         return ConfigError.InvalidValue;
 
     // ── Compute derived fields ──────────────────────────────────
     config.max_counter_id = config.counter_values_buffer_size / 128;
     config.counter_metadata_buffer_size = config.max_counter_id * 256;
     config.single_node_cluster = config.peer_endpoints.len == 0;
+}
+
+fn containsPort(ports: []const u16, port: u16) bool {
+    for (ports) |candidate| {
+        if (candidate == port) return true;
+    }
+    return false;
 }
 
 fn alignToPowerOfTwo(value: u32) u32 {
@@ -459,8 +470,9 @@ test "load valid config from properties string" {
     const content =
         \\# Test configuration
         \\broker.node.id=1
-        \\broker.local.host.port=10.0.0.1:9000
-        \\broker.member.host.ports=2@10.0.0.2:9000,3@10.0.0.3:9000
+        \\broker.transport=udp
+        \\broker.udp.local.host.port=10.0.0.1:9000
+        \\broker.udp.member.host.ports=2@10.0.0.2:9000,3@10.0.0.3:9000
         \\broker.group.name=test-group
         \\broker.control.buffer.size=131072
         \\broker.threading.mode=SHARED
@@ -508,25 +520,32 @@ test "default values are applied for omitted properties" {
     try std.testing.expectEqualStrings("/dev/shm", config.storage_path);
     try std.testing.expectEqual(@as(u32, 65_536), config.control_buffer_size);
     try std.testing.expectEqual(@as(u32, 1_048_576), config.messages_buffer_size);
-    try std.testing.expectEqual(@as(u32, 65_536), config.max_frame_length);
-    try std.testing.expect(!config.io_uring_sender_enabled);
-    try std.testing.expectEqual(@as(u32, 64), config.sender_writev_batch_size);
-    try std.testing.expectEqual(@as(u32, 256), config.sender_write_budget_per_peer);
-    try std.testing.expectEqual(@as(u32, 64), config.io_uring_sender_cqe_batch_size);
-    try std.testing.expectEqual(@as(u32, 256), config.io_uring_receiver_cqe_batch_size);
+    try std.testing.expectEqual(TransportKind.udp, config.transport);
+    try std.testing.expectEqual(TransportEngine.posix, config.transport_engine);
+    try std.testing.expectEqual(@as(u16, 1408), config.udp_mtu);
+    try std.testing.expectEqual(@as(u32, 64 * 1024), config.udp_term_length);
+    try std.testing.expectEqual(@as(u32, 32 * 1024), config.udp_receiver_window_length);
     try std.testing.expect(config.single_node_cluster);
 }
 
-test "io_uring phase 3 tuning properties are parsed" {
+test "v2 udp transport properties are parsed" {
     const content =
         \\broker.node.id=1
-        \\broker.local.host.port=127.0.0.1:9000
-        \\broker.io.uring.sender.enabled=true
-        \\broker.io.uring.sender.cqe.batch.size=128
-        \\broker.io.uring.receiver.enabled=true
-        \\broker.io.uring.receiver.cqe.batch.size=128
-        \\broker.sender.writev.batch.size=256
-        \\broker.sender.write.budget.per.peer=512
+        \\broker.udp.local.host.port=127.0.0.1:9000
+        \\broker.transport=udp
+        \\broker.transport.engine=prefer_af_xdp
+        \\broker.udp.mtu=1200
+        \\broker.udp.term.length=131072
+        \\broker.udp.receiver.window.length=65536
+        \\broker.udp.heartbeat.interval.ms=100
+        \\broker.udp.session.timeout.ms=1000
+        \\broker.udp.nak.initial.delay.us=25
+        \\broker.udp.nak.retry.delay.us=100
+        \\broker.send.buffers.max.entries=8
+        \\broker.send.buffers.default.size=65536
+        \\broker.send.buffers.max.total.bytes=524288
+        \\broker.af_xdp.interface=eth0
+        \\broker.af_xdp.ports=9000,9001
     ;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -535,12 +554,15 @@ test "io_uring phase 3 tuning properties are parsed" {
 
     const config = try loader.parseAndBuild(content);
 
-    try std.testing.expect(config.io_uring_sender_enabled);
-    try std.testing.expect(config.io_uring_receiver_enabled);
-    try std.testing.expectEqual(@as(u32, 128), config.io_uring_sender_cqe_batch_size);
-    try std.testing.expectEqual(@as(u32, 128), config.io_uring_receiver_cqe_batch_size);
-    try std.testing.expectEqual(@as(u32, 256), config.sender_writev_batch_size);
-    try std.testing.expectEqual(@as(u32, 512), config.sender_write_budget_per_peer);
+    try std.testing.expectEqual(TransportEngine.prefer_af_xdp, config.transport_engine);
+    try std.testing.expectEqual(@as(u16, 1200), config.udp_mtu);
+    try std.testing.expectEqual(@as(u32, 131072), config.udp_term_length);
+    try std.testing.expectEqual(@as(u32, 65536), config.udp_receiver_window_length);
+    try std.testing.expectEqual(@as(u64, 100), config.udp_heartbeat_interval_ms);
+    try std.testing.expectEqual(@as(u32, 25), config.udp_nak_initial_delay_us);
+    try std.testing.expectEqual(@as(u32, 8), config.send_buffers_max_entries);
+    try std.testing.expectEqualStrings("eth0", config.af_xdp_interface.?);
+    try std.testing.expectEqual(@as(usize, 2), config.af_xdp_ports.len);
 }
 
 test "windows-style line endings are handled" {
@@ -711,12 +733,12 @@ test "invalid peer format returns InvalidPeerFormat" {
     try std.testing.expectError(ConfigError.InvalidPeerFormat, result);
 }
 
-test "max_frame_length out of range returns InvalidValue" {
+test "udp mtu out of range returns InvalidValue" {
     // Given
     const content =
         \\broker.node.id=1
         \\broker.local.host.port=10.0.0.1:9000
-        \\broker.max.frame.length=100
+        \\broker.udp.mtu=100
     ;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);

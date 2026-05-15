@@ -1,11 +1,7 @@
-//! Message routing for the RingLoom broker TCP receive path.
+//! Message routing for the RingLoom broker UDP receive path.
 //!
-//! Routes application payloads to target service ring buffers. The TCP transport
-//! frame is stripped before delivery, while the logical template ID is preserved
-//! as the service-visible ring-buffer message type.
-//!
-//! TCP provides reliable ordered delivery, so there is no receive log buffer,
-//! no consumption position tracking, and no frame consumed marking.
+//! Routes reassembled UDP DATA payloads to target service ring buffers while
+//! preserving the logical template ID and route metadata.
 
 const std = @import("std");
 const ringloom_common = @import("ringloom_common");
@@ -13,8 +9,7 @@ const constants = ringloom_common.platform.constants;
 const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const message_header = ringloom_common.message.message_header;
 const MessageHeader = ringloom_common.message.MessageHeader;
-const frame_parser = ringloom_common.protocol.frame_parser;
-const TcpFrameHeader = frame_parser.TcpFrameHeader;
+const udp = @import("ringloom_udp");
 
 /// Result of a route attempt.
 pub const RouteResult = enum {
@@ -25,48 +20,6 @@ pub const RouteResult = enum {
     /// Target service's ring buffer is full (back-pressure).
     service_full,
 };
-
-/// Route an application payload to the target service's messages ring buffer.
-///
-/// The caller is responsible for stripping the 24-byte TcpFrameHeader before
-/// calling this function. The service receives only the application-layer
-/// payload, while `template_id` is mapped to the ring-buffer `msg_type_id` so
-/// remote `ServiceClient.tryClaim(template_id, ...)` matches the local path.
-///
-/// If the target service is unknown, the payload is dropped.
-/// If the service's ring buffer is full, the payload is dropped (always-read model).
-pub fn routeToService(
-    registry: *const ServiceRegistry,
-    header: TcpFrameHeader,
-    payload: []const u8,
-) RouteResult {
-    const target_service_id = header.target_service_id;
-    const service = registry.lookup(target_service_id) orelse {
-        return .unknown_service;
-    };
-
-    if (payload.len > std.math.maxInt(i32)) return .unknown_service;
-    const total_len = MessageHeader.encoded_length + payload.len;
-    var claim = service.messages_ring_buffer.tryClaim(constants.message_envelope_msg_type_id, total_len) orelse {
-        return .service_full;
-    };
-    MessageHeader.encode(claim.buffer[0..MessageHeader.encoded_length], .{
-        .source_node_id = @intCast(header.source_node_id),
-        .source_service_id = @intCast(header.source_service_id),
-        .target_node_id = @intCast(header.target_node_id),
-        .target_service_id = @intCast(header.target_service_id),
-        .template_id = header.template_id,
-        .correlation_id = header.correlation_id,
-        .flags = header.flags,
-        .payload_length = @intCast(payload.len),
-    });
-    if (payload.len > 0) {
-        @memcpy(claim.buffer[MessageHeader.encoded_length..][0..payload.len], payload);
-    }
-    claim.commit();
-
-    return .success;
-}
 
 pub fn routePlainToService(
     registry: *const ServiceRegistry,
@@ -84,6 +37,39 @@ pub fn routePlainToService(
             else => return .unknown_service,
         }
     };
+
+    return .success;
+}
+
+pub fn routeUdpDataToService(
+    registry: *const ServiceRegistry,
+    header: udp.DataHeader,
+    payload: []const u8,
+) RouteResult {
+    const target_service_id = header.target_service_id;
+    const service = registry.lookup(target_service_id) orelse {
+        return .unknown_service;
+    };
+
+    if (payload.len > std.math.maxInt(i32)) return .unknown_service;
+    const total_len = MessageHeader.encoded_length + payload.len;
+    var claim = service.messages_ring_buffer.tryClaim(constants.message_envelope_msg_type_id, total_len) orelse {
+        return .service_full;
+    };
+    MessageHeader.encode(claim.buffer[0..MessageHeader.encoded_length], .{
+        .source_node_id = header.source_node_id,
+        .source_service_id = @intCast(header.source_service_id),
+        .target_node_id = header.target_node_id,
+        .target_service_id = @intCast(header.target_service_id),
+        .template_id = header.template_id,
+        .correlation_id = header.correlation_id,
+        .flags = @intCast(header.route_flags & 0xff),
+        .payload_length = @intCast(payload.len),
+    });
+    if (payload.len > 0) {
+        @memcpy(claim.buffer[MessageHeader.encoded_length..][0..payload.len], payload);
+    }
+    claim.commit();
 
     return .success;
 }
@@ -181,7 +167,7 @@ test "ServiceRegistry deregister removes entry" {
     try testing.expect(registry.lookup(5) == null);
 }
 
-test "routeToService writes to service ring buffer" {
+test "routePlainToService writes to service ring buffer" {
     var rb_buf: [4096 + 768]u8 align(8) = undefined;
     @memset(&rb_buf, 0);
     var rb = RingBuffer.init(&rb_buf, false, null, null) catch unreachable;
@@ -209,7 +195,7 @@ test "routeToService writes to service ring buffer" {
     try testing.expectEqualSlices(u8, payload, test_received_payload_buf[0..test_received_payload_len]);
 }
 
-test "routeToService preserves non-zero template ID as message type" {
+test "routePlainToService preserves non-zero template ID as message type" {
     var rb_buf: [4096 + 768]u8 align(8) = undefined;
     @memset(&rb_buf, 0);
     var rb = RingBuffer.init(&rb_buf, false, null, null) catch unreachable;
@@ -235,13 +221,13 @@ test "routeToService preserves non-zero template ID as message type" {
     try testing.expectEqualSlices(u8, payload, test_received_payload_buf[0..test_received_payload_len]);
 }
 
-test "routeToService returns unknown_service for unregistered service" {
+test "routePlainToService returns unknown_service for unregistered service" {
     const registry = ServiceRegistry.init();
     const result = routePlainToService(&registry, 99, 0, "test-payload");
     try testing.expect(result == .unknown_service);
 }
 
-test "routeToService wraps remote frame metadata in envelope" {
+test "routeUdpDataToService wraps UDP metadata in envelope" {
     var rb_buf: [4096 + 768]u8 align(8) = undefined;
     @memset(&rb_buf, 0);
     var rb = RingBuffer.init(&rb_buf, false, null, null) catch unreachable;
@@ -250,21 +236,27 @@ test "routeToService wraps remote frame metadata in envelope" {
     registry.register(.{
         .service_id = 5,
         .service_name = "test-service",
-        .node_id = 1,
+        .node_id = 2,
         .messages_ring_buffer = &rb,
     });
 
-    const payload = "response";
-    const result = routeToService(&registry, .{
-        .frame_length = TcpFrameHeader.size + payload.len,
-        .flags = constants.flag_unfragmented,
-        .source_node_id = 7,
-        .target_node_id = 1,
-        .source_service_id = 11,
+    const payload = "udp-response";
+    const header = udp.DataHeader.init(.{
+        .session_id = 1,
+        .stream_id = 11,
+        .term_id = 1,
+        .term_offset = 0,
+        .message_length = payload.len,
+        .payload_length = payload.len,
+        .source_node_id = 1,
+        .target_node_id = 2,
+        .route_flags = constants.flag_unfragmented,
+        .source_service_id = 10,
         .target_service_id = 5,
         .template_id = 42,
-        .correlation_id = 1234,
-    }, payload);
+        .correlation_id = 99,
+    });
+    const result = routeUdpDataToService(&registry, header, payload);
     try testing.expect(result == .success);
 
     test_received_msg_type = 0;
@@ -272,11 +264,13 @@ test "routeToService wraps remote frame metadata in envelope" {
     const messages_read = rb.read(&testCaptureHandler, 10);
     try testing.expectEqual(@as(u32, 1), messages_read);
     try testing.expectEqual(constants.message_envelope_msg_type_id, test_received_msg_type);
-    const envelope = message_header.tryDecodeEnvelope(test_received_msg_type, test_received_payload_buf[0..test_received_payload_len]).?;
-    try testing.expectEqual(@as(i64, 1234), envelope.header.correlation_id);
-    try testing.expectEqual(@as(i16, 11), envelope.header.source_service_id);
+    const envelope = message_header.tryDecodeEnvelope(
+        test_received_msg_type,
+        test_received_payload_buf[0..test_received_payload_len],
+    ).?;
     try testing.expectEqual(@as(u16, 42), envelope.header.template_id);
-    try testing.expectEqualStrings(payload, envelope.payload);
+    try testing.expectEqual(@as(i64, 99), envelope.header.correlation_id);
+    try testing.expectEqualSlices(u8, payload, envelope.payload);
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────

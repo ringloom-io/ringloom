@@ -74,11 +74,12 @@ pub const TermLog = struct {
         const aligned_len = Position.alignFrameLength(frame_len);
         if (self.sender_position + aligned_len > self.sender_limit) return error.SenderLimitReached;
 
+        self.active_term_id = self.initial_term_id + @as(i32, @intCast(self.sender_position / self.term_length));
         var term_offset: u32 = @intCast(self.sender_position % self.term_length);
         if (term_offset + aligned_len > self.term_length) {
             try self.writePadding(term_offset);
             self.sender_position += self.term_length - term_offset;
-            self.active_term_id += 1;
+            self.active_term_id = self.initial_term_id + @as(i32, @intCast(self.sender_position / self.term_length));
             term_offset = 0;
         }
 

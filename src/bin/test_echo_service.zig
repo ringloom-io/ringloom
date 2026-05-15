@@ -28,6 +28,7 @@ const Histogram = ringloom_testing.Histogram;
 var received_count: u64 = 0;
 var measured_count: u64 = 0;
 var max_messages: u64 = 0;
+var max_measured_messages: u64 = 0;
 var shutdown_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var reply_delay_ms: u64 = 0;
 var quiet_mode: bool = false;
@@ -86,6 +87,9 @@ fn messageHandler(_: i32, payload: []const u8) void {
     if (max_messages > 0 and received_count >= max_messages) {
         shutdown_flag.store(true, .release);
     }
+    if (max_measured_messages > 0 and measured_count >= max_measured_messages) {
+        shutdown_flag.store(true, .release);
+    }
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -107,6 +111,7 @@ pub fn main(init: std.process.Init) !void {
     const service_name = parseStringArg(args, "--service-name", "echo");
     const broker_node_id: i16 = @intCast(parseU64Arg(args, "--broker-node-id", 1));
     max_messages = parseU64Arg(args, "--max-messages", 0);
+    max_measured_messages = parseU64Arg(args, "--max-measured-messages", 0);
     reply_delay_ms = parseU64Arg(args, "--reply-delay-ms", 0);
     quiet_mode = parseBoolArg(args, "--quiet");
     const result_file = parseOptionalStringArg(args, "--result-file");
@@ -126,7 +131,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Initialize latency histogram if result file is requested.
     var histogram: Histogram = if (result_file != null) blk: {
-        const capacity: usize = if (max_messages > 0) max_messages else 200_000;
+        const capacity: usize = if (max_measured_messages > 0) max_measured_messages else if (max_messages > 0) max_messages else 200_000;
         break :blk Histogram.initCapacity(allocator, capacity) catch Histogram.init(allocator);
     } else Histogram.init(allocator);
     defer histogram.deinit();
@@ -137,19 +142,19 @@ pub fn main(init: std.process.Init) !void {
     defer latency_histogram = null;
 
     var broker_a_queue: Histogram = if (result_file != null) blk: {
-        const capacity: usize = if (max_messages > 0) max_messages else 200_000;
+        const capacity: usize = if (max_measured_messages > 0) max_measured_messages else if (max_messages > 0) max_messages else 200_000;
         break :blk Histogram.initCapacity(allocator, capacity) catch Histogram.init(allocator);
     } else Histogram.init(allocator);
     defer broker_a_queue.deinit();
 
     var transport_latency: Histogram = if (result_file != null) blk: {
-        const capacity: usize = if (max_messages > 0) max_messages else 200_000;
+        const capacity: usize = if (max_measured_messages > 0) max_measured_messages else if (max_messages > 0) max_messages else 200_000;
         break :blk Histogram.initCapacity(allocator, capacity) catch Histogram.init(allocator);
     } else Histogram.init(allocator);
     defer transport_latency.deinit();
 
     var broker_b_delivery: Histogram = if (result_file != null) blk: {
-        const capacity: usize = if (max_messages > 0) max_messages else 200_000;
+        const capacity: usize = if (max_measured_messages > 0) max_measured_messages else if (max_messages > 0) max_messages else 200_000;
         break :blk Histogram.initCapacity(allocator, capacity) catch Histogram.init(allocator);
     } else Histogram.init(allocator);
     defer broker_b_delivery.deinit();

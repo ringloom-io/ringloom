@@ -30,6 +30,30 @@ intentionally excluded from this baseline because they only measure enqueue
 into broker A's local ring buffer. `scripts/bench-single-size.sh` remains the
 better tool for best-of-N per-size runs on a quieter machine.
 
+### Reliable UDP comparison (2026-05-15)
+
+Command:
+
+```bash
+zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=ReleaseFast
+./scripts/run-benchmarks.sh --output-dir /tmp/ringloom-bench-results-new
+```
+
+This rerun was collected after the TCP → reliable-UDP cutover on the same kind
+of **untuned shared dev workstation**. The new run produced **materially better
+cross-broker transit latency** for 32 B–1024 B messages, but local throughput,
+cross-broker saturated queueing latency, and 4,096 B remote transit were not
+better in the same run. The full 2026-05-02 baseline tables therefore remain
+the published all-suite reference, with the improved remote-transit comparison
+captured here.
+
+| Message size | Old p50 (ns) | New p50 (ns) | Δ p50 | Old p95 (ns) | New p95 (ns) | Δ p95 | Old p99 (ns) | New p99 (ns) | Δ p99 |
+|-------------:|-------------:|-------------:|------:|-------------:|-------------:|------:|-------------:|-------------:|------:|
+| 32 B         |        8,946 |        5,400 | -39.6% |       12,864 |        6,532 | -49.2% |      224,326 |        7,453 | -96.7% |
+| 128 B        |        8,786 |        5,470 | -37.7% |       12,974 |        6,833 | -47.3% |      246,978 |        8,105 | -96.7% |
+| 512 B        |        8,426 |        5,530 | -34.4% |       14,888 |        6,943 | -53.4% |      315,475 |        8,405 | -97.3% |
+| 1,024 B      |       10,440 |        6,742 | -35.4% |       19,526 |        8,145 | -58.3% |      316,437 |       10,370 | -96.7% |
+
 ---
 
 ## Local IPC Transit Latency (single broker, same host)
@@ -78,7 +102,7 @@ Topology: broker A (node 1) ↔ broker B (node 2), ping on A, echo on B
 End-to-end latency measured at the echo (receiver) service on broker B during
 the **paced transit** run (`send_interval_ns=10000`). The ping service on
 broker A embeds a monotonic timestamp in each message. Full path:
-`ping → ring buffer → broker A sender → TCP → broker B receiver → ring buffer → echo`.
+`ping → ring buffer → broker A sender → reliable UDP → broker B receiver → ring buffer → echo`.
 
 | Message size | Warmup |    Sent | Received | Measured | p50 (ns) | p95 (ns) | p99 (ns) | p99.9 (ns) |   max (ns) |
 |-------------:|-------:|--------:|---------:|---------:|---------:|---------:|---------:|-----------:|-----------:|
@@ -107,7 +131,7 @@ Topology: broker A (node 1) ↔ broker B (node 2), ping on A, echo on B
 End-to-end latency measured at the echo (receiver) service on broker B during
 the separate **saturated benchmark** run (`send_interval_ns=0`). The ping
 service on broker A embeds a monotonic timestamp in each message. Full path:
-`ping → ring buffer → broker A sender → TCP → broker B receiver → ring buffer → echo`.
+`ping → ring buffer → broker A sender → reliable UDP → broker B receiver → ring buffer → echo`.
 
 | Message size | Warmup |    Sent | Received | Measured | p50 (ns) | p95 (ns) | p99 (ns) | p99.9 (ns) |    max (ns) |
 |-------------:|-------:|--------:|---------:|---------:|---------:|---------:|---------:|-----------:|------------:|
@@ -219,6 +243,7 @@ Topology: 1 broker + slow consumer (configurable delay) + ping producer
 | 2026-05-02 | Single-size benchmark defaults to paced transit latency and records sender/transport/delivery stage breakdown | Remote single-size runs now distinguish unloaded transit from saturated queueing; stage timing points show where backlog accumulates | — |
 | 2026-05-02 | Benchmark trace clock switched to stable `CLOCK_MONOTONIC`; broker-side tracing gated behind benchmark-only config; full harness rerun on untuned dev machine | Remote saturated queueing refresh: 32 B p50 **10.1 ms**, 128 B **4.5 ms**, 512 B **810 µs**. Local refresh shows burst throughput up to **13.8M msgs/s** (32 B) but saturated local latency is environment-sensitive on the untuned machine | — |
 | 2026-05-02 | `run-benchmarks.sh` split into paced transit and saturated benchmark passes | Automated baseline now reports remote transit p50 **8.4–12.2 µs** while still keeping saturated queueing p50 **0.64–7.71 ms** and throughput data in the same harness output | 
+| 2026-05-15 | Reliable UDP cutover comparison rerun | Cross-broker transit latency improved for 32 B–1024 B by ~34–40% at p50 and ~47–58% at p95; saturated queueing and 4,096 B transit were not better in the same untuned run, so the older full-suite baseline stays published | — |
 
 <!-- Template for adding new entries:
 | YYYY-MM-DD | Description of change | e.g. "p99 latency -15%" | abc1234 |

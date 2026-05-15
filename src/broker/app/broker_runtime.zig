@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const ringloom_common = @import("ringloom_common");
+const udp = @import("ringloom_udp");
 const platform = ringloom_common.platform;
 const memory = ringloom_common.memory;
 const concurrent = ringloom_common.concurrent;
@@ -180,20 +181,47 @@ pub const BrokerRuntime = struct {
             self.allocator,
             self.config.group_name,
             false,
-            .{},
+            .{
+                .mtu = self.config.udp_mtu,
+                .term_length = self.config.udp_term_length,
+                .receiver_window_length = self.config.udp_receiver_window_length,
+                .heartbeat_interval_ns = @as(i64, @intCast(self.config.udp_heartbeat_interval_ms)) * std.time.ns_per_ms,
+                .setup_interval_ns = @as(i64, @intCast(self.config.udp_heartbeat_interval_ms)) * std.time.ns_per_ms,
+            },
         );
+        try self.sender_loop.?.configureEndpoint(self.config.local_host, 0);
         if (self.config.fc_peer_send_counters_enabled) {
             self.sender_loop.?.setPeerSendCountersRegion(
                 self.broker_metadata.?.getPeerSendCountersRegion(),
             );
         }
 
-        self.receiver_loop = ReceiverEventLoop.init(
+        self.receiver_loop = ReceiverEventLoop.initWithGroupAndIoUring(
             &self.routing_registry.?,
             &self.counters.?,
             self.config.node_id,
             self.allocator,
+            self.config.group_name,
+            null,
+            false,
+            .{
+                .mtu = self.config.udp_mtu,
+                .term_length = self.config.udp_term_length,
+                .receiver_window_length = self.config.udp_receiver_window_length,
+                .max_message_length = self.config.messages_buffer_size / 8,
+                .heartbeat_timeout_ns = @as(i64, @intCast(self.config.udp_session_timeout_ms)) * std.time.ns_per_ms,
+                .nak_initial_delay_ns = @as(i64, @intCast(self.config.udp_nak_initial_delay_us)) * std.time.ns_per_us,
+                .nak_retry_delay_ns = @as(i64, @intCast(self.config.udp_nak_retry_delay_us)) * std.time.ns_per_us,
+                .status_interval_ns = @as(i64, @intCast(self.config.udp_heartbeat_interval_ms)) * std.time.ns_per_ms,
+            },
         );
+        for (self.config.peer_endpoints) |ep| {
+            const addr = udp.Address.parseIp4(ep.host, ep.port) catch continue;
+            self.sender_loop.?.addPeer(ep.node_id, addr) catch continue;
+        }
+        if (self.config.peer_endpoints.len > 0) {
+            try self.receiver_loop.?.configureEndpoint(self.config.local_host, self.config.local_port);
+        }
 
         self.broker_threads = BrokerThreads.init(
             platform.EventLoop{
@@ -242,6 +270,9 @@ pub const BrokerRuntime = struct {
             sender_loop.deinit();
         }
         self.sender_loop = null;
+        if (self.receiver_loop) |*receiver_loop| {
+            receiver_loop.deinit();
+        }
         self.receiver_loop = null;
         self.control_loop = null;
         self.routing_registry = null;

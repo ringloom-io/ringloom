@@ -167,6 +167,24 @@ stop_pid() {
     PIDS=("${new_pids[@]+"${new_pids[@]}"}")
 }
 
+wait_for_pid_exit() {
+    local pid="$1"
+    local timeout="${2:-30}"
+    local label="${3:-process}"
+    local deadline=$((SECONDS + timeout))
+
+    while kill -0 "$pid" 2>/dev/null; do
+        if [[ $SECONDS -ge $deadline ]]; then
+            echo "  ERROR: timed out waiting for $label to exit"
+            return 1
+        fi
+        sleep 0.1
+    done
+
+    wait "$pid" 2>/dev/null || true
+    return 0
+}
+
 warn_if_untuned() {
     local warned=0
 
@@ -377,6 +395,7 @@ EOF
         --broker-node-id "$ECHO_NODE" \
         --quiet \
         --idle-strategy yielding \
+        --max-measured-messages "$COUNT" \
         --result-file "$RESULTS/$PREFIX-echo-$TAG.json"
     local_ECHO_PID=${PIDS[-1]}
     wait_for_ready "$LOGS/echo.log" 5
@@ -397,13 +416,27 @@ EOF
         --spin-timeout-ms 100 \
         --send-interval-ns "$SEND_INTERVAL_NS"
 
-    sleep 1
+    if ! wait_for_pid_exit "$local_ECHO_PID" 30 "echo service"; then
+        echo "  ERROR: echo did not receive all expected messages"
+        tail -n 40 "$LOGS/ping.log" || true
+        tail -n 40 "$LOGS/echo.log" || true
+        exit 1
+    fi
 
     # Stop processes.
-    stop_pid "$local_ECHO_PID"
     [[ -n "${local_BB_PID:-}" ]] && stop_pid "$local_BB_PID"
     stop_pid "$local_BA_PID"
     sleep 1
+
+    sent=$(python3 -c "import json; print(json.load(open('$RESULTS/$PREFIX-ping-$TAG.json'))['sent'])")
+    failed=$(python3 -c "import json; print(json.load(open('$RESULTS/$PREFIX-ping-$TAG.json'))['failed'])")
+    measured=$(python3 -c "import json; print(json.load(open('$RESULTS/$PREFIX-echo-$TAG.json'))['total_measured'])")
+    if [[ "$sent" -ne "$COUNT" || "$failed" -ne 0 || "$measured" -ne "$COUNT" ]]; then
+        echo "  ERROR: incomplete benchmark run (sent=$sent failed=$failed measured=$measured expected=$COUNT)"
+        tail -n 40 "$LOGS/ping.log" || true
+        tail -n 40 "$LOGS/echo.log" || true
+        exit 1
+    fi
 
     tput=$(python3 -c "import json; print(json.load(open('$RESULTS/$PREFIX-ping-$TAG.json'))['throughput_msgs_per_sec'])")
     latency_ns=$(python3 -c "import json; print(json.load(open('$RESULTS/$PREFIX-echo-$TAG.json'))['latency_p50_ns'])")

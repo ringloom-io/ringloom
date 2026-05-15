@@ -31,6 +31,16 @@ pub const CounterSample = struct {
     value: i64,
 };
 
+pub const DestinationBufferSample = struct {
+    target_node_id: i16,
+    target_service_id: i32,
+    stream_id: u32,
+    pressure_state: memory.SendBufferPressureState,
+    bytes_pending: u64,
+    messages_pending: u64,
+    lifetime_messages_dropped: u64,
+};
+
 pub const ErrorEntry = struct {
     observation_count: i32,
     first_observation_timestamp: i64,
@@ -89,6 +99,33 @@ pub fn readCounter(
     };
 }
 
+pub fn readDestinationBufferEntry(entry: *const memory.SendBufferEntry) ?DestinationBufferSample {
+    const state = entry.loadState();
+    if (state != .active and state != .draining) return null;
+    return .{
+        .target_node_id = entry.target_node_id,
+        .target_service_id = entry.target_service_id,
+        .stream_id = entry.stream_id,
+        .pressure_state = entry.loadPressureState(),
+        .bytes_pending = @atomicLoad(u64, @as(*const u64, @ptrCast(@alignCast(&entry.bytes_pending))), .acquire),
+        .messages_pending = @atomicLoad(u64, @as(*const u64, @ptrCast(@alignCast(&entry.messages_pending))), .acquire),
+        .lifetime_messages_dropped = @atomicLoad(u64, @as(*const u64, @ptrCast(@alignCast(&entry.lifetime_messages_dropped))), .acquire),
+    };
+}
+
+pub fn pressureStateLabel(state: memory.SendBufferPressureState) []const u8 {
+    return switch (state) {
+        .unknown => "unknown",
+        .normal => "normal",
+        .flow_blocked => "flow_blocked",
+        .congested => "congested",
+        .term_blocked => "term_blocked",
+        .peer_down => "peer_down",
+        .draining => "draining",
+        .closed => "closed",
+    };
+}
+
 pub fn readErrorEntry(error_log_buffer: []u8, offset: usize) ?struct { entry: ErrorEntry, next_offset: usize } {
     if (offset + @import("../concurrent/error_log.zig").entry_header_length > error_log_buffer.len) return null;
     const entry_header_length = @import("../concurrent/error_log.zig").entry_header_length;
@@ -133,6 +170,24 @@ test "deriveRingStats clamps used bytes to capacity" {
     const stats = deriveRingStats(&buf, 1024);
     try std.testing.expectEqual(@as(usize, 1024), stats.used_bytes);
     try std.testing.expectEqual(@as(usize, 0), stats.free_bytes);
+}
+
+test "readDestinationBufferEntry exposes v2 pressure counters" {
+    var entry = memory.SendBufferEntry{
+        .target_node_id = 2,
+        .target_service_id = 7,
+        .stream_id = 123,
+    };
+    entry.storeState(.active);
+    entry.storePressureState(.flow_blocked);
+    entry.bytes_pending = 64;
+    entry.messages_pending = 2;
+
+    const sample = readDestinationBufferEntry(&entry).?;
+    try std.testing.expectEqual(@as(i16, 2), sample.target_node_id);
+    try std.testing.expectEqual(@as(i32, 7), sample.target_service_id);
+    try std.testing.expectEqual(memory.SendBufferPressureState.flow_blocked, sample.pressure_state);
+    try std.testing.expectEqualStrings("flow_blocked", pressureStateLabel(sample.pressure_state));
 }
 
 fn storeAt(comptime T: type, buffer: []u8, offset: usize, value: T) void {

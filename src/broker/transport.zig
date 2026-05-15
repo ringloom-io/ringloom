@@ -1,4 +1,4 @@
-//! Transport layer — TCP transport, buffer management, and platform I/O backends.
+//! Transport layer — UDP endpoint, buffer management, and platform I/O backends.
 //!
 //! This is the single import point for all transport-related functionality.
 //! The rest of the codebase imports this module instead of individual files.
@@ -9,6 +9,7 @@ const builtin = @import("builtin");
 
 pub const buffer_pool = @import("transport/buffer_pool.zig");
 pub const network_io = @import("transport/network_io.zig");
+pub const udp_endpoint = @import("transport/udp_endpoint.zig");
 pub const kqueue = @import("transport/kqueue.zig");
 
 /// io_uring backend — only available on Linux.
@@ -27,6 +28,8 @@ pub const BufferSlot = buffer_pool.BufferSlot;
 pub const NetworkIo = network_io.NetworkIo;
 pub const IoUringNetworkIo = network_io.IoUringNetworkIo;
 pub const KqueueNetworkIo = network_io.KqueueNetworkIo;
+pub const UdpEndpointConfig = udp_endpoint.EndpointConfig;
+pub const PosixUdpEndpoint = udp_endpoint.PosixEndpoint;
 
 /// IoUring wrapper type — only available on Linux.
 pub const IoUring = if (builtin.os.tag == .linux)
@@ -46,6 +49,7 @@ else
 comptime {
     _ = @import("transport/buffer_pool.zig");
     _ = @import("transport/network_io.zig");
+    _ = @import("transport/udp_endpoint.zig");
     _ = @import("transport/kqueue.zig");
     if (builtin.os.tag == .linux) {
         _ = @import("transport/io_uring.zig");

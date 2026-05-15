@@ -27,6 +27,7 @@ const ServiceCounter = ringloom_common.monitoring.ServiceCounter;
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const MessageHeader = message_header.MessageHeader;
 const SendBufferEntry = memory.SendBufferEntry;
+const SendBufferPressureState = memory.SendBufferPressureState;
 
 pub const ServiceClient = struct {
     pub const TargetInstanceInfo = extern struct {
@@ -617,6 +618,10 @@ pub const ServiceClient = struct {
                 }
             }
 
+            if (self.destinationPressure(instance)) |pressure| {
+                try self.applyDestinationPressure(pressure, send_cost, instance);
+            }
+
             // Path 4: Per-peer send congestion (two u64 reads).
             if (self.fc_config.per_peer_pending_threshold > 0) {
                 if (self.peerSendPending(instance.node_id)) |pending| {
@@ -639,6 +644,21 @@ pub const ServiceClient = struct {
         send_buffer,
         peer_congestion,
     };
+
+    fn applyDestinationPressure(
+        self: *Self,
+        pressure: SendBufferPressureState,
+        required: usize,
+        instance: *const ServiceInstance,
+    ) SendError!void {
+        switch (pressure) {
+            .unknown, .normal => {},
+            .flow_blocked, .term_blocked => try self.applyStrategy(.send_buffer, 0, required, instance),
+            .congested => try self.applyStrategy(.peer_congestion, 0, required, instance),
+            .peer_down => return error.PeerDisconnected,
+            .draining, .closed => return error.SendBufferFull,
+        }
+    }
 
     /// Apply the configured backpressure strategy.
     fn applyStrategy(
@@ -1017,6 +1037,17 @@ pub const ServiceClient = struct {
             return copy.getCapacity() - copy.size();
         }
         return null;
+    }
+
+    fn destinationPressure(self: *const Self, instance: *const ServiceInstance) ?SendBufferPressureState {
+        const broker = self.broker_meta orelse return null;
+        const handle = broker.getSendBufferDirectory().findByDestination(
+            instance.node_id,
+            instance.service_id,
+        ) orelse return null;
+        if (handle.index >= constants.default_send_buffer_entry_count) return null;
+        const entry = &broker.getSendBufferDirectory().entries[handle.index];
+        return entry.loadPressureState();
     }
 
     fn destinationRingBuffer(self: *Self, handle: memory.SendBufferHandle) !*RingBuffer {

@@ -23,7 +23,7 @@ This is a breaking architecture. Backward compatibility with the TCP protocol, T
 
 ### Non-goals
 
-1. **TCP compatibility.** The `ringloom_tcp` library can be removed or left unused after the cutover.
+1. **TCP compatibility.** The removed v1 TCP transport is not preserved as a compatibility layer.
 2. **General Aeron compatibility.** The protocol borrows Aeron concepts but is not wire-compatible with Aeron.
 3. **Multicast in the initial design.** The first v2 transport is unicast broker-to-broker. The protocol leaves room for multicast-style NAK suppression later.
 4. **End-to-end exactly-once delivery across broker restart.** The transport provides reliable ordered delivery within a live broker session. Broker restart creates a new session epoch; unacknowledged data from the previous session is abandoned.
@@ -734,14 +734,13 @@ V2 requires tests beyond TCP-era cross-broker success cases:
 
 ---
 
-## 15. Current implementation touchpoints
+## 15. Implementation touchpoints
 
-The implementation plan in `docs/impl-v2/` references these current v1 assumptions:
+The completed v2 implementation is centered on these surfaces:
 
-- v1 architecture documents TCP and a single send ring buffer in `docs/architecture.md`.
-- Broker metadata maps a single `send_buffer` and exposes `getSendBuffer()` in `src/common/memory/broker_metadata.zig`.
-- ServiceClient caches `broker_send_ring_buffer` and writes `TcpFrameHeader + payload` in `src/service/service_client.zig`.
-- SenderEventLoop owns one `send_ring_buffer`, drains it globally, and computes minimum write-queue space across peers in `src/broker/sender/sender_event_loop.zig`.
-- ReceiverEventLoop accepts TCP, parses stream frames, and routes complete TCP frames in `src/broker/receiver/receiver_event_loop.zig`.
-- Config currently exposes TCP and TCP io_uring keys in `src/common/config/broker_config.zig` and `src/common/config/config_loader.zig`.
-- E2E coverage currently centers on TCP cross-broker behavior in `src/e2e/cross_broker_test.zig`, `src/e2e/fragmentation_test.zig`, and `src/e2e/backpressure_test.zig`.
+- Broker metadata owns destination send-buffer, flow-control, and peer counter regions in `src/common/memory/broker_metadata.zig`.
+- ServiceClient routes remote sends into per-destination buffers with transport-neutral message envelopes in `src/service/service_client.zig`.
+- SenderEventLoop drains per-destination buffers and sends reliable UDP SETUP/DATA/HEARTBEAT frames in `src/broker/sender/sender_event_loop.zig`.
+- ReceiverEventLoop polls UDP packets, reassembles DATA frames, emits SETUP_RESPONSE/STATUS/NAK, and routes complete messages in `src/broker/receiver/receiver_event_loop.zig`.
+- Config exposes UDP/send-buffer/AF_XDP keys in `src/common/config/broker_config.zig` and `src/common/config/config_loader.zig`.
+- E2E coverage exercises UDP cross-broker routing, fragmentation, backpressure, and observability in `src/e2e/`.

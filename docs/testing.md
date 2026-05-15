@@ -43,7 +43,7 @@ test-bins     →  all test service binaries
 ## 1. Unit & Integration Tests
 
 **What they cover:** Individual modules — ring buffers, encoders, parsers, config
-parsing, harness utilities, IPC primitives, TCP framing, and broker internals.
+parsing, harness utilities, IPC primitives, reliable-UDP framing, and broker internals.
 
 **When to run:** On every code change. These are fast and deterministic.
 
@@ -226,7 +226,7 @@ The script tests message sizes: 32, 128, 512, 1024, and 4096 bytes.
   approximation of unloaded broker-to-broker transit time.
 - **Queueing latency**: The saturated benchmark mode. The sender intentionally
   outruns the end-to-end path, so the measured value includes backlog depth
-  through broker A, TCP, broker B, and broker B → service handoff.
+  through broker A, reliable UDP, broker B, and broker B → service handoff.
 - **Send latency** (ping JSON): Time to write a message into the local
   broker's ring buffer. Lower bound on end-to-end latency.
 - **Spinning backpressure**: With `--spin-timeout-ms`, the sender retries
@@ -234,8 +234,8 @@ The script tests message sizes: 32, 128, 512, 1024, and 4096 bytes.
   re-embedded on each retry so latency excludes spin-wait time.
 - **Stage breakdown** (echo JSON, 32 B+ payloads): Additional p50/p95/p99
   counters for broker A queueing, transport, and broker B delivery. Use these
-  to tell whether a latency spike came from queue buildup before TCP, the
-  cross-broker hop itself, or delivery after ingress.
+  to tell whether a latency spike came from queue buildup before the reliable-UDP
+  transport, the cross-broker hop itself, or delivery after ingress.
 
 ### Benchmark categories (30 tests in 6 files)
 

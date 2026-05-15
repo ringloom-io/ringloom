@@ -7,6 +7,7 @@ const ServiceInstance = @import("service_instance.zig").ServiceInstance;
 const ringloom_common = @import("ringloom_common");
 const BrokerMetadataFile = ringloom_common.memory.BrokerMetadataFile;
 const RingBuffer = ringloom_common.concurrent.RingBuffer;
+const FlowControlConfig = @import("flow_control_config.zig").FlowControlConfig;
 
 test "round-robin load balancer cycles through instances" {
     // Given: a ServiceClient with 3 instances.
@@ -229,6 +230,7 @@ test "ServiceClient full destination buffer does not block another destination" 
             else => return err,
         };
     }
+
     try testing.expect(filled_a);
 
     try client.sendToMessage(2, 8, 43, "still-progresses");
@@ -240,4 +242,52 @@ test "ServiceClient full destination buffer does not block another destination" 
         null,
     );
     try testing.expect(ring_b.size() > 0);
+}
+
+test "ServiceClient maps destination pressure states to send errors" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(storage_path);
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
+
+    var broker = try BrokerMetadataFile.create(storage_path, "test-group", 1, 4096, 4096);
+    defer broker.close();
+
+    const fc_config = FlowControlConfig{
+        .enabled = true,
+        .strategy = .drop,
+        .check_peer_connectivity = false,
+    };
+    var client = ServiceClient.initWithFlowControl(
+        testing.allocator,
+        "remote-test",
+        &broker,
+        1,
+        100,
+        fc_config,
+        null,
+        null,
+        null,
+    );
+    defer client.deinit();
+    try client.addInstance(.{ .service_id = 7, .service_name = "remote-test", .node_id = 2 });
+
+    const handle = try broker.findOrAllocateSendBuffer(2, 7);
+    const entry = &broker.getMutableSendBufferDirectory().entries[handle.index];
+
+    entry.storePressureState(.flow_blocked);
+    try testing.expectError(error.BackPressure, client.sendToMessage(2, 7, 42, "blocked"));
+
+    entry.storePressureState(.congested);
+    try testing.expectError(error.PeerCongested, client.sendToMessage(2, 7, 42, "congested"));
+
+    entry.storePressureState(.term_blocked);
+    try testing.expectError(error.BackPressure, client.sendToMessage(2, 7, 42, "term"));
+
+    entry.storePressureState(.peer_down);
+    try testing.expectError(error.PeerDisconnected, client.sendToMessage(2, 7, 42, "down"));
+
+    entry.storePressureState(.draining);
+    try testing.expectError(error.SendBufferFull, client.sendToMessage(2, 7, 42, "draining"));
 }

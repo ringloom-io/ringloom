@@ -6,6 +6,7 @@
 pub const receiver_event_loop = @import("receiver/receiver_event_loop.zig");
 pub const peer_receiver = @import("receiver/peer_receiver.zig");
 pub const message_router_mod = @import("receiver/message_router.zig");
+pub const udp_reassembly = @import("receiver/udp_reassembly.zig");
 
 // ── Re-exports: primary types ────────────────────────────────────────
 
@@ -16,8 +17,9 @@ pub const LivenessState = peer_receiver.LivenessState;
 pub const ReadState = peer_receiver.ReadState;
 pub const ServiceRegistry = message_router_mod.ServiceRegistry;
 pub const RouteResult = message_router_mod.RouteResult;
+pub const StreamReceiver = udp_reassembly.StreamReceiver;
 
-pub const routeToService = message_router_mod.routeToService;
+pub const routeUdpDataToService = message_router_mod.routeUdpDataToService;
 
 // ── Test Discovery ───────────────────────────────────────────────────
 
@@ -26,4 +28,5 @@ comptime {
     _ = @import("receiver/receiver_event_loop.zig");
     _ = @import("receiver/peer_receiver.zig");
     _ = @import("receiver/message_router.zig");
+    _ = @import("receiver/udp_reassembly.zig");
 }

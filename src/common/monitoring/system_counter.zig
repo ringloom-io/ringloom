@@ -10,11 +10,11 @@ pub const SystemCounter = enum(u8) {
     messages_routed_local = 2,
     messages_routed_remote = 3,
 
-    // ── TCP connection counters ─────────────────────────────────
-    tcp_connections_accepted = 4,
-    tcp_connection_errors = 5,
-    tcp_handshake_failures = 6,
-    tcp_reconnect_attempts = 7,
+    // ── UDP session counters ────────────────────────────────────
+    udp_peers_configured = 4,
+    udp_endpoint_errors = 5,
+    udp_setup_failures = 6,
+    udp_setup_retries = 7,
 
     // ── Heartbeats ──────────────────────────────────────────────
     heartbeats_sent = 8,
@@ -63,10 +63,10 @@ pub const SystemCounter = enum(u8) {
             .bytes_received => "bytes-received",
             .messages_routed_local => "messages-routed-local",
             .messages_routed_remote => "messages-routed-remote",
-            .tcp_connections_accepted => "tcp-connections-accepted",
-            .tcp_connection_errors => "tcp-connection-errors",
-            .tcp_handshake_failures => "tcp-handshake-failures",
-            .tcp_reconnect_attempts => "tcp-reconnect-attempts",
+            .udp_peers_configured => "udp-peers-configured",
+            .udp_endpoint_errors => "udp-endpoint-errors",
+            .udp_setup_failures => "udp-setup-failures",
+            .udp_setup_retries => "udp-setup-retries",
             .heartbeats_sent => "heartbeats-sent",
             .heartbeats_received => "heartbeats-received",
             .heartbeat_timeouts => "heartbeat-timeouts",

@@ -2,8 +2,8 @@
 //! ringloom-observability — Prometheus exporter for RingLoom metadata files.
 
 const std = @import("std");
-const net = @import("ringloom_tcp").socket;
 const ringloom_common = @import("ringloom_common");
+const ringloom_udp = @import("ringloom_udp");
 
 const memory = ringloom_common.memory;
 const platform = ringloom_common.platform;
@@ -16,6 +16,7 @@ const BrokerMetadataFile = memory.BrokerMetadataFile;
 const ServiceMetadataFile = memory.ServiceMetadataFile;
 const ServiceScanner = memory.ServiceScanner;
 const constants = memory.constants;
+const linux = std.os.linux;
 
 const Args = struct {
     storage_path: []const u8 = constants.default_storage_path,
@@ -57,19 +58,16 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     };
 
-    const fd = try net.socket(
-        listen_addr.any.family,
-        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC,
-        0,
-    );
+    const fd = try openTcpSocket();
     defer platform.closeFd(fd);
-    try net.bind(fd, &listen_addr.any, listen_addr.getOsSockLen());
-    try net.listen(fd, 128);
+    const listen_sockaddr = listen_addr.toSockaddr();
+    try bindTcpSocket(fd, listen_sockaddr);
+    try listenTcpSocket(fd, 128);
 
     while (true) {
-        var peer_addr: net.Address = undefined;
+        var peer_addr: std.posix.sockaddr = undefined;
         var peer_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-        const client_fd = net.accept(fd, &peer_addr.any, &peer_len, std.posix.SOCK.CLOEXEC) catch |err| switch (err) {
+        const client_fd = acceptTcpSocket(fd, &peer_addr, &peer_len) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
@@ -173,7 +171,7 @@ fn renderMetrics(writer: *std.Io.Writer, args: Args, self_metrics: *SelfMetrics)
             if (args.broker_node_id) |wanted| {
                 if (node_id != wanted) continue;
             }
-                renderBroker(writer, args, node_id, now_ms, now_ns, self_metrics) catch {
+            renderBroker(writer, args, node_id, now_ms, now_ns, self_metrics) catch {
                 self_metrics.invalid_metadata_files_total += 1;
             };
         } else if (ServiceScanner.parseFileName(entry.name)) |parsed| {
@@ -329,10 +327,10 @@ fn brokerDirectMetricName(sample: metadata_reader.CounterSample) ?[]const u8 {
         .bytes_received => "ringloom_broker_bytes_received_total",
         .messages_routed_local => "ringloom_broker_messages_routed_local_total",
         .messages_routed_remote => "ringloom_broker_messages_routed_remote_total",
-        .tcp_connections_accepted => "ringloom_broker_tcp_connections_accepted_total",
-        .tcp_connection_errors => "ringloom_broker_tcp_connection_errors_total",
-        .tcp_handshake_failures => "ringloom_broker_tcp_handshake_failures_total",
-        .tcp_reconnect_attempts => "ringloom_broker_tcp_reconnect_attempts_total",
+        .udp_peers_configured => "ringloom_broker_udp_peers_configured_total",
+        .udp_endpoint_errors => "ringloom_broker_udp_endpoint_errors_total",
+        .udp_setup_failures => "ringloom_broker_udp_setup_failures_total",
+        .udp_setup_retries => "ringloom_broker_udp_setup_retries_total",
         .heartbeats_sent => "ringloom_broker_heartbeats_sent_total",
         .heartbeats_received => "ringloom_broker_heartbeats_received_total",
         .heartbeat_timeouts => "ringloom_broker_heartbeat_timeouts_total",
@@ -362,6 +360,44 @@ fn brokerDirectMetricName(sample: metadata_reader.CounterSample) ?[]const u8 {
 }
 
 fn brokerRuntimeMetricName(label: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, label, "udp_frames_sent")) return "ringloom_broker_udp_frames_sent_total";
+    if (std.mem.eql(u8, label, "udp_bytes_sent")) return "ringloom_broker_udp_bytes_sent_total";
+    if (std.mem.eql(u8, label, "udp_heartbeats_sent")) return "ringloom_broker_udp_heartbeats_sent_total";
+    if (std.mem.eql(u8, label, "udp_send_back_pressure")) return "ringloom_broker_udp_send_backpressure_total";
+    if (std.mem.eql(u8, label, "udp_send_errors")) return "ringloom_broker_udp_send_errors_total";
+    if (std.mem.eql(u8, label, "udp_peers_configured")) return "ringloom_broker_udp_peers_configured_total";
+    if (std.mem.eql(u8, label, "udp_peers_removed")) return "ringloom_broker_udp_peers_removed_total";
+    if (std.mem.eql(u8, label, "udp_peers_timed_out")) return "ringloom_broker_udp_peers_timed_out_total";
+    if (std.mem.eql(u8, label, "udp_setup_retries")) return "ringloom_broker_udp_setup_retries_total";
+    if (std.mem.eql(u8, label, "udp_endpoint_send_pressure")) return "ringloom_broker_udp_endpoint_send_pressure_total";
+    if (std.mem.eql(u8, label, "udp_endpoint_send_errors")) return "ringloom_broker_udp_endpoint_send_errors_total";
+    if (std.mem.eql(u8, label, "udp_naks_received")) return "ringloom_broker_udp_naks_received_total";
+    if (std.mem.eql(u8, label, "udp_retransmits_sent")) return "ringloom_broker_udp_retransmits_sent_total";
+    if (std.mem.eql(u8, label, "udp_status_received")) return "ringloom_broker_udp_status_received_total";
+    if (std.mem.eql(u8, label, "udp_setup_sent")) return "ringloom_broker_udp_setup_sent_total";
+    if (std.mem.eql(u8, label, "sender_malformed_messages_dropped")) return "ringloom_broker_malformed_messages_dropped_total";
+    if (std.mem.eql(u8, label, "sender_unknown_peer_messages_dropped")) return "ringloom_broker_unknown_peer_messages_dropped_total";
+    if (std.mem.eql(u8, label, "sender_peer_not_connected_drops")) return "ringloom_broker_peer_not_connected_drops_total";
+    if (std.mem.eql(u8, label, "sender_destination_overflow_drops")) return "ringloom_broker_peer_queue_overflow_drops_total";
+    if (std.mem.eql(u8, label, "udp_recv_bytes_received")) return "ringloom_broker_udp_bytes_received_total";
+    if (std.mem.eql(u8, label, "udp_recv_frames_routed")) return "ringloom_broker_udp_frames_routed_total";
+    if (std.mem.eql(u8, label, "udp_recv_heartbeats_received")) return "ringloom_broker_udp_heartbeats_received_total";
+    if (std.mem.eql(u8, label, "udp_recv_unknown_service_drops")) return "ringloom_broker_unknown_service_drops_total";
+    if (std.mem.eql(u8, label, "udp_recv_service_full_drops")) return "ringloom_broker_service_full_drops_total";
+    if (std.mem.eql(u8, label, "udp_recv_invalid_frame_drops")) return "ringloom_broker_invalid_frames_total";
+    if (std.mem.eql(u8, label, "udp_recv_unknown_peer_drops")) return "ringloom_broker_unknown_peer_drops_total";
+    if (std.mem.eql(u8, label, "udp_recv_peers_configured")) return "ringloom_broker_udp_recv_peers_configured_total";
+    if (std.mem.eql(u8, label, "udp_setup_failures")) return "ringloom_broker_udp_setup_failures_total";
+    if (std.mem.eql(u8, label, "udp_recv_endpoint_errors")) return "ringloom_broker_udp_recv_endpoint_errors_total";
+    if (std.mem.eql(u8, label, "udp_recv_heartbeat_timeouts")) return "ringloom_broker_udp_heartbeat_timeouts_total";
+    if (std.mem.eql(u8, label, "udp_recv_peer_reconnects")) return "ringloom_broker_udp_peer_reconnects_total";
+    if (std.mem.eql(u8, label, "udp_recv_admin_messages_received")) return "ringloom_broker_udp_admin_messages_received_total";
+    if (std.mem.eql(u8, label, "udp_recv_admin_message_errors")) return "ringloom_broker_udp_admin_message_errors_total";
+    if (std.mem.eql(u8, label, "udp_status_sent")) return "ringloom_broker_udp_status_sent_total";
+    if (std.mem.eql(u8, label, "udp_naks_sent")) return "ringloom_broker_udp_naks_sent_total";
+    if (std.mem.eql(u8, label, "udp_duplicate_packets")) return "ringloom_broker_udp_duplicate_packets_total";
+    if (std.mem.eql(u8, label, "udp_stale_session_packets")) return "ringloom_broker_udp_stale_session_packets_total";
+
     if (std.mem.eql(u8, label, "frames_sent")) return "ringloom_broker_frames_sent_total";
     if (std.mem.eql(u8, label, "bytes_sent")) return "ringloom_broker_bytes_sent_total";
     if (std.mem.eql(u8, label, "heartbeats_sent")) return "ringloom_broker_heartbeats_sent_total";
@@ -382,9 +418,9 @@ fn brokerRuntimeMetricName(label: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, label, "recv_service_full_drops")) return "ringloom_broker_service_full_drops_total";
     if (std.mem.eql(u8, label, "recv_invalid_frame_drops")) return "ringloom_broker_invalid_frame_drops_total";
     if (std.mem.eql(u8, label, "recv_unknown_peer_drops")) return "ringloom_broker_unknown_peer_drops_total";
-    if (std.mem.eql(u8, label, "recv_connections_accepted")) return "ringloom_broker_tcp_connections_accepted_total";
-    if (std.mem.eql(u8, label, "recv_handshake_failures")) return "ringloom_broker_tcp_handshake_failures_total";
-    if (std.mem.eql(u8, label, "recv_connection_errors")) return "ringloom_broker_tcp_connection_errors_total";
+    if (std.mem.eql(u8, label, "udp_recv_peers_configured")) return "ringloom_broker_udp_peers_configured_total";
+    if (std.mem.eql(u8, label, "udp_setup_failures")) return "ringloom_broker_udp_setup_failures_total";
+    if (std.mem.eql(u8, label, "udp_recv_endpoint_errors")) return "ringloom_broker_udp_endpoint_errors_total";
     if (std.mem.eql(u8, label, "recv_heartbeat_timeouts")) return "ringloom_broker_heartbeat_timeouts_total";
     if (std.mem.eql(u8, label, "recv_peer_reconnects")) return "ringloom_broker_peer_reconnects_total";
     if (std.mem.eql(u8, label, "recv_admin_messages_received")) return "ringloom_broker_admin_messages_received_total";
@@ -438,12 +474,13 @@ fn renderSelfMetrics(writer: *std.Io.Writer, group: []const u8, self_metrics: *c
 
 fn writeResponse(fd: std.posix.fd_t, status: []const u8, content_type: []const u8, body: []const u8) !void {
     var header_buf: [512]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buf,
+    const header = try std.fmt.bufPrint(
+        &header_buf,
         "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nCache-Control: no-cache\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
         .{ status, content_type, body.len },
     );
-    _ = try net.write(fd, header);
-    if (body.len > 0) _ = try net.write(fd, body);
+    try writeAllFd(fd, header);
+    if (body.len > 0) try writeAllFd(fd, body);
 }
 
 fn parsePath(request: []const u8) []const u8 {
@@ -453,11 +490,67 @@ fn parsePath(request: []const u8) []const u8 {
     return rest[0..end];
 }
 
-fn parseListen(value: []const u8) !net.Address {
+fn parseListen(value: []const u8) !ringloom_udp.Address {
     const colon = std.mem.lastIndexOfScalar(u8, value, ':') orelse return error.InvalidListenAddress;
     const host = value[0..colon];
     const port = try std.fmt.parseInt(u16, value[colon + 1 ..], 10);
-    return net.Address.parseIp4(host, port);
+    return ringloom_udp.Address.parseIp4(host, port);
+}
+
+fn openTcpSocket() !std.posix.fd_t {
+    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => return @intCast(rc),
+        .ACCES => return error.PermissionDenied,
+        .AFNOSUPPORT => return error.AddressFamilyNotSupported,
+        .NOBUFS, .NOMEM => return error.SystemResources,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+}
+
+fn bindTcpSocket(fd: std.posix.fd_t, address: std.posix.sockaddr.in) !void {
+    const rc = linux.bind(fd, @ptrCast(&address), @sizeOf(std.posix.sockaddr.in));
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => return,
+        .ACCES => return error.PermissionDenied,
+        .ADDRINUSE => return error.AddressInUse,
+        .AFNOSUPPORT => return error.AddressFamilyNotSupported,
+        .NOBUFS, .NOMEM => return error.SystemResources,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+}
+
+fn listenTcpSocket(fd: std.posix.fd_t, backlog: u32) !void {
+    const rc = linux.listen(fd, backlog);
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => return,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+}
+
+fn acceptTcpSocket(fd: std.posix.fd_t, peer_addr: *std.posix.sockaddr, peer_len: *std.posix.socklen_t) !std.posix.fd_t {
+    const rc = linux.accept4(fd, peer_addr, peer_len, linux.SOCK.CLOEXEC);
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => return @intCast(rc),
+        .AGAIN => return error.WouldBlock,
+        .CONNABORTED => return error.ConnectionAborted,
+        .INTR => return error.Interrupted,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+}
+
+fn writeAllFd(fd: std.posix.fd_t, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const remaining = bytes[offset..];
+        const rc = linux.write(fd, remaining.ptr, remaining.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => offset += rc,
+            .INTR => continue,
+            .AGAIN => continue,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
 }
 
 fn parseBrokerNodeId(file_name: []const u8) ?i16 {

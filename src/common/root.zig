@@ -2,13 +2,12 @@
 //!
 //! This is the root source file for the `ringloom_common` library module.
 //! It re-exports all stable public APIs: platform abstractions, concurrent
-//! utilities, memory layout, message codecs, protocol definitions,
-//! monitoring primitives, and shared configuration helpers.
+//! utilities, memory layout, message codecs, monitoring primitives, and shared
+//! configuration helpers.
 
 pub const platform = @import("platform.zig");
 pub const memory = @import("memory.zig");
 pub const concurrent = @import("concurrent.zig");
-pub const protocol = @import("protocol.zig");
 pub const message = @import("message.zig");
 pub const monitoring = @import("monitoring.zig");
 
@@ -83,9 +82,6 @@ comptime {
     _ = @import("concurrent/ring_buffer.zig");
     _ = @import("concurrent/command_queue.zig");
 
-    // Protocol layer
-    _ = @import("protocol/frame_parser.zig");
-
     // Message layer
     _ = @import("message/message_header.zig");
     _ = @import("message/control_encoding.zig");
@@ -114,7 +110,6 @@ test "common module compiles" {
     _ = platform;
     _ = memory;
     _ = concurrent;
-    _ = protocol;
     _ = message;
     _ = config;
     _ = monitoring;

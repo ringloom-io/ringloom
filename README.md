@@ -3,7 +3,7 @@
 ![RingLoom logo](assets/RingLoom.png)
 
 **RingLoom** is a high-performance message broker and service runtime for low-latency systems.
-It combines zero-copy same-host IPC over shared-memory ring buffers with TCP-based cross-host
+It combines zero-copy same-host IPC over shared-memory ring buffers with UDP-based cross-host
 routing, giving services one messaging model for both local and remote communication.
 
 RingLoom is aimed at workloads where predictable latency, explicit memory layout, and
@@ -12,7 +12,7 @@ allocation-free hot paths matter more than general-purpose middleware features.
 ## Why RingLoom
 
 - **Fast local communication** with memory-mapped metadata files and lock-free ring buffers.
-- **Cross-host routing** through broker-to-broker TCP transport with platform-optimized I/O.
+- **Cross-host routing** through broker-to-broker reliable UDP transport with platform-optimized I/O.
 - **Predictable execution** from pre-allocated buffers, explicit wire formats, and tight event loops.
 - **Operational visibility** through test harnesses, `ringloom-stat`, and a Prometheus exporter.
 - **Service integration options** through Zig modules plus C/C++, Java, and Node.js bindings.
@@ -20,7 +20,7 @@ allocation-free hot paths matter more than general-purpose middleware features.
 ## Highlights
 
 - Shared-memory IPC between services and the local broker
-- Broker-to-broker TCP transport with `io_uring` on Linux and `kqueue` on macOS
+- Broker-to-broker reliable UDP transport with a POSIX engine and optional AF_XDP acceleration
 - Dedicated control, sender, and receiver event loops
 - Service registration, discovery, heartbeat tracking, and leader election
 - Cluster membership and state synchronization
@@ -31,7 +31,7 @@ allocation-free hot paths matter more than general-purpose middleware features.
 
 ```text
 same host                                              remote host
-┌──────────────┐   shared memory   ┌────────────────┐   TCP   ┌────────────────┐   shared memory   ┌──────────────┐
+┌──────────────┐   shared memory   ┌────────────────┐   UDP   ┌────────────────┐   shared memory   ┌──────────────┐
 │ Service      │ ────────────────▶│ RingLoom       │ ──────▶│ RingLoom       │ ────────────────▶│ Service      │
 │ producer     │                   │ broker node A  │         │ broker node B  │                   │ consumer     │
 └──────────────┘                   └────────────────┘         └────────────────┘                   └──────────────┘
@@ -41,8 +41,8 @@ Core modules:
 
 | Module | Purpose |
 |---|---|
-| `ringloom_common` | Shared foundations: ring buffers, protocol codecs, config, monitoring, platform helpers |
-| `ringloom_tcp` | TCP transport library and platform-specific I/O engines |
+| `ringloom_common` | Shared foundations: ring buffers, message codecs, config, monitoring, platform helpers |
+| `ringloom_udp` | Reliable UDP transport primitives, POSIX endpoint, and optional AF_XDP support |
 | `ringloom_service` | Service-side runtime and client APIs |
 | `ringloom_broker` | Broker runtime, routing, cluster management, and event loops |
 | `ringloom_testing` | Multi-process test harness for end-to-end and perf scenarios |

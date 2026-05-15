@@ -97,18 +97,19 @@ comptime {
     // Sender
     _ = @import("sender/sender_event_loop.zig");
     _ = @import("sender/peer_sender.zig");
-    _ = @import("sender/send_buffer_pool.zig");
     _ = @import("sender/sender_command.zig");
-    _ = @import("sender/write_queue.zig");
+    _ = @import("sender/udp_scheduler.zig");
 
     // Receiver
     _ = @import("receiver/peer_receiver.zig");
     _ = @import("receiver/message_router.zig");
     _ = @import("receiver/receiver_event_loop.zig");
+    _ = @import("receiver/udp_reassembly.zig");
 
     // Transport
     _ = @import("transport/buffer_pool.zig");
     _ = @import("transport/network_io.zig");
+    _ = @import("transport/udp_endpoint.zig");
     _ = @import("transport/kqueue.zig");
     if (@import("builtin").os.tag == .linux) {
         _ = @import("transport/io_uring.zig");

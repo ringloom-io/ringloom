@@ -234,7 +234,7 @@ pub fn decodeData(bytes: []const u8, mtu: usize) DecodeError!*const DataHeader {
     if (common.header_length != DataHeader.encoded_length) return DecodeError.InvalidHeaderLength;
     const header: *const DataHeader = @ptrCast(@alignCast(bytes.ptr));
     if (header.reserved != 0) return DecodeError.InvalidReservedField;
-    if (header.source_node_id == 0 or header.target_node_id == 0 or header.target_service_id == 0) {
+    if (header.source_node_id == 0 or header.target_node_id == 0) {
         return DecodeError.InvalidRoute;
     }
     if (header.fragment_offset > header.message_length) return DecodeError.InvalidRoute;
@@ -301,6 +301,30 @@ test "DATA encode/decode round trip validates route fields" {
     try std.testing.expectEqual(@as(u32, 11), decoded.stream_id);
     try std.testing.expectEqual(@as(u16, 20), decoded.target_service_id);
     try std.testing.expectEqual(@as(i64, 99), decoded.correlation_id);
+}
+
+test "DATA decode allows broker service zero for admin frames" {
+    const header = DataHeader.init(.{
+        .session_id = 9,
+        .stream_id = 11,
+        .term_id = 3,
+        .term_offset = 64,
+        .message_length = 5,
+        .payload_length = 5,
+        .source_node_id = 1,
+        .target_node_id = 2,
+        .route_flags = 0x20 | 0xc0,
+        .source_service_id = 0,
+        .target_service_id = 0,
+        .template_id = 3,
+    });
+    var buf: [DataHeader.encoded_length + 5]u8 align(@alignOf(DataHeader)) = undefined;
+    @memcpy(buf[0..DataHeader.encoded_length], bytesOf(header));
+    @memcpy(buf[DataHeader.encoded_length..], "admin");
+
+    const decoded = try decodeData(&buf, default_mtu);
+    try std.testing.expectEqual(@as(u16, 0), decoded.source_service_id);
+    try std.testing.expectEqual(@as(u16, 0), decoded.target_service_id);
 }
 
 test "invalid common header fields are rejected" {

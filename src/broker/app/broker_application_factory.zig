@@ -105,6 +105,14 @@ pub fn freeBrokerConfig(allocator: std.mem.Allocator, config: *BrokerConfig) voi
         allocator.free(config.storage_path);
     }
 
+    if (config.af_xdp_interface) |interface| {
+        allocator.free(interface);
+    }
+
+    if (config.af_xdp_ports.len > 0) {
+        allocator.free(config.af_xdp_ports);
+    }
+
     if (config.peer_endpoints.len > 0) {
         for (config.peer_endpoints) |peer| {
             if (peer.host.len > 0) {

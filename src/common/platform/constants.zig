@@ -105,25 +105,10 @@ pub const flag_unfragmented: u8 = 0xC0; // begin | end
 pub const broker_service_id: i32 = 0;
 pub const broker_service_name: []const u8 = "broker";
 
-// ── TCP Protocol Constants ────────────────────────────────────────────
-
-pub const protocol_version: u8 = 1;
-pub const handshake_magic: u32 = 0x474E4952; // "RING" when written little-endian
-pub const heartbeat_template_id: u16 = 0xFFFF;
-pub const direction_sender: u8 = 0x01;
-pub const direction_receiver: u8 = 0x02;
-pub const tcp_header_length: u32 = 24;
-pub const tcp_handshake_length: u32 = 24;
-pub const tcp_max_frame_length: u32 = 1_048_576; // 1 MB
-pub const tcp_min_frame_length: u32 = 24; // header-only = heartbeat
-
 // ── Timing Constants ──────────────────────────────────────────────────
 
-/// Default TCP heartbeat interval.
+/// Default broker heartbeat interval.
 pub const default_heartbeat_interval_ms: u64 = 500;
-
-/// Default TCP heartbeat timeout.
-pub const default_heartbeat_timeout_ms_tcp: u64 = 2000;
 
 /// Default initial reconnect delay.
 pub const default_reconnect_initial_delay_ms: u64 = 100;
@@ -159,21 +144,11 @@ pub const send_batch_limit: u32 = 256;
 /// Heartbeat interval in nanoseconds (derived from ms).
 pub const default_heartbeat_interval_ns: i64 = @as(i64, @intCast(default_heartbeat_interval_ms)) * std.time.ns_per_ms;
 
-/// Per-peer TCP write budget per duty cycle (round-robin fairness).
-pub const write_budget_per_peer: u32 = 256;
-
-/// Per-peer TCP read budget per duty cycle (round-robin fairness).
-pub const read_budget_per_peer: u32 = 256;
-
 // ── Default Configuration Values ──────────────────────────────────────
 
 pub const default_control_buffer_length: usize = 64 * 1024; // 64 KB
 pub const default_send_buffer_length: usize = 1024 * 1024; // 1 MB
 pub const default_messages_buffer_length: usize = 1024 * 1024; // 1 MB
-pub const default_tcp_send_buffer_size: u32 = 262_144; // 256 KB
-pub const default_tcp_recv_buffer_size: u32 = 262_144; // 256 KB
-pub const default_max_frame_length: u32 = 65_536; // 64 KB
-pub const default_peer_write_queue_capacity: u32 = 4_096;
 pub const default_counter_values_buffer_length: usize = 64 * 1024; // 64 KB
 pub const default_error_log_buffer_length: usize = 256 * 1024; // 256 KB
 pub const default_max_services: u32 = 256;

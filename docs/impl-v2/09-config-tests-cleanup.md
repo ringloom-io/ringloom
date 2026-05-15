@@ -13,7 +13,7 @@ Finish the v2 cutover by replacing TCP config and tests, updating the e2e harnes
 | `src/testing/config_gen.zig` | Emit UDP and optional AF_XDP test config |
 | `src/testing/harness.zig` | Add UDP/transport options to `BrokerSpec` |
 | `src/e2e/*` | Port or replace TCP-era tests |
-| `src/tcp/*` | Remove after no production/test imports remain |
+| `src/tcp/*` | Removed after v2 cutover |
 | `docs/architecture.md` | Leave v1 doc intact unless a later docs task asks to retire it |
 | `README` or user docs | Update run/config examples if present |
 
@@ -106,7 +106,7 @@ Loss injection can be implemented as a test-only endpoint wrapper around the UDP
 ## Cleanup checklist
 
 1. Remove production imports of `ringloom_tcp`.
-2. Delete or quarantine TCP module from build graph.
+2. Delete TCP module from build graph.
 3. Remove TCP counters from monitoring output.
 4. Remove TCP config keys from generated e2e config.
 5. Update architecture references in docs that point to TCP as current design.
@@ -124,4 +124,3 @@ Loss injection can be implemented as a test-only endpoint wrapper around the UDP
 - AF_XDP tests pass or skip deterministically based on capability.
 - No production code path uses the old TCP transport.
 - Documentation and generated config examples use v2 keys.
-

@@ -1,45 +1,33 @@
-//! Sender Event Loop — the main duty-cycle loop for the outbound TCP message path.
-//!
-//! The sender event loop is the sole consumer of the send ring buffer (MPSC).
-//! It reads outbound messages, routes them to the correct peer's write queue,
-//! and manages outgoing TCP connections (heartbeats, reconnection with backoff).
-//!
+// SPDX-License-Identifier: Apache-2.0
+//! Sender event loop for the v2 reliable UDP broker-to-broker path.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const ringloom_common = @import("ringloom_common");
-const net = @import("ringloom_tcp").socket;
+const udp = @import("ringloom_udp");
+
 const constants = ringloom_common.platform.constants;
+const memory_constants = ringloom_common.memory.constants;
 const Clock = ringloom_common.platform.clock.Clock;
 const AtomicBool = ringloom_common.platform.atomic.AtomicBool;
-const platform = ringloom_common.platform;
-
 const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const CountersManager = ringloom_common.concurrent.counters.CountersManager;
 const PeerSendCountersRegion = ringloom_common.memory.PeerSendCountersRegion;
 const SendBufferDirectory = ringloom_common.memory.SendBufferDirectory;
 const SendBufferEntry = ringloom_common.memory.SendBufferEntry;
-
-const frame_parser = ringloom_common.protocol.frame_parser;
-const TcpFrameHeader = frame_parser.TcpFrameHeader;
-const latency_trace = ringloom_common.message.latency_trace;
+const SendBufferPressureState = ringloom_common.memory.SendBufferPressureState;
 const MessageHeader = ringloom_common.message.message_header.MessageHeader;
-
-const tcp = @import("ringloom_tcp");
-const HandshakeFrame = tcp.HandshakeFrame;
-const SocketConfig = tcp.SocketConfig;
 
 const PeerSender = @import("peer_sender.zig").PeerSender;
 const ConnectionState = @import("peer_sender.zig").ConnectionState;
-const SendBufferPool = @import("send_buffer_pool.zig").SendBufferPool;
 const SenderCommand = @import("sender_command.zig").SenderCommand;
-const transport = @import("../transport.zig");
+const StreamSender = @import("udp_scheduler.zig").StreamSender;
 
-const linux = std.os.linux;
-const posix = std.posix;
 const log = std.log.scoped(.sender);
 
-// ── Counter IDs ───────────────────────────────────────────────────────
+const route_flag_admin: u16 = constants.flag_admin;
+const route_flag_begin: u16 = 0x80;
+const route_flag_end: u16 = 0x40;
+const route_flag_unfragmented: u16 = route_flag_begin | route_flag_end;
 
 pub const SenderCounters = struct {
     frames_sent: usize = 0,
@@ -55,73 +43,54 @@ pub const SenderCounters = struct {
     peers_disconnected: usize = 0,
     peers_timed_out: usize = 0,
     reconnect_attempts: usize = 0,
-    sync_writev_calls: usize = 0,
-    sync_writev_frames: usize = 0,
-    sync_writev_bytes: usize = 0,
-    iouring_sender_enabled: usize = 0,
-    iouring_sender_fallbacks: usize = 0,
-    iouring_sender_errors: usize = 0,
-    iouring_sender_sqes: usize = 0,
-    iouring_sender_cqes: usize = 0,
-    iouring_sender_writev_frames: usize = 0,
-    iouring_sender_writev_bytes: usize = 0,
-    iouring_sender_retries: usize = 0,
-    iouring_sender_peer_disconnects: usize = 0,
+    endpoint_send_pressure: usize = 0,
+    endpoint_send_errors: usize = 0,
+    nak_received: usize = 0,
+    retransmits_sent: usize = 0,
+    status_received: usize = 0,
+    setup_sent: usize = 0,
 
     pub fn allocate(counters: *CountersManager) SenderCounters {
         return .{
-            .frames_sent = counters.allocate(1, "frames_sent") orelse 0,
-            .bytes_sent = counters.allocate(1, "bytes_sent") orelse 0,
-            .heartbeats_sent = counters.allocate(1, "heartbeats_sent") orelse 0,
-            .send_back_pressure = counters.allocate(1, "send_back_pressure") orelse 0,
-            .malformed_messages_dropped = counters.allocate(1, "malformed_messages_dropped") orelse 0,
-            .unknown_peer_messages_dropped = counters.allocate(1, "unknown_peer_messages_dropped") orelse 0,
-            .peer_not_connected_drops = counters.allocate(1, "peer_not_connected_drops") orelse 0,
-            .peer_queue_overflow_drops = counters.allocate(1, "peer_queue_overflow_drops") orelse 0,
-            .send_errors = counters.allocate(1, "send_errors") orelse 0,
-            .peers_connected = counters.allocate(1, "peers_connected") orelse 0,
-            .peers_disconnected = counters.allocate(1, "peers_disconnected") orelse 0,
-            .peers_timed_out = counters.allocate(1, "peers_timed_out") orelse 0,
-            .reconnect_attempts = counters.allocate(1, "reconnect_attempts") orelse 0,
-            .sync_writev_calls = counters.allocate(1, "sender_sync_writev_calls") orelse 0,
-            .sync_writev_frames = counters.allocate(1, "sender_sync_writev_frames") orelse 0,
-            .sync_writev_bytes = counters.allocate(1, "sender_sync_writev_bytes") orelse 0,
-            .iouring_sender_enabled = counters.allocate(1, "sender_iouring_enabled") orelse 0,
-            .iouring_sender_fallbacks = counters.allocate(1, "sender_iouring_fallbacks") orelse 0,
-            .iouring_sender_errors = counters.allocate(1, "sender_iouring_errors") orelse 0,
-            .iouring_sender_sqes = counters.allocate(1, "sender_iouring_sqes") orelse 0,
-            .iouring_sender_cqes = counters.allocate(1, "sender_iouring_cqes") orelse 0,
-            .iouring_sender_writev_frames = counters.allocate(1, "sender_iouring_writev_frames") orelse 0,
-            .iouring_sender_writev_bytes = counters.allocate(1, "sender_iouring_writev_bytes") orelse 0,
-            .iouring_sender_retries = counters.allocate(1, "sender_iouring_retries") orelse 0,
-            .iouring_sender_peer_disconnects = counters.allocate(1, "sender_iouring_peer_disconnects") orelse 0,
+            .frames_sent = counters.allocate(1, "udp_frames_sent") orelse 0,
+            .bytes_sent = counters.allocate(1, "udp_bytes_sent") orelse 0,
+            .heartbeats_sent = counters.allocate(1, "udp_heartbeats_sent") orelse 0,
+            .send_back_pressure = counters.allocate(1, "udp_send_back_pressure") orelse 0,
+            .malformed_messages_dropped = counters.allocate(1, "sender_malformed_messages_dropped") orelse 0,
+            .unknown_peer_messages_dropped = counters.allocate(1, "sender_unknown_peer_messages_dropped") orelse 0,
+            .peer_not_connected_drops = counters.allocate(1, "sender_peer_not_connected_drops") orelse 0,
+            .peer_queue_overflow_drops = counters.allocate(1, "sender_destination_overflow_drops") orelse 0,
+            .send_errors = counters.allocate(1, "udp_send_errors") orelse 0,
+            .peers_connected = counters.allocate(1, "udp_peers_configured") orelse 0,
+            .peers_disconnected = counters.allocate(1, "udp_peers_removed") orelse 0,
+            .peers_timed_out = counters.allocate(1, "udp_peers_timed_out") orelse 0,
+            .reconnect_attempts = counters.allocate(1, "udp_setup_retries") orelse 0,
+            .endpoint_send_pressure = counters.allocate(1, "udp_endpoint_send_pressure") orelse 0,
+            .endpoint_send_errors = counters.allocate(1, "udp_endpoint_send_errors") orelse 0,
+            .nak_received = counters.allocate(1, "udp_naks_received") orelse 0,
+            .retransmits_sent = counters.allocate(1, "udp_retransmits_sent") orelse 0,
+            .status_received = counters.allocate(1, "udp_status_received") orelse 0,
+            .setup_sent = counters.allocate(1, "udp_setup_sent") orelse 0,
         };
     }
 };
 
 pub const SenderOptions = struct {
-    io_uring_enabled: bool = false,
-    io_uring_queue_depth: u16 = 256,
-    io_uring_cq_depth: u32 = 1024,
-    io_uring_sqpoll: bool = false,
-    io_uring_single_issuer: bool = true,
-    io_uring_coop_taskrun: bool = true,
-    io_uring_cqe_batch_size: u32 = 64,
-    writev_batch_size: u32 = 64,
-    write_budget_per_peer: u32 = constants.write_budget_per_peer,
+    mtu: u16 = udp.protocol.default_mtu,
+    term_length: u32 = 64 * 1024,
+    receiver_window_length: u32 = 32 * 1024,
+    heartbeat_interval_ns: i64 = 500 * std.time.ns_per_ms,
+    setup_interval_ns: i64 = 500 * std.time.ns_per_ms,
+    setup_retry_limit: u8 = 5,
+    retransmit_linger_ns: i64 = 10 * std.time.ns_per_ms,
 };
-
-// ── Peer Map ──────────────────────────────────────────────────────────
 
 const PeerMap = struct {
     entries: [256]?*PeerSender,
     count: u32,
 
     fn init() PeerMap {
-        return .{
-            .entries = [_]?*PeerSender{null} ** 256,
-            .count = 0,
-        };
+        return .{ .entries = [_]?*PeerSender{null} ** 256, .count = 0 };
     }
 
     fn get(self: *const PeerMap, node_id: u8) ?*PeerSender {
@@ -129,9 +98,7 @@ const PeerMap = struct {
     }
 
     fn put(self: *PeerMap, node_id: u8, peer: *PeerSender) void {
-        if (self.entries[node_id] == null) {
-            self.count += 1;
-        }
+        if (self.entries[node_id] == null) self.count += 1;
         self.entries[node_id] = peer;
     }
 
@@ -153,12 +120,10 @@ const PeerMap = struct {
         index: usize,
 
         fn next(self: *Iterator) ?*PeerSender {
-            while (self.index < 256) {
+            while (self.index < self.map.entries.len) {
                 const i = self.index;
                 self.index += 1;
-                if (self.map.entries[i]) |peer| {
-                    return peer;
-                }
+                if (self.map.entries[i]) |peer| return peer;
             }
             return null;
         }
@@ -169,67 +134,27 @@ const PeerMap = struct {
     }
 };
 
-// ── Sender Event Loop ─────────────────────────────────────────────────
-
 pub const SenderEventLoop = struct {
-    /// Legacy broker-wide MPSC ring buffer. Production v2 paths use
-    /// `send_buffer_directory`; this remains for compatibility tests only.
     send_ring_buffer: ?*RingBuffer,
-
-    /// V2 per-destination send-buffer directory.
     send_buffer_directory: ?*SendBufferDirectory,
-
-    /// Broker metadata mapping used to resolve destination ring slices.
     broker_mapped_bytes: ?[]u8,
-
-    /// Next destination directory index to consider for fair scanning.
     round_robin_index: u32,
-
-    /// Per-peer sender state, keyed by node ID.
     peers: PeerMap,
-
-    /// Shared counters manager for observability.
     counters: *CountersManager,
-
-    /// Well-known counter slot IDs.
     counter_ids: SenderCounters,
-
-    /// Monotonic timestamp (ns) of the last heartbeat round.
     last_heartbeat_ns: i64,
-
-    /// This broker's node ID.
     local_node_id: u8,
-
-    /// Whether this event loop is running.
     running: AtomicBool,
-
-    /// Allocator for dynamic peer allocation.
     allocator: std.mem.Allocator,
-
-    /// Accumulated work count for the current duty cycle.
     pending_send_count: u32,
-
-    /// FNV-1a hash of the cluster group name (for handshake validation).
     group_name_hash: u32,
-
-    /// Enable benchmark-only payload timestamp tracing. Disabled in production.
     benchmark_latency_tracing_enabled: bool,
     options: SenderOptions,
-
-    /// Pre-allocated iovec array for writev batching (sync fallback path).
-    writev_iovecs: [max_writev_batch]posix.iovec_const = undefined,
-
-    /// io_uring ring for batched async TCP sends (Linux only).
-    io_ring: ?transport.IoUring,
-
-    /// Optional shared-memory per-peer counters published for ServiceClients.
+    endpoint: ?udp.PosixEndpoint,
+    endpoint_scratch: []u8,
+    packet_buf: []u8,
+    streams: [memory_constants.default_send_buffer_entry_count]?StreamSender,
     peer_send_counters: ?PeerSendCountersRegion,
-
-    /// CQE harvest buffer.
-    cqe_buf: [max_cqe_batch]linux.io_uring_cqe = undefined,
-
-    const max_writev_batch = 1024;
-    const max_cqe_batch = 256;
 
     const Self = @This();
 
@@ -270,33 +195,8 @@ pub const SenderEventLoop = struct {
         benchmark_latency_tracing_enabled: bool,
         options: SenderOptions,
     ) !Self {
-        var self = Self{
-            .send_ring_buffer = send_ring_buffer,
-            .send_buffer_directory = null,
-            .broker_mapped_bytes = null,
-            .round_robin_index = 0,
-            .peers = PeerMap.init(),
-            .counters = counters,
-            .counter_ids = SenderCounters.allocate(counters),
-            .last_heartbeat_ns = 0,
-            .local_node_id = local_node_id,
-            .running = AtomicBool.init(true),
-            .allocator = allocator,
-            .pending_send_count = 0,
-            .group_name_hash = HandshakeFrame.hashGroupName(group_name),
-            .benchmark_latency_tracing_enabled = benchmark_latency_tracing_enabled,
-            .options = options,
-            .io_ring = null,
-            .peer_send_counters = null,
-        };
-
-        if (options.io_uring_enabled) {
-            self.enableIoUringSender() catch |err| {
-                self.counters.increment(self.counter_ids.iouring_sender_fallbacks);
-                logIoUringSenderFallback(err);
-            };
-        }
-
+        var self = try initBase(counters, local_node_id, allocator, group_name, benchmark_latency_tracing_enabled, options);
+        self.send_ring_buffer = send_ring_buffer;
         return self;
     }
 
@@ -310,10 +210,30 @@ pub const SenderEventLoop = struct {
         benchmark_latency_tracing_enabled: bool,
         options: SenderOptions,
     ) !Self {
-        var self = Self{
+        var self = try initBase(counters, local_node_id, allocator, group_name, benchmark_latency_tracing_enabled, options);
+        self.send_buffer_directory = send_buffer_directory;
+        self.broker_mapped_bytes = broker_mapped_bytes;
+        return self;
+    }
+
+    fn initBase(
+        counters: *CountersManager,
+        local_node_id: u8,
+        allocator: std.mem.Allocator,
+        group_name: []const u8,
+        benchmark_latency_tracing_enabled: bool,
+        options: SenderOptions,
+    ) !Self {
+        const scratch_len = @as(usize, options.mtu) * 8;
+        const scratch = try allocator.alloc(u8, scratch_len);
+        errdefer allocator.free(scratch);
+        const packet_buf = try allocator.alloc(u8, options.mtu);
+        errdefer allocator.free(packet_buf);
+
+        return .{
             .send_ring_buffer = null,
-            .send_buffer_directory = send_buffer_directory,
-            .broker_mapped_bytes = broker_mapped_bytes,
+            .send_buffer_directory = null,
+            .broker_mapped_bytes = null,
             .round_robin_index = 0,
             .peers = PeerMap.init(),
             .counters = counters,
@@ -323,21 +243,24 @@ pub const SenderEventLoop = struct {
             .running = AtomicBool.init(true),
             .allocator = allocator,
             .pending_send_count = 0,
-            .group_name_hash = HandshakeFrame.hashGroupName(group_name),
+            .group_name_hash = hashGroupName(group_name),
             .benchmark_latency_tracing_enabled = benchmark_latency_tracing_enabled,
             .options = options,
-            .io_ring = null,
+            .endpoint = null,
+            .endpoint_scratch = scratch,
+            .packet_buf = packet_buf,
+            .streams = [_]?StreamSender{null} ** memory_constants.default_send_buffer_entry_count,
             .peer_send_counters = null,
         };
+    }
 
-        if (options.io_uring_enabled) {
-            self.enableIoUringSender() catch |err| {
-                self.counters.increment(self.counter_ids.iouring_sender_fallbacks);
-                logIoUringSenderFallback(err);
-            };
-        }
-
-        return self;
+    pub fn configureEndpoint(self: *Self, host: []const u8, port: u16) !void {
+        if (self.endpoint) |*endpoint| endpoint.deinit();
+        const local_address = try udp.Address.parseIp4(host, port);
+        self.endpoint = try udp.PosixEndpoint.init(.{
+            .local_address = local_address,
+            .mtu = self.options.mtu,
+        });
     }
 
     pub fn setPeerSendCountersRegion(self: *Self, region: ?PeerSendCountersRegion) void {
@@ -345,264 +268,51 @@ pub const SenderEventLoop = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        if (self.io_ring) |*ring| {
-            ring.deinit();
+        if (self.endpoint) |*endpoint| endpoint.deinit();
+        self.endpoint = null;
+        for (&self.streams) |*maybe_stream| {
+            if (maybe_stream.*) |*stream| stream.deinit(self.allocator);
+            maybe_stream.* = null;
         }
-        self.io_ring = null;
         var iter = self.peers.iterator();
         while (iter.next()) |peer| {
             peer.deinit(self.allocator);
             self.allocator.destroy(peer);
         }
+        self.allocator.free(self.endpoint_scratch);
+        self.allocator.free(self.packet_buf);
     }
 
-    fn enableIoUringSender(self: *Self) !void {
-        if (comptime builtin.os.tag != .linux) return error.UnsupportedPlatform;
-
-        var ring = try transport.IoUring.initWithConfig(.{
-            .queue_depth = self.options.io_uring_queue_depth,
-            .cq_depth = self.options.io_uring_cq_depth,
-            .sqpoll = self.options.io_uring_sqpoll,
-            .single_issuer = self.options.io_uring_single_issuer,
-            .coop_taskrun = self.options.io_uring_coop_taskrun,
-        });
-        errdefer ring.deinit();
-
-        if (!ring.capabilities.writev_supported) {
-            return error.IoUringWritevUnsupported;
-        }
-
-        self.io_ring = ring;
-        self.counters.increment(self.counter_ids.iouring_sender_enabled);
-    }
-
-    fn disableIoUringSender(self: *Self, err: anyerror) void {
-        self.counters.increment(self.counter_ids.iouring_sender_fallbacks);
-        logIoUringSenderFallback(err);
-        if (self.io_ring) |*ring| {
-            ring.deinit();
-        }
-        self.io_ring = null;
-        self.clearIoUringPendingState();
-    }
-
-    fn logIoUringSenderFallback(err: anyerror) void {
-        log.warn("sender io_uring disabled; falling back to synchronous writev: {}", .{err});
-    }
-
-    fn isRetryableIoUringWriteErr(err: linux.E) bool {
-        return switch (err) {
-            .AGAIN, .INTR, .BUSY => true,
-            else => false,
-        };
-    }
-
-    // ── Duty Cycle ────────────────────────────────────────────────────
-
-    /// Called by the ThreadRunner on every iteration.
     pub fn doWork(self: *Self) u32 {
         var work_count: u32 = 0;
         const now_ns = Clock.monotonicNanos();
         self.pending_send_count = 0;
 
-        // ── Phase 0: Harvest io_uring completions ────────────────────
-        // Process completed sends before flushing new data to free queue
-        // space and clear io_pending flags as early as possible.
-        if (self.io_ring != null) {
-            work_count += self.harvestSendCompletions();
-        }
-
-        // ── Phase 1: Flush write queues to TCP ───────────────────────
-        // Flush before draining to keep write queues shallow and reduce
-        // overflow-induced drops under high message rates.
-        work_count += self.flushWriteQueues();
-
-        // ── Phase 1b: Immediate harvest after io_uring submit ────────
-        // For io_uring, the kernel often completes socket writes immediately
-        // (just copying to TCP send buffer). Harvesting here eliminates the
-        // 1-cycle latency penalty for these fast completions.
-        if (self.io_ring != null) {
-            work_count += self.harvestSendCompletions();
-        }
-
-        // ── Phase 2: Drain send ring buffer ──────────────────────────
-        // Limit drain to available write queue space to apply backpressure
-        // when TCP can't keep up, preventing write queue overflow.
-        if (self.send_buffer_directory != null) {
-            work_count += self.drainDestinationBuffers(constants.send_batch_limit);
-        } else if (self.send_ring_buffer) |send_ring_buffer| {
-            const drain_limit = self.availableWriteQueueSpace();
-            if (drain_limit > 0) {
-                tls_self = self;
-                defer {
-                    tls_self = null;
-                }
-                work_count += send_ring_buffer.read(
-                    onOutboundMessageThunk,
-                    @min(constants.send_batch_limit, drain_limit),
-                );
-            }
-        }
-
-        // ── Phase 3: Flush newly drained messages ────────────────────
-        // Second flush to immediately send messages just drained from
-        // the ring buffer, minimizing latency for the common case.
-        work_count += self.flushWriteQueues();
-
-        // ── Phase 3b: Immediate harvest after second flush ───────────
-        if (self.io_ring != null) {
-            work_count += self.harvestSendCompletions();
-        }
-
-        // ── Phase 4: Send heartbeats ─────────────────────────────────
-        if (now_ns - self.last_heartbeat_ns >= constants.default_heartbeat_interval_ns) {
-            self.sendHeartbeats(now_ns);
-            self.last_heartbeat_ns = now_ns;
-        }
-
-        // ── Phase 5: Process reconnections ───────────────────────────
-        self.processReconnections(now_ns);
-
-        work_count += self.pending_send_count;
-
+        work_count += self.pollControlFrames(now_ns);
+        work_count += self.processRetransmits(now_ns);
+        work_count += self.drainDestinationBuffers(constants.send_batch_limit);
+        work_count += self.readLegacyRing(constants.send_batch_limit);
+        work_count += self.sendDueHeartbeats(now_ns);
         self.publishPeerSendCounters(now_ns);
 
-        return work_count;
+        return work_count + self.pending_send_count;
     }
-
-    // ── Ring Buffer Read Callback ─────────────────────────────────────
 
     threadlocal var tls_self: ?*Self = null;
     threadlocal var tls_destination_entry: ?*SendBufferEntry = null;
 
     fn onOutboundMessageThunk(msg_type_id: i32, payload: []const u8) void {
-        if (tls_self) |self| {
-            self.onOutboundMessage(msg_type_id, payload);
-        }
+        if (tls_self) |self| self.onOutboundMessage(msg_type_id, payload);
     }
 
-    /// Process a single outbound message from the send ring buffer.
     pub fn onOutboundMessage(self: *Self, msg_type_id: i32, payload: []const u8) void {
-        if (msg_type_id == constants.message_envelope_msg_type_id) {
-            self.onOutboundEnvelope(payload);
-            return;
-        }
-
-        self.onLegacyTcpFrame(payload);
-    }
-
-    fn onOutboundEnvelope(self: *Self, payload: []const u8) void {
-        if (payload.len < MessageHeader.encoded_length) {
+        if (msg_type_id != constants.message_envelope_msg_type_id) {
             self.counters.increment(self.counter_ids.malformed_messages_dropped);
             return;
         }
-
-        const envelope = MessageHeader.decode(payload[0..MessageHeader.encoded_length]);
-        if (envelope.payload_length < 0) {
-            self.counters.increment(self.counter_ids.malformed_messages_dropped);
-            return;
-        }
-        const body_len: usize = @intCast(envelope.payload_length);
-        if (body_len != payload.len - MessageHeader.encoded_length) {
-            self.counters.increment(self.counter_ids.malformed_messages_dropped);
-            return;
-        }
-        if (envelope.target_node_id <= 0 or envelope.target_node_id > std.math.maxInt(u8)) {
-            self.counters.increment(self.counter_ids.malformed_messages_dropped);
-            return;
-        }
-
-        const target_node_id: u8 = @intCast(envelope.target_node_id);
-        if (tls_destination_entry) |entry| {
-            entry.subtractPending(@intCast(ringCost(payload.len)));
-        }
-
-        const peer = self.peers.get(target_node_id) orelse {
-            self.counters.increment(self.counter_ids.unknown_peer_messages_dropped);
-            return;
+        self.sendEnvelope(payload, tls_destination_entry) catch |err| {
+            self.recordSendFailure(err, payload.len, tls_destination_entry);
         };
-
-        if (peer.state != .connected) {
-            self.counters.increment(self.counter_ids.peer_not_connected_drops);
-            peer.total_bytes_dropped += payload.len;
-            if (tls_destination_entry) |entry| entry.addDropped();
-            return;
-        }
-
-        const body = payload[MessageHeader.encoded_length..];
-        if (self.benchmark_latency_tracing_enabled) {
-            latency_trace.stampSenderDequeue(
-                @constCast(body),
-                @intCast(Clock.monotonicNanosStable()),
-            );
-        }
-
-        var tcp_header = TcpFrameHeader{
-            .frame_length = @intCast(constants.tcp_header_length + body.len),
-            .flags = envelope.flags & constants.flag_admin,
-            .source_node_id = @intCast(envelope.source_node_id),
-            .target_node_id = target_node_id,
-            .source_service_id = @intCast(envelope.source_service_id),
-            .target_service_id = @intCast(envelope.target_service_id),
-            .template_id = envelope.template_id,
-            .correlation_id = envelope.correlation_id,
-        };
-        const tcp_header_bytes = std.mem.asBytes(&tcp_header);
-
-        peer.write_queue.enqueueParts(tcp_header_bytes, body) catch {
-            const dropped_len = peer.write_queue.dropOldest();
-            peer.total_bytes_dropped += dropped_len;
-            self.counters.increment(self.counter_ids.peer_queue_overflow_drops);
-            peer.write_queue.enqueueParts(tcp_header_bytes, body) catch unreachable;
-        };
-
-        self.pending_send_count += 1;
-        self.counters.increment(self.counter_ids.frames_sent);
-        self.counters.add(self.counter_ids.bytes_sent, @intCast(constants.tcp_header_length + body.len));
-    }
-
-    fn onLegacyTcpFrame(self: *Self, payload: []const u8) void {
-        // Payload must contain at least a complete TCP frame header (24 bytes).
-        if (payload.len < constants.tcp_header_length) {
-            self.counters.increment(self.counter_ids.malformed_messages_dropped);
-            return;
-        }
-
-        const header: *const TcpFrameHeader = @ptrCast(@alignCast(payload.ptr));
-        const target_node_id = header.target_node_id;
-        self.subtractPeerRingPending(target_node_id, ringCost(payload.len));
-
-        // Look up peer
-        const peer = self.peers.get(target_node_id) orelse {
-            self.counters.increment(self.counter_ids.unknown_peer_messages_dropped);
-            return;
-        };
-
-        // Must be connected
-        if (peer.state != .connected) {
-            self.counters.increment(self.counter_ids.peer_not_connected_drops);
-            peer.total_bytes_dropped += payload.len;
-            return;
-        }
-
-        if (self.benchmark_latency_tracing_enabled) {
-            latency_trace.stampSenderDequeue(
-                @constCast(payload[constants.tcp_header_length..]),
-                @intCast(Clock.monotonicNanosStable()),
-            );
-        }
-
-        // Enqueue into peer's write queue (drop-oldest on overflow)
-        peer.write_queue.enqueue(payload) catch {
-            const dropped_len = peer.write_queue.dropOldest();
-            peer.total_bytes_dropped += dropped_len;
-            self.counters.increment(self.counter_ids.peer_queue_overflow_drops);
-            peer.write_queue.enqueue(payload) catch unreachable;
-        };
-
-        self.pending_send_count += 1;
-        self.counters.increment(self.counter_ids.frames_sent);
-        self.counters.add(self.counter_ids.bytes_sent, @intCast(payload.len));
     }
 
     fn drainDestinationBuffers(self: *Self, limit: u32) u32 {
@@ -621,6 +331,13 @@ pub const SenderEventLoop = struct {
 
             const state = entry.loadState();
             if (state != .active and state != .draining) continue;
+            const stream = self.ensureStreamForEntry(entry) catch {
+                entry.storePressureState(.peer_down);
+                continue;
+            };
+            entry.storePressureState(stream.pressureState(state));
+            self.sendSetupIfDue(stream, entry, Clock.monotonicNanos());
+            if (stream.setup_state != .confirmed) continue;
             if (!self.canDrainDestination(entry)) continue;
 
             const ring_slice = directory.ringSliceForEntry(mapped, entry) catch continue;
@@ -637,491 +354,345 @@ pub const SenderEventLoop = struct {
                 self.round_robin_index = (index + 1) % entry_count;
             }
         }
-
         return work_count;
+    }
+
+    fn readLegacyRing(self: *Self, limit: u32) u32 {
+        if (self.send_buffer_directory != null) return 0;
+        const send_ring_buffer = self.send_ring_buffer orelse return 0;
+        tls_self = self;
+        defer tls_self = null;
+        return send_ring_buffer.read(onOutboundMessageThunk, limit);
     }
 
     fn canDrainDestination(self: *Self, entry: *const SendBufferEntry) bool {
-        switch (entry.loadPressureState()) {
-            .flow_blocked, .congested, .closed => return false,
-            .unknown, .normal => {},
-        }
-
-        if (entry.target_node_id <= 0 or entry.target_node_id > std.math.maxInt(u8)) {
-            return true;
-        }
-        const peer = self.peers.get(@intCast(entry.target_node_id)) orelse return true;
-        if (peer.state != .connected) return true;
-        return peer.write_queue.count < peer.write_queue.capacity;
+        _ = self;
+        return switch (entry.loadPressureState()) {
+            .unknown, .normal => true,
+            .flow_blocked,
+            .congested,
+            .term_blocked,
+            .peer_down,
+            .draining,
+            .closed,
+            => false,
+        };
     }
 
-    // ── Heartbeats ────────────────────────────────────────────────────
+    fn ensureStreamForEntry(self: *Self, entry: *const SendBufferEntry) !*StreamSender {
+        if (entry.target_node_id <= 0 or entry.target_node_id > std.math.maxInt(u8)) return error.InvalidPeer;
+        if (entry.target_service_id < 0 or entry.target_service_id > std.math.maxInt(u16)) return error.InvalidPeer;
+        if (self.peers.get(@intCast(entry.target_node_id)) == null) return error.UnknownPeer;
+        const directory = self.send_buffer_directory orelse return error.InvalidPeer;
+        var index: usize = directory.entries.len;
+        for (directory.entries, 0..) |*candidate, i| {
+            if (candidate == entry) {
+                index = i;
+                break;
+            }
+        }
+        if (index >= self.streams.len) return error.InvalidPeer;
+        if (self.streams[index] == null) {
+            self.streams[index] = try StreamSender.init(
+                self.allocator,
+                entry.stream_id,
+                @intCast(entry.target_node_id),
+                @intCast(entry.target_service_id),
+                sessionId(self.local_node_id, @intCast(entry.target_node_id)),
+                1,
+                .{
+                    .term_length = self.options.term_length,
+                    .mtu = self.options.mtu,
+                    .initial_sender_limit = self.options.receiver_window_length,
+                    .congestion_window = self.options.receiver_window_length,
+                    .heartbeat_interval_ns = self.options.heartbeat_interval_ns,
+                    .setup_interval_ns = self.options.setup_interval_ns,
+                    .setup_retry_limit = self.options.setup_retry_limit,
+                    .retransmit_linger_ns = self.options.retransmit_linger_ns,
+                },
+            );
+        }
+        return &self.streams[index].?;
+    }
 
-    fn sendHeartbeats(self: *Self, now_ns: i64) void {
-        var peer_iter = self.peers.iterator();
-        while (peer_iter.next()) |peer| {
-            if (peer.state != .connected) continue;
+    fn streamForId(self: *Self, stream_id: u32) ?*StreamSender {
+        for (&self.streams) |*maybe_stream| {
+            if (maybe_stream.*) |*stream| {
+                if (stream.stream_id == stream_id) return stream;
+            }
+        }
+        return null;
+    }
 
-            // Only send heartbeat if no data was sent within the interval.
-            if (now_ns - peer.last_send_ns < constants.default_heartbeat_interval_ns) continue;
+    fn sendEnvelope(self: *Self, payload: []const u8, entry: ?*SendBufferEntry) !void {
+        if (payload.len < MessageHeader.encoded_length) return error.MalformedEnvelope;
+        const envelope = MessageHeader.decode(payload[0..MessageHeader.encoded_length]);
+        if (envelope.payload_length < 0) return error.MalformedEnvelope;
+        const body_len: usize = @intCast(envelope.payload_length);
+        if (body_len != payload.len - MessageHeader.encoded_length) return error.MalformedEnvelope;
+        if (envelope.target_node_id <= 0 or envelope.target_node_id > std.math.maxInt(u8)) return error.MalformedEnvelope;
+        if (envelope.target_service_id < 0 or envelope.target_service_id > std.math.maxInt(u16)) return error.MalformedEnvelope;
+        if (envelope.source_service_id < 0) return error.MalformedEnvelope;
 
-            // Build a heartbeat frame.
-            var heartbeat: TcpFrameHeader = .{
-                .frame_length = constants.tcp_header_length,
-                .flags = 0x01, // heartbeat flag
+        const target_node_id: u8 = @intCast(envelope.target_node_id);
+        const peer = self.peers.get(target_node_id) orelse return error.UnknownPeer;
+        if (peer.state != .connected) return error.PeerDisconnected;
+        const destination_entry = entry orelse return error.NoDestinationEntry;
+        const stream = try self.ensureStreamForEntry(destination_entry);
+        if (stream.setup_state != .confirmed) return error.PeerDisconnected;
+
+        if (entry) |dest| dest.subtractPending(@intCast(ringCost(payload.len)));
+        const body = payload[MessageHeader.encoded_length..];
+        try self.sendBodyFragments(stream, peer, envelope.*, body);
+    }
+
+    fn sendBodyFragments(
+        self: *Self,
+        stream: *StreamSender,
+        peer: *PeerSender,
+        envelope: MessageHeader,
+        body: []const u8,
+    ) !void {
+        const max_payload = self.options.mtu - udp.DataHeader.encoded_length;
+        var offset: usize = 0;
+        const message_id = stream.term_log.sender_position;
+        while (offset < body.len or (body.len == 0 and offset == 0)) {
+            const remaining = body.len - offset;
+            const term_offset = stream.term_log.sender_position % stream.options.term_length;
+            const term_remaining = stream.options.term_length - term_offset;
+            const term_payload_capacity = if (term_remaining >= udp.DataHeader.encoded_length)
+                term_remaining - udp.DataHeader.encoded_length
+            else
+                max_payload;
+            const chunk_len = if (body.len == 0)
+                0
+            else
+                @min(remaining, @min(max_payload, term_payload_capacity));
+            const chunk = body[offset..][0..chunk_len];
+            var route_flags: u16 = @as(u16, envelope.flags) & route_flag_admin;
+            if (offset == 0) route_flags |= route_flag_begin;
+            if (offset + chunk_len >= body.len) route_flags |= route_flag_end;
+            if (offset == 0 and offset + chunk_len >= body.len) route_flags |= route_flag_unfragmented;
+
+            const header = udp.DataHeader.init(.{
+                .session_id = stream.session_id,
+                .stream_id = stream.stream_id,
+                .term_id = stream.term_log.active_term_id,
+                .term_offset = @intCast(stream.term_log.sender_position % stream.options.term_length),
+                .message_id = message_id,
+                .fragment_offset = @intCast(offset),
+                .message_length = @intCast(body.len),
+                .payload_length = chunk.len,
                 .source_node_id = self.local_node_id,
                 .target_node_id = peer.node_id,
-                .source_service_id = 0,
-                .target_service_id = 0,
-                .template_id = constants.heartbeat_template_id,
-                .correlation_id = 0,
-            };
-
-            if (self.io_ring != null) {
-                // With io_uring: route heartbeat through write queue to avoid
-                // mixing sync writes with async I/O on the same fd.
-                const heartbeat_bytes = std.mem.asBytes(&heartbeat);
-                peer.write_queue.enqueue(heartbeat_bytes) catch {
-                    continue;
-                };
-                peer.last_send_ns = now_ns;
-                self.counters.increment(self.counter_ids.heartbeats_sent);
-                self.pending_send_count += 1;
-            } else {
-                // Sync path: direct write.
-                const heartbeat_bytes = std.mem.asBytes(&heartbeat);
-                const written = net.write(peer.socket_fd, heartbeat_bytes) catch |err| {
-                    switch (err) {
-                        error.WouldBlock => continue,
-                        else => {
-                            self.disconnectPeer(peer);
-                            continue;
-                        },
-                    }
-                };
-                if (written < heartbeat_bytes.len) {
-                    self.disconnectPeer(peer);
-                    continue;
-                }
-
-                peer.last_send_ns = now_ns;
-                self.counters.increment(self.counter_ids.heartbeats_sent);
-                self.pending_send_count += 1;
-            }
+                .route_flags = route_flags,
+                .source_service_id = @intCast(envelope.source_service_id),
+                .target_service_id = @intCast(envelope.target_service_id),
+                .template_id = envelope.template_id,
+                .correlation_id = envelope.correlation_id,
+            });
+            const start_position = try stream.term_log.appendData(header, chunk);
+            try self.sendFromTerm(stream, peer, start_position, self.options.mtu);
+            stream.last_frame_sent_ns = Clock.monotonicNanos();
+            self.pending_send_count += 1;
+            self.counters.increment(self.counter_ids.frames_sent);
+            if (body.len == 0) break;
+            offset += chunk_len;
         }
     }
 
-    // ── Backpressure ────────────────────────────────────────────────
-
-    /// Return the minimum available write queue space across all connected peers.
-    /// This limits ring buffer drain to prevent write queue overflow.
-    /// With io_uring, in-flight frames still occupy queue slots until CQE arrives.
-    fn availableWriteQueueSpace(self: *Self) u32 {
-        var min_space: u32 = constants.send_batch_limit;
-        var has_connected = false;
-
-        var peer_iter = self.peers.iterator();
-        while (peer_iter.next()) |peer| {
-            if (peer.state != .connected) continue;
-            has_connected = true;
-            const space = peer.write_queue.capacity - peer.write_queue.count;
-            min_space = @min(min_space, space);
-        }
-
-        // If no peers are connected, drain freely (messages will be dropped by routing).
-        return if (has_connected) min_space else constants.send_batch_limit;
+    fn sendFromTerm(self: *Self, stream: *StreamSender, peer: *PeerSender, position: u64, max_length: u32) !void {
+        var out: [1]udp.term_log.ScannedFrame = undefined;
+        const term_id = stream.initial_term_id + @as(i32, @intCast(position / stream.options.term_length));
+        const term_offset: u32 = @intCast(position % stream.options.term_length);
+        const count = stream.term_log.scan(term_id, term_offset, max_length, &out);
+        if (count == 0) return error.TermFrameMissing;
+        try self.sendScannedFrame(peer, out[0]);
     }
 
-    // ── TCP Write Queue Flush ────────────────────────────────────────
-
-    fn flushWriteQueues(self: *Self) u32 {
-        if (self.io_ring != null) {
-            return self.flushWriteQueuesIoUring();
+    fn sendScannedFrame(self: *Self, peer: *PeerSender, frame: udp.term_log.ScannedFrame) !void {
+        const frame_len = frame.header.common.frame_length;
+        if (frame_len > self.packet_buf.len) return error.FrameTooLarge;
+        @memcpy(self.packet_buf[0..udp.DataHeader.encoded_length], std.mem.asBytes(frame.header));
+        if (frame.payload.len > 0) {
+            @memcpy(self.packet_buf[udp.DataHeader.encoded_length..][0..frame.payload.len], frame.payload);
         }
-        return self.flushWriteQueuesSync();
+        try self.sendPacket(peer, self.packet_buf[0..frame_len]);
     }
 
-    /// io_uring path: prepare writev SQEs for all peers, submit in one batch.
-    /// Only one outstanding writev per socket to prevent TCP stream corruption
-    /// on partial writes (second writev would interleave with incomplete first).
-    fn flushWriteQueuesIoUring(self: *Self) u32 {
-        var ring = &(self.io_ring.?);
-        var sqe_count: u32 = 0;
-
-        var peer_iter = self.peers.iterator();
-        while (peer_iter.next()) |peer| {
-            if (peer.state != .connected) continue;
-            if (peer.io_pending) continue;
-            if (peer.write_queue.isEmpty()) continue;
-
-            // Fill iovecs from queued frames (no in-flight since io_pending guards).
-            const batch_limit = @min(@min(
-                self.options.writev_batch_size,
-                @as(u32, PeerSender.max_send_batch),
-            ), self.options.write_budget_per_peer);
-            const n = peer.write_queue.fillIovecsFrom(
-                &peer.send_iovecs,
-                0,
-                peer.partial_write_offset,
-                batch_limit,
-            );
-            if (n == 0) continue;
-
-            // Compute total bytes for this batch.
-            var total_bytes: usize = 0;
-            for (peer.send_iovecs[0..n]) |iov| total_bytes += iov.len;
-
-            // Encode user_data with node_id, generation, and frame count.
-            const user_data = peer.encodeUserData(@intCast(n));
-
-            // Submit writev SQE.
-            _ = ring.ring.writev(user_data, peer.socket_fd, peer.send_iovecs[0..n], 0) catch {
-                // SQ full — skip this peer, will retry next cycle.
-                self.counters.increment(self.counter_ids.iouring_sender_errors);
-                continue;
-            };
-
-            peer.io_pending = true;
-            peer.in_flight_frames = n;
-            peer.in_flight_bytes = total_bytes;
-            sqe_count += 1;
-            self.counters.increment(self.counter_ids.iouring_sender_sqes);
-            self.counters.add(self.counter_ids.iouring_sender_writev_frames, @intCast(n));
-            self.counters.add(self.counter_ids.iouring_sender_writev_bytes, @intCast(total_bytes));
-        }
-
-        // Single syscall to submit all prepared SQEs.
-        if (sqe_count > 0) {
-            _ = ring.ring.submit() catch {
-                self.counters.increment(self.counter_ids.iouring_sender_errors);
-                self.disableIoUringSender(error.IoUringSubmitFailed);
-            };
-        }
-
-        return 0; // Actual completion counting happens in harvestSendCompletions.
-    }
-
-    /// Harvest io_uring CQEs for completed sends.
-    /// With io_pending, each peer has at most one outstanding batch.
-    fn harvestSendCompletions(self: *Self) u32 {
-        var ring = &(self.io_ring.?);
-        var work_count: u32 = 0;
-
-        const limit = @min(self.options.io_uring_cqe_batch_size, @as(u32, @intCast(self.cqe_buf.len)));
-        const count = ring.ring.copy_cqes(self.cqe_buf[0..limit], 0) catch {
-            self.counters.increment(self.counter_ids.iouring_sender_errors);
-            return 0;
+    fn sendPacket(self: *Self, peer: *PeerSender, bytes: []const u8) !void {
+        var endpoint = if (self.endpoint) |*ep| ep else return error.EndpointNotConfigured;
+        _ = endpoint.send(bytes, peer.address) catch |err| switch (err) {
+            error.WouldBlock => {
+                self.counters.increment(self.counter_ids.endpoint_send_pressure);
+                return error.WouldBlock;
+            },
+            else => {
+                self.counters.increment(self.counter_ids.endpoint_send_errors);
+                return err;
+            },
         };
-        self.counters.add(self.counter_ids.iouring_sender_cqes, @intCast(count));
-
-        for (self.cqe_buf[0..count]) |cqe| {
-            const decoded = PeerSender.decodeUserData(cqe.user_data);
-            const peer = self.peers.get(decoded.node_id) orelse continue;
-
-            // Stale CQE from a previous connection generation — ignore.
-            if (decoded.generation != peer.io_generation) continue;
-
-            peer.io_pending = false;
-
-            if (cqe.res < 0) {
-                const err = cqe.err();
-                peer.in_flight_frames = 0;
-                peer.in_flight_bytes = 0;
-                self.counters.increment(self.counter_ids.iouring_sender_errors);
-                if (isRetryableIoUringWriteErr(err)) {
-                    self.counters.increment(self.counter_ids.iouring_sender_retries);
-                    continue;
-                }
-                self.counters.increment(self.counter_ids.iouring_sender_peer_disconnects);
-                self.disconnectPeer(peer);
-                continue;
-            }
-
-            if (cqe.res == 0) {
-                peer.in_flight_frames = 0;
-                peer.in_flight_bytes = 0;
-                self.disconnectPeer(peer);
-                continue;
-            }
-
-            const written: usize = @intCast(cqe.res);
-
-            // Walk the WriteQueue from head to determine which frames
-            // were fully written.
-            var bytes_remaining = written;
-            var frames_completed: u32 = 0;
-            while (frames_completed < decoded.frame_count) {
-                const frame_size = peer.write_queue.peekFrameSize(frames_completed);
-                if (frame_size == 0) break;
-                const effective_size: usize = if (frames_completed == 0)
-                    frame_size - peer.partial_write_offset
-                else
-                    frame_size;
-                if (bytes_remaining >= effective_size) {
-                    bytes_remaining -= effective_size;
-                    frames_completed += 1;
-                } else {
-                    break;
-                }
-            }
-
-            // Dequeue fully-written frames.
-            for (0..frames_completed) |_| {
-                peer.write_queue.dequeue();
-            }
-
-            peer.in_flight_frames = 0;
-            peer.in_flight_bytes = 0;
-            peer.total_bytes_sent += written;
-
-            if (frames_completed > 0) {
-                peer.last_send_ns = Clock.monotonicNanos();
-                work_count += frames_completed;
-            }
-
-            if (bytes_remaining > 0) {
-                // Partial write — update offset into the partially-written frame.
-                if (frames_completed == 0) {
-                    peer.partial_write_offset += bytes_remaining;
-                } else {
-                    peer.partial_write_offset = bytes_remaining;
-                }
-            } else {
-                peer.partial_write_offset = 0;
-            }
-        }
-
-        return work_count;
+        peer.last_send_ns = Clock.monotonicNanos();
+        peer.total_bytes_sent += bytes.len;
+        self.counters.add(self.counter_ids.bytes_sent, @intCast(bytes.len));
     }
 
-    /// Synchronous writev path (fallback when io_uring is not available).
-    fn flushWriteQueuesSync(self: *Self) u32 {
-        var work_count: u32 = 0;
-
-        var peer_iter = self.peers.iterator();
-        while (peer_iter.next()) |peer| {
-            if (peer.state != .connected) continue;
-            if (peer.write_queue.isEmpty()) continue;
-
-            var budget: u32 = self.options.write_budget_per_peer;
-
-            while (budget > 0) {
-                const batch_limit = @min(@min(budget, max_writev_batch), self.options.writev_batch_size);
-                const n = peer.write_queue.fillIovecs(&self.writev_iovecs, peer.partial_write_offset, batch_limit);
-                if (n == 0) break;
-
-                const iovs = self.writev_iovecs[0..n];
-                var total_bytes: usize = 0;
-                for (iovs) |iov| total_bytes += iov.len;
-
-                const written = net.writev(peer.socket_fd, iovs) catch |err| {
-                    switch (err) {
-                        error.WouldBlock => {
-                            peer.write_blocked = true;
-                            break;
-                        },
-                        else => {
-                            self.disconnectPeer(peer);
-                            break;
-                        },
-                    }
-                };
-                self.counters.increment(self.counter_ids.sync_writev_calls);
-                self.counters.add(self.counter_ids.sync_writev_frames, @intCast(n));
-                self.counters.add(self.counter_ids.sync_writev_bytes, @intCast(written));
-                peer.total_bytes_sent += written;
-
-                // Walk iovecs to determine which frames were fully written.
-                var remaining = written;
-                var frames_completed: u32 = 0;
-                for (iovs) |iov| {
-                    if (remaining >= iov.len) {
-                        remaining -= iov.len;
-                        frames_completed += 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                // Dequeue fully-written frames.
-                for (0..frames_completed) |_| {
-                    peer.write_queue.dequeue();
-                }
-
-                if (frames_completed > 0) {
-                    peer.last_send_ns = Clock.monotonicNanos();
-                    work_count += frames_completed;
-                    budget -|= frames_completed;
-                }
-
-                if (written < total_bytes) {
-                    // Partial write: update offset into the partially-written frame.
-                    if (frames_completed == 0) {
-                        peer.partial_write_offset += remaining;
-                    } else {
-                        peer.partial_write_offset = remaining;
-                    }
-                    peer.write_blocked = true;
-                    break;
-                } else {
-                    peer.partial_write_offset = 0;
-                    peer.write_blocked = false;
-                }
-            }
-        }
-
-        return work_count;
-    }
-
-    fn clearIoUringPendingState(self: *Self) void {
-        var peer_iter = self.peers.iterator();
-        while (peer_iter.next()) |peer| {
-            peer.io_pending = false;
-            peer.in_flight_frames = 0;
-            peer.in_flight_bytes = 0;
-        }
-    }
-
-    // ── Reconnections ─────────────────────────────────────────────────
-
-    fn processReconnections(self: *Self, now_ns: i64) void {
-        var peer_iter = self.peers.iterator();
-        while (peer_iter.next()) |peer| {
-            switch (peer.state) {
-                .disconnected => {
-                    if (now_ns < peer.next_reconnect_ns) continue;
-                    self.initiateConnect(peer, now_ns);
-                },
-                .connecting => {
-                    self.checkConnectCompletion(peer);
-                },
-                .connected => {},
-            }
-        }
-    }
-
-    fn initiateConnect(self: *Self, peer: *PeerSender, now_ns: i64) void {
-        self.counters.increment(self.counter_ids.reconnect_attempts);
-
-        const fd = net.socket(
-            peer.address.any.family,
-            std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
-            0,
-        ) catch {
-            peer.advanceBackoff(now_ns);
-            return;
-        };
-
-        // Apply socket tuning (TCP_NODELAY, buffer sizes, etc.)
-        const sock_cfg = SocketConfig{};
-        sock_cfg.apply(fd) catch {
-            platform.closeFd(fd);
-            peer.advanceBackoff(now_ns);
-            return;
-        };
-
-        // Non-blocking connect — expect EINPROGRESS.
-        net.connect(fd, &peer.address.any, peer.address.getOsSockLen()) catch |err| {
-            switch (err) {
-                error.WouldBlock => {
-                    // EINPROGRESS — connect in progress, will complete async.
-                    peer.socket_fd = fd;
-                    peer.state = .connecting;
-                    return;
-                },
-                else => {
-                    platform.closeFd(fd);
-                    peer.advanceBackoff(now_ns);
-                    return;
-                },
-            }
-        };
-
-        // Immediate connect success (rare, e.g. loopback).
-        peer.socket_fd = fd;
-        self.completeConnect(peer);
-    }
-
-    fn checkConnectCompletion(self: *Self, peer: *PeerSender) void {
-        // Poll for connect completion using SO_ERROR.
-        const so_error = net.getSocketError(peer.socket_fd) catch {
-            self.disconnectPeer(peer);
-            return;
-        };
-        if (so_error != 0) {
-            // Connect failed.
-            self.disconnectPeer(peer);
-            return;
-        }
-
-        // SO_ERROR == 0 means connect completed successfully.
-        self.completeConnect(peer);
-    }
-
-    fn completeConnect(self: *Self, peer: *PeerSender) void {
-        // Send the handshake frame.
-        const handshake = HandshakeFrame{
+    fn sendSetupIfDue(self: *Self, stream: *StreamSender, entry: *const SendBufferEntry, now_ns: i64) void {
+        if (!stream.setupDue(now_ns)) return;
+        const peer = self.peers.get(stream.target_node_id) orelse return;
+        const setup = udp.SetupHeader{
+            .common = udp.CommonHeader.init(.setup, udp.SetupHeader.encoded_length, udp.SetupHeader.encoded_length, stream.session_id, 0),
             .source_node_id = self.local_node_id,
-            .target_node_id = peer.node_id,
-            .direction = .outbound,
-            .session_epoch = @intCast(Clock.monotonicNanos()),
+            .target_node_id = stream.target_node_id,
+            .stream_id = stream.stream_id,
+            .initial_term_id = stream.initial_term_id,
+            .active_term_id = stream.term_log.active_term_id,
+            .term_length = stream.options.term_length,
+            .mtu = stream.options.mtu,
+            .sender_epoch = @intCast(@max(Clock.monotonicNanos(), 0)),
             .group_name_hash = self.group_name_hash,
         };
-        const handshake_bytes = handshake.toBytes();
-        _ = net.write(peer.socket_fd, handshake_bytes) catch {
-            self.disconnectPeer(peer);
+        self.sendHeader(peer, setup) catch {
+            self.counters.increment(self.counter_ids.send_errors);
             return;
         };
-
-        peer.state = .connected;
-        peer.resetBackoff();
-        peer.write_blocked = false;
-        peer.partial_write_offset = 0;
-        peer.io_pending = false;
-        peer.in_flight_frames = 0;
-        peer.in_flight_bytes = 0;
-        self.counters.increment(self.counter_ids.peers_connected);
-        self.publishPeerCounter(peer, Clock.monotonicNanos());
+        _ = entry;
+        self.counters.increment(self.counter_ids.setup_sent);
+        self.counters.increment(self.counter_ids.reconnect_attempts);
     }
 
-    fn disconnectPeer(self: *Self, peer: *PeerSender) void {
-        if (peer.socket_fd >= 0) {
-            platform.closeFd(peer.socket_fd);
-            peer.socket_fd = -1;
+    fn sendDueHeartbeats(self: *Self, now_ns: i64) u32 {
+        var count: u32 = 0;
+        for (&self.streams) |*maybe_stream| {
+            if (maybe_stream.*) |*stream| {
+                if (!stream.heartbeatDue(now_ns)) continue;
+                const peer = self.peers.get(stream.target_node_id) orelse continue;
+                const position = stream.term_log.sender_position;
+                const heartbeat = udp.HeartbeatHeader{
+                    .common = udp.CommonHeader.init(.heartbeat, @sizeOf(udp.HeartbeatHeader), @sizeOf(udp.HeartbeatHeader), stream.session_id, 0),
+                    .stream_id = stream.stream_id,
+                    .term_id = stream.initial_term_id + @as(i32, @intCast(position / stream.options.term_length)),
+                    .term_offset = @intCast(position % stream.options.term_length),
+                };
+                self.sendHeader(peer, heartbeat) catch continue;
+                self.counters.increment(self.counter_ids.heartbeats_sent);
+                count += 1;
+            }
         }
-        peer.state = .disconnected;
-        peer.write_blocked = false;
-        peer.partial_write_offset = 0;
-        // Bump generation so stale CQEs from this connection are ignored.
-        peer.io_generation +%= 1;
-        peer.io_pending = false;
-        peer.in_flight_frames = 0;
-        peer.in_flight_bytes = 0;
-        peer.advanceBackoff(Clock.monotonicNanos());
-        self.counters.increment(self.counter_ids.peers_disconnected);
-        self.publishPeerCounter(peer, Clock.monotonicNanos());
+        return count;
     }
 
-    // ── Peer Lifecycle Management ─────────────────────────────────────
+    fn sendHeader(self: *Self, peer: *PeerSender, header: anytype) !void {
+        const bytes = std.mem.asBytes(&header);
+        try self.sendPacket(peer, bytes);
+    }
 
-    pub fn addPeer(self: *Self, node_id: u8, address: net.Address) !void {
+    fn pollControlFrames(self: *Self, now_ns: i64) u32 {
+        var endpoint = if (self.endpoint) |*ep| ep else return 0;
+        var packets: [8]udp.PacketView = undefined;
+        const count = endpoint.poll(&packets, self.endpoint_scratch) catch return 0;
+        var work_count: u32 = 0;
+        for (packets[0..count]) |packet| {
+            const common = udp.protocol.decodeCommon(packet.bytes, self.options.mtu) catch {
+                self.counters.increment(self.counter_ids.malformed_messages_dropped);
+                continue;
+            };
+            switch (common.kind() catch continue) {
+                .setup_response => self.handleSetupResponse(packet.bytes, now_ns),
+                .status => self.handleStatus(packet.bytes, now_ns),
+                .nak => self.handleNak(packet.bytes, now_ns),
+                .rttm => {},
+                .heartbeat => {},
+                .protocol_error => self.counters.increment(self.counter_ids.send_errors),
+                else => {},
+            }
+            work_count += 1;
+        }
+        return work_count;
+    }
+
+    fn handleSetupResponse(self: *Self, bytes: []const u8, now_ns: i64) void {
+        _ = now_ns;
+        if (bytes.len < @sizeOf(udp.SetupResponseHeader)) return;
+        const response: *const udp.SetupResponseHeader = @ptrCast(@alignCast(bytes.ptr));
+        const stream = self.streamForId(response.stream_id) orelse return;
+        stream.setup_state = .confirmed;
+        stream.term_log.sender_limit = @max(stream.term_log.sender_limit, self.options.receiver_window_length);
+    }
+
+    fn handleStatus(self: *Self, bytes: []const u8, now_ns: i64) void {
+        _ = now_ns;
+        if (bytes.len < @sizeOf(udp.StatusHeader)) return;
+        const status: *const udp.StatusHeader = @ptrCast(@alignCast(bytes.ptr));
+        const stream = self.streamForId(status.stream_id) orelse return;
+        stream.applyStatus(status.*);
+        self.counters.increment(self.counter_ids.status_received);
+    }
+
+    fn handleNak(self: *Self, bytes: []const u8, now_ns: i64) void {
+        if (bytes.len < @sizeOf(udp.NakHeader)) return;
+        const nak: *const udp.NakHeader = @ptrCast(@alignCast(bytes.ptr));
+        const stream = self.streamForId(nak.stream_id) orelse return;
+        if (stream.scheduleNak(nak.*, now_ns)) {
+            stream.congestion.onLoss();
+            self.counters.increment(self.counter_ids.nak_received);
+        }
+    }
+
+    fn processRetransmits(self: *Self, now_ns: i64) u32 {
+        var work_count: u32 = 0;
+        var frames: [4]udp.term_log.ScannedFrame = undefined;
+        for (&self.streams) |*maybe_stream| {
+            if (maybe_stream.*) |*stream| {
+                const peer = self.peers.get(stream.target_node_id) orelse continue;
+                const count = stream.retransmitDue(now_ns, self.options.mtu, &frames);
+                for (frames[0..count]) |frame| {
+                    self.sendScannedFrame(peer, frame) catch continue;
+                    self.counters.increment(self.counter_ids.retransmits_sent);
+                    work_count += 1;
+                }
+            }
+        }
+        return work_count;
+    }
+
+    fn recordSendFailure(self: *Self, err: anyerror, payload_len: usize, entry: ?*SendBufferEntry) void {
+        switch (err) {
+            error.MalformedEnvelope => self.counters.increment(self.counter_ids.malformed_messages_dropped),
+            error.UnknownPeer => self.counters.increment(self.counter_ids.unknown_peer_messages_dropped),
+            error.PeerDisconnected, error.EndpointNotConfigured, error.NoDestinationEntry => self.counters.increment(self.counter_ids.peer_not_connected_drops),
+            error.SenderLimitReached, error.WouldBlock => self.counters.increment(self.counter_ids.send_back_pressure),
+            else => self.counters.increment(self.counter_ids.send_errors),
+        }
+        if (entry) |dest| {
+            dest.addDropped();
+            dest.storePressureState(pressureForError(err));
+        }
+        _ = payload_len;
+    }
+
+    fn pressureForError(err: anyerror) SendBufferPressureState {
+        return switch (err) {
+            error.SenderLimitReached => .flow_blocked,
+            error.WouldBlock => .congested,
+            error.PeerDisconnected, error.UnknownPeer, error.EndpointNotConfigured, error.NoDestinationEntry => .peer_down,
+            else => .normal,
+        };
+    }
+
+    pub fn addPeer(self: *Self, node_id: u8, address: udp.Address) !void {
         if (self.peers.contains(node_id)) return;
-
         const peer = try self.allocator.create(PeerSender);
         errdefer self.allocator.destroy(peer);
-
         peer.* = try PeerSender.init(node_id, address, self.allocator);
-        errdefer peer.deinit(self.allocator);
-
         self.peers.put(node_id, peer);
+        self.counters.increment(self.counter_ids.peers_connected);
         self.publishPeerCounter(peer, Clock.monotonicNanos());
     }
 
     pub fn removePeer(self: *Self, node_id: u8) void {
         if (self.peers.remove(node_id)) |peer| {
-            if (self.peer_send_counters) |region| {
-                region.freePeer(node_id);
-            }
+            if (self.peer_send_counters) |region| region.freePeer(node_id);
             peer.deinit(self.allocator);
             self.allocator.destroy(peer);
             self.counters.increment(self.counter_ids.peers_disconnected);
@@ -1130,57 +701,33 @@ pub const SenderEventLoop = struct {
 
     pub fn dispatchCommand(self: *Self, cmd: SenderCommand) void {
         switch (cmd) {
-            .add_peer => |add| {
-                self.addPeer(add.node_id, add.address) catch {
-                    self.counters.increment(self.counter_ids.send_errors);
-                };
-            },
-            .remove_peer => |remove| {
-                self.removePeer(remove.node_id);
-            },
-            .reconnect_peer => |reconnect| {
-                if (self.peers.get(reconnect.node_id)) |peer| {
-                    peer.resetForReconnect();
-                    peer.advanceBackoff(Clock.monotonicNanos());
-                }
-            },
+            .add_peer => |add| self.addPeer(add.node_id, add.address) catch self.counters.increment(self.counter_ids.send_errors),
+            .remove_peer => |remove| self.removePeer(remove.node_id),
+            .reconnect_peer => |reconnect| if (self.peers.get(reconnect.node_id)) |peer| peer.resetForReconnect(),
         }
     }
 
-    // ── Read callback wiring ──────────────────────────────────────────
-
     pub fn readFromRingBuffer(self: *Self, limit: u32) u32 {
-        if (self.send_buffer_directory != null) return self.drainDestinationBuffers(limit);
-        const send_ring_buffer = self.send_ring_buffer orelse return 0;
-        tls_self = self;
-        defer tls_self = null;
-        return send_ring_buffer.read(onOutboundMessageThunk, limit);
+        return if (self.send_buffer_directory != null)
+            self.drainDestinationBuffers(limit)
+        else
+            self.readLegacyRing(limit);
     }
 
     fn publishPeerSendCounters(self: *Self, now_ns: i64) void {
         if (self.peer_send_counters == null) return;
         var peer_iter = self.peers.iterator();
-        while (peer_iter.next()) |peer| {
-            self.publishPeerCounter(peer, now_ns);
-        }
+        while (peer_iter.next()) |peer| self.publishPeerCounter(peer, now_ns);
     }
 
     fn publishPeerCounter(self: *Self, peer: *PeerSender, now_ns: i64) void {
         const region = self.peer_send_counters orelse return;
-        const queue_capacity_bytes = @as(u64, peer.write_queue.capacity) *
-            @as(u64, peer.write_queue.max_frame_size);
-        const entry = region.findOrAllocPeer(peer.node_id, queue_capacity_bytes) orelse return;
+        const entry = region.findOrAllocPeer(peer.node_id, self.options.receiver_window_length) orelse return;
         entry.storeConnectionState(peer.state == .connected);
-        entry.storeQueueBytesPending(peer.write_queue.byteSize());
+        entry.storeQueueBytesPending(0);
         entry.storeTotalBytesSent(peer.total_bytes_sent);
         entry.storeTotalBytesDropped(peer.total_bytes_dropped);
         entry.storeLastUpdateNs(@intCast(@max(now_ns, 0)));
-    }
-
-    fn subtractPeerRingPending(self: *Self, node_id: u8, bytes: usize) void {
-        const region = self.peer_send_counters orelse return;
-        const entry = region.findPeer(node_id) orelse return;
-        entry.subtractRingBytesPending(@intCast(bytes));
     }
 
     fn ringCost(payload_len: usize) usize {
@@ -1192,7 +739,15 @@ pub const SenderEventLoop = struct {
     }
 };
 
-// ── Tests ─────────────────────────────────────────────────────────────
+fn hashGroupName(group_name: []const u8) u32 {
+    var hash: u32 = 2166136261;
+    for (group_name) |byte| hash = (hash ^ byte) *% 16777619;
+    return hash;
+}
+
+fn sessionId(source_node_id: u8, target_node_id: u8) u32 {
+    return (@as(u32, source_node_id) << 24) | (@as(u32, target_node_id) << 16) | 2;
+}
 
 const testing = std.testing;
 
@@ -1200,29 +755,16 @@ fn createTestCounters(
     values_buf: *align(128) [128 * 64]u8,
     meta_buf: *[256 * 64]u8,
 ) CountersManager {
-    return CountersManager.init(
-        values_buf,
-        meta_buf,
-    );
-}
-
-test "sender io_uring write errors distinguish retry from fallback" {
-    try testing.expect(SenderEventLoop.isRetryableIoUringWriteErr(.AGAIN));
-    try testing.expect(SenderEventLoop.isRetryableIoUringWriteErr(.INTR));
-    try testing.expect(SenderEventLoop.isRetryableIoUringWriteErr(.BUSY));
-    try testing.expect(!SenderEventLoop.isRetryableIoUringWriteErr(.PIPE));
-    try testing.expect(!SenderEventLoop.isRetryableIoUringWriteErr(.INVAL));
+    return CountersManager.init(values_buf, meta_buf);
 }
 
 test "SenderEventLoop init and deinit" {
     const allocator = testing.allocator;
-
     const rb_capacity: usize = 1024;
     const rb_buf_size = rb_capacity + constants.ring_buffer_trailer_length;
-    const rb_buf = try allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, constants.ring_buffer_alignment))), rb_buf_size);
+    const rb_buf = try allocator.alignedAlloc(u8, .@"8", rb_buf_size);
     defer allocator.free(rb_buf);
     @memset(rb_buf, 0);
-
     var rb = try RingBuffer.init(rb_buf, false, null, null);
 
     var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
@@ -1236,193 +778,45 @@ test "SenderEventLoop init and deinit" {
     try testing.expectEqual(@as(u32, 0), sender.peers.count);
 }
 
-test "addPeer and removePeer" {
+test "addPeer and removePeer use UDP addresses" {
     const allocator = testing.allocator;
-
     const rb_capacity: usize = 1024;
     const rb_buf_size = rb_capacity + constants.ring_buffer_trailer_length;
-    const rb_buf = try allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, constants.ring_buffer_alignment))), rb_buf_size);
+    const rb_buf = try allocator.alignedAlloc(u8, .@"8", rb_buf_size);
     defer allocator.free(rb_buf);
     @memset(rb_buf, 0);
-
     var rb = try RingBuffer.init(rb_buf, false, null, null);
 
     var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
     var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
     var counters = createTestCounters(&values_buf, &meta_buf);
 
-    var sender = try SenderEventLoop.init(&rb, &counters, 0, allocator);
+    var sender = try SenderEventLoop.init(&rb, &counters, 1, allocator);
     defer sender.deinit();
 
-    const addr1 = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
-    const addr2 = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9002);
-
-    try sender.addPeer(1, addr1);
-    try sender.addPeer(2, addr2);
-
-    try testing.expectEqual(@as(u32, 2), sender.peers.count);
-    try testing.expect(sender.peers.get(1) != null);
-    try testing.expect(sender.peers.get(2) != null);
-
-    sender.removePeer(1);
-
+    try sender.addPeer(2, .initIp4(.{ 127, 0, 0, 1 }, 9002));
     try testing.expectEqual(@as(u32, 1), sender.peers.count);
-    try testing.expect(sender.peers.get(1) == null);
     try testing.expect(sender.peers.get(2) != null);
+    sender.removePeer(2);
+    try testing.expectEqual(@as(u32, 0), sender.peers.count);
 }
 
-test "onOutboundMessage drops malformed message" {
+test "onOutboundMessage drops malformed envelope" {
     const allocator = testing.allocator;
-
     const rb_capacity: usize = 1024;
     const rb_buf_size = rb_capacity + constants.ring_buffer_trailer_length;
-    const rb_buf = try allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, constants.ring_buffer_alignment))), rb_buf_size);
+    const rb_buf = try allocator.alignedAlloc(u8, .@"8", rb_buf_size);
     defer allocator.free(rb_buf);
     @memset(rb_buf, 0);
-
     var rb = try RingBuffer.init(rb_buf, false, null, null);
 
     var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
     var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
     var counters = createTestCounters(&values_buf, &meta_buf);
 
-    var sender = try SenderEventLoop.init(&rb, &counters, 0, allocator);
+    var sender = try SenderEventLoop.init(&rb, &counters, 1, allocator);
     defer sender.deinit();
 
-    // Payload too small for a TCP frame header
-    const small_payload = [_]u8{ 0x01, 0x02, 0x03 };
-    sender.onOutboundMessage(0, &small_payload);
-
+    sender.onOutboundMessage(constants.message_envelope_msg_type_id, "short");
     try testing.expectEqual(@as(i64, 1), counters.get(sender.counter_ids.malformed_messages_dropped));
-}
-
-test "onOutboundMessage drops message to unknown peer" {
-    const allocator = testing.allocator;
-
-    const rb_capacity: usize = 1024;
-    const rb_buf_size = rb_capacity + constants.ring_buffer_trailer_length;
-    const rb_buf = try allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, constants.ring_buffer_alignment))), rb_buf_size);
-    defer allocator.free(rb_buf);
-    @memset(rb_buf, 0);
-
-    var rb = try RingBuffer.init(rb_buf, false, null, null);
-
-    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
-    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
-    var counters = createTestCounters(&values_buf, &meta_buf);
-
-    var sender = try SenderEventLoop.init(&rb, &counters, 0, allocator);
-    defer sender.deinit();
-
-    // Valid-sized payload targeting node 5 (which doesn't exist)
-    var payload_buf: [64]u8 align(8) = [_]u8{0} ** 64;
-    const header: *TcpFrameHeader = @ptrCast(@alignCast(&payload_buf));
-    header.* = .{
-        .frame_length = 64,
-        .target_node_id = 5,
-    };
-
-    sender.onOutboundMessage(0, &payload_buf);
-
-    try testing.expectEqual(@as(i64, 1), counters.get(sender.counter_ids.unknown_peer_messages_dropped));
-}
-
-test "onOutboundMessage drops message to disconnected peer" {
-    const allocator = testing.allocator;
-
-    const rb_capacity: usize = 1024;
-    const rb_buf_size = rb_capacity + constants.ring_buffer_trailer_length;
-    const rb_buf = try allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, constants.ring_buffer_alignment))), rb_buf_size);
-    defer allocator.free(rb_buf);
-    @memset(rb_buf, 0);
-
-    var rb = try RingBuffer.init(rb_buf, false, null, null);
-
-    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
-    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
-    var counters = createTestCounters(&values_buf, &meta_buf);
-
-    var sender = try SenderEventLoop.init(&rb, &counters, 0, allocator);
-    defer sender.deinit();
-
-    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
-    try sender.addPeer(1, addr);
-    // peer.state defaults to .disconnected
-
-    var payload_buf: [64]u8 align(8) = [_]u8{0} ** 64;
-    const header: *TcpFrameHeader = @ptrCast(@alignCast(&payload_buf));
-    header.* = .{
-        .frame_length = 64,
-        .target_node_id = 1,
-    };
-
-    sender.onOutboundMessage(0, &payload_buf);
-
-    try testing.expectEqual(@as(i64, 1), counters.get(sender.counter_ids.peer_not_connected_drops));
-}
-
-test "onOutboundMessage enqueues frame to connected peer" {
-    const allocator = testing.allocator;
-
-    const rb_capacity: usize = 1024;
-    const rb_buf_size = rb_capacity + constants.ring_buffer_trailer_length;
-    const rb_buf = try allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, constants.ring_buffer_alignment))), rb_buf_size);
-    defer allocator.free(rb_buf);
-    @memset(rb_buf, 0);
-
-    var rb = try RingBuffer.init(rb_buf, false, null, null);
-
-    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
-    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
-    var counters = createTestCounters(&values_buf, &meta_buf);
-
-    var sender = try SenderEventLoop.init(&rb, &counters, 0, allocator);
-    defer sender.deinit();
-
-    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
-    try sender.addPeer(1, addr);
-    const peer = sender.peers.get(1).?;
-    peer.state = .connected;
-
-    var payload_buf: [64]u8 align(8) = [_]u8{0} ** 64;
-    const header: *TcpFrameHeader = @ptrCast(@alignCast(&payload_buf));
-    header.* = .{
-        .frame_length = 64,
-        .target_node_id = 1,
-        .source_service_id = 5,
-        .target_service_id = 10,
-        .template_id = 42,
-        .correlation_id = 12345,
-    };
-
-    sender.onOutboundMessage(0, &payload_buf);
-
-    try testing.expectEqual(@as(i64, 1), counters.get(sender.counter_ids.frames_sent));
-    try testing.expect(counters.get(sender.counter_ids.bytes_sent) > 0);
-    try testing.expect(!peer.write_queue.isEmpty());
-}
-
-test "dispatchCommand handles add_peer" {
-    const allocator = testing.allocator;
-
-    const rb_capacity: usize = 1024;
-    const rb_buf_size = rb_capacity + constants.ring_buffer_trailer_length;
-    const rb_buf = try allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, constants.ring_buffer_alignment))), rb_buf_size);
-    defer allocator.free(rb_buf);
-    @memset(rb_buf, 0);
-
-    var rb = try RingBuffer.init(rb_buf, false, null, null);
-
-    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
-    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
-    var counters = createTestCounters(&values_buf, &meta_buf);
-
-    var sender = try SenderEventLoop.init(&rb, &counters, 0, allocator);
-    defer sender.deinit();
-
-    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
-    sender.dispatchCommand(.{ .add_peer = .{ .node_id = 3, .address = addr } });
-
-    try testing.expectEqual(@as(u32, 1), sender.peers.count);
-    try testing.expect(sender.peers.get(3) != null);
 }

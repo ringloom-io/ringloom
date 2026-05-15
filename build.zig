@@ -11,19 +11,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    const ringloom_tcp = b.addModule("ringloom_tcp", .{
-        .root_source_file = b.path("src/tcp/tcp.zig"),
-        .target = target,
-        .imports = &.{
-            .{ .name = "ringloom_common", .module = ringloom_common },
-        },
-    });
-
     const ringloom_udp = b.addModule("ringloom_udp", .{
         .root_source_file = b.path("src/udp/root.zig"),
         .target = target,
     });
-    _ = ringloom_udp;
 
     const ringloom_service = b.addModule("ringloom_service", .{
         .root_source_file = b.path("src/service/root.zig"),
@@ -76,7 +67,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "ringloom_common", .module = ringloom_common },
-            .{ .name = "ringloom_tcp", .module = ringloom_tcp },
+            .{ .name = "ringloom_udp", .module = ringloom_udp },
         },
     });
 
@@ -99,7 +90,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
                 .{ .name = "ringloom_broker", .module = ringloom_broker },
-                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
                 .{ .name = "ringloom_service", .module = ringloom_service },
             },
         }),
@@ -171,22 +161,11 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
-                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
+                .{ .name = "ringloom_udp", .module = ringloom_udp },
             },
         }),
     });
     const run_broker_tests = b.addRunArtifact(broker_tests);
-
-    const tcp_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tcp/tcp.zig"),
-            .target = target,
-            .imports = &.{
-                .{ .name = "ringloom_common", .module = ringloom_common },
-            },
-        }),
-    });
-    const run_tcp_tests = b.addRunArtifact(tcp_tests);
 
     const udp_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -234,7 +213,6 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all unit and integration tests");
     test_step.dependOn(&run_common_tests.step);
     test_step.dependOn(&run_broker_tests.step);
-    test_step.dependOn(&run_tcp_tests.step);
     test_step.dependOn(&run_udp_tests.step);
     test_step.dependOn(&run_service_tests.step);
     test_step.dependOn(&run_exe_tests.step);
@@ -260,7 +238,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
                 .{ .name = "ringloom_testing", .module = ringloom_testing },
-                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
+                .{ .name = "ringloom_udp", .module = ringloom_udp },
             },
         }),
     });
@@ -410,7 +388,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
-                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
+                .{ .name = "ringloom_udp", .module = ringloom_udp },
             },
         }),
     });
