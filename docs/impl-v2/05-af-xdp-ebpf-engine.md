@@ -64,6 +64,39 @@ Generic XDP is not considered kernel bypass for production. If config allows gen
 5. No simultaneous POSIX receive on redirected port.
 6. PMTUD and fragmented IP policy.
 
+## Current implementation status
+
+The broker now routes `broker.transport.engine` through a transport-selection layer instead of hardcoding POSIX UDP for the receiver endpoint. The current AF_XDP probe reports `not_implemented`, so:
+
+- `posix` starts POSIX UDP directly.
+- `prefer_af_xdp` logs a fallback and starts POSIX UDP.
+- `require_af_xdp` fails broker startup before silently binding POSIX UDP.
+
+This is intentional until the real AF_XDP datapath lands. The remaining AF_XDP work is UMEM/ring management, XSK bind/map setup, XDP program attach/detach, RX descriptor release, TX Ethernet/IP/UDP header construction, and bounded neighbor resolution.
+
+## Local AF_XDP hardware test shape
+
+A single machine with two supported Intel 2.5 GbE ports connected by a patch cable is a valid AF_XDP test topology once the datapath is implemented. Use separate interface addresses and bind one broker to each NIC address, for example:
+
+```bash
+sudo ip addr add 192.0.2.1/30 dev enp1s0
+sudo ip addr add 192.0.2.2/30 dev enp2s0
+sudo ip link set enp1s0 up
+sudo ip link set enp2s0 up
+sudo ethtool -L enp1s0 combined 1
+sudo ethtool -L enp2s0 combined 1
+```
+
+For real AF_XDP validation, run the broker with the privileges needed by the kernel and driver (`CAP_NET_ADMIN`, `CAP_BPF`, and sufficient locked memory; older kernels may also require broader privileges), configure RX queue steering so the RingLoom UDP destination port lands on the configured queue, then verify attachment and traffic with:
+
+```bash
+sudo bpftool net show
+sudo ethtool -S enp1s0 | grep -i xdp
+sudo ethtool -S enp2s0 | grep -i xdp
+```
+
+Avoid putting both NICs in the same broad subnet on one host; use a point-to-point `/30` or `/31` to reduce ARP/routing ambiguity. Intel I225/I226-class `igc` devices may support copy/generic mode before stable native zero-copy on some kernel/driver combinations, so confirm with `bpftool` and NIC counters rather than assuming AF_XDP is active from broker startup alone.
+
 ## Tests
 
 ### Unit tests
@@ -105,4 +138,3 @@ These tests skip when AF_XDP is unavailable:
 - XDP program redirects only configured RingLoom UDP ports.
 - Fallback behavior is deterministic and tested.
 - POSIX UDP remains the default safe engine.
-

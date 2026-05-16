@@ -11,6 +11,7 @@ pub const endpoint = @import("endpoint.zig");
 pub const posix_endpoint = @import("posix_endpoint.zig");
 pub const af_xdp_endpoint = @import("af_xdp_endpoint.zig");
 pub const xdp_filter = @import("xdp_filter.zig");
+pub const transport_endpoint = @import("transport_endpoint.zig");
 
 pub const CommonHeader = protocol.CommonHeader;
 pub const SetupHeader = protocol.SetupHeader;
@@ -37,6 +38,7 @@ pub const EndpointConfig = endpoint.EndpointConfig;
 pub const PacketView = endpoint.PacketView;
 pub const OutboundPacket = endpoint.OutboundPacket;
 pub const PosixEndpoint = posix_endpoint.PosixEndpoint;
+pub const UdpEndpoint = transport_endpoint.UdpEndpoint;
 pub const EngineSelection = endpoint.EngineSelection;
 pub const AfXdpEndpoint = af_xdp_endpoint.AfXdpEndpoint;
 pub const UmemFrameAllocator = af_xdp_endpoint.UmemFrameAllocator;
@@ -52,6 +54,7 @@ comptime {
     _ = @import("posix_endpoint.zig");
     _ = @import("af_xdp_endpoint.zig");
     _ = @import("xdp_filter.zig");
+    _ = @import("transport_endpoint.zig");
 }
 
 test "udp module compiles" {
@@ -62,6 +65,7 @@ test "udp module compiles" {
     _ = ReceiverWindow;
     _ = StaticCongestionControl;
     _ = PosixEndpoint;
+    _ = UdpEndpoint;
     _ = AfXdpEndpoint;
     _ = UmemFrameAllocator;
 }

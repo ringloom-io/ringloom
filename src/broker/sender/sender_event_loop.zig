@@ -152,7 +152,7 @@ pub const SenderEventLoop = struct {
     group_name_hash: u32,
     benchmark_latency_tracing_enabled: bool,
     options: SenderOptions,
-    endpoint: ?udp.PosixEndpoint,
+    endpoint: ?udp.UdpEndpoint,
     endpoint_scratch: []u8,
     packet_buf: []u8,
     streams: [memory_constants.default_send_buffer_entry_count]?StreamSender,
@@ -257,12 +257,17 @@ pub const SenderEventLoop = struct {
     }
 
     pub fn configureEndpoint(self: *Self, host: []const u8, port: u16) !void {
-        if (self.endpoint) |*endpoint| endpoint.deinit();
         const local_address = try udp.Address.parseIp4(host, port);
-        self.endpoint = try udp.PosixEndpoint.init(.{
+        try self.configureEndpointWithConfig(.{
             .local_address = local_address,
             .mtu = self.options.mtu,
         });
+    }
+
+    pub fn configureEndpointWithConfig(self: *Self, config: udp.EndpointConfig) !void {
+        if (self.endpoint) |*endpoint| endpoint.deinit();
+        self.endpoint = null;
+        self.endpoint = try udp.UdpEndpoint.init(config);
     }
 
     pub fn setPeerSendCountersRegion(self: *Self, region: ?PeerSendCountersRegion) void {

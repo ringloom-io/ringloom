@@ -222,7 +222,7 @@ pub const BrokerRuntime = struct {
             self.sender_loop.?.addPeer(ep.node_id, addr) catch continue;
         }
         if (self.config.peer_endpoints.len > 0) {
-            try self.receiver_loop.?.configureEndpoint(self.config.local_host, self.config.local_port);
+            try configureReceiverEndpoint(&self.receiver_loop.?, self.config);
         }
 
         self.broker_threads = BrokerThreads.init(
@@ -346,6 +346,36 @@ fn receiverDoWorkFn(ctx: *anyopaque) u32 {
 }
 
 fn receiverOnCloseFn(_: *anyopaque) void {}
+
+fn configureReceiverEndpoint(loop: *ReceiverEventLoop, config: BrokerConfig) !void {
+    var interface_storage: [1][]const u8 = undefined;
+    var interfaces: []const []const u8 = &.{};
+    if (config.af_xdp_interface) |interface| {
+        interface_storage[0] = interface;
+        interfaces = &interface_storage;
+    }
+
+    try loop.configureEndpointWithConfig(.{
+        .local_address = udp.Address.parseIp4(config.local_host, config.local_port) catch unreachable,
+        .mtu = config.udp_mtu,
+        .engine_mode = transportEngineMode(config.transport_engine),
+        .af_xdp = .{
+            .interfaces = interfaces,
+            .ports = config.af_xdp_ports,
+            .rx_queue = config.af_xdp_rx_queue,
+            .umem_frame_count = config.af_xdp_umem_frame_count,
+            .umem_frame_size = config.af_xdp_umem_frame_size,
+        },
+    });
+}
+
+fn transportEngineMode(engine: config_mod.TransportEngine) udp.endpoint.EngineMode {
+    return switch (engine) {
+        .posix => .posix,
+        .prefer_af_xdp => .prefer_af_xdp,
+        .require_af_xdp => .require_af_xdp,
+    };
+}
 
 test "BrokerRuntime init and deinit without start" {
     // Given

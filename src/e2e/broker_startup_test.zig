@@ -84,3 +84,44 @@ test "broker handles SIGTERM gracefully" {
     try std.testing.expectEqual(@as(u32, 0), exit_code);
     try std.testing.expect(!broker.isAlive());
 }
+
+test "broker prefer_af_xdp falls back to POSIX startup path" {
+    const allocator = std.testing.allocator;
+    var harness = try TestHarness.init(allocator, "broker-af-xdp-prefer-fallback");
+    errdefer harness.markFailed();
+    defer harness.deinit();
+
+    const broker = try harness.startBroker(.{
+        .node_id = 1,
+        .port = 19101,
+        .peers = &.{.{ .node_id = 2, .host = "127.0.0.1", .port = 19102 }},
+        .transport_engine = "prefer_af_xdp",
+        .af_xdp_interface = "lo",
+        .af_xdp_ports = &.{19101},
+    });
+    try harness.waitForBrokerReady(broker, 5000);
+    try std.testing.expect(broker.isAlive());
+
+    try harness.stopProcess(broker);
+    const exit_code = try broker.waitForExit(5000);
+    try std.testing.expectEqual(@as(u32, 0), exit_code);
+}
+
+test "broker require_af_xdp fails startup when unavailable" {
+    const allocator = std.testing.allocator;
+    var harness = try TestHarness.init(allocator, "broker-af-xdp-required-unavailable");
+    errdefer harness.markFailed();
+    defer harness.deinit();
+
+    const broker = try harness.startBroker(.{
+        .node_id = 1,
+        .port = 19111,
+        .peers = &.{.{ .node_id = 2, .host = "127.0.0.1", .port = 19112 }},
+        .transport_engine = "require_af_xdp",
+        .af_xdp_interface = "lo",
+        .af_xdp_ports = &.{19111},
+    });
+
+    const exit_code = try broker.waitForExit(5000);
+    try std.testing.expect(exit_code != 0);
+}

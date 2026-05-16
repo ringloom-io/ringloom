@@ -42,6 +42,8 @@ pub const ReceiverCounters = struct {
     naks_sent: usize = 0,
     duplicate_packets: usize = 0,
     stale_session_packets: usize = 0,
+    af_xdp_enabled: usize = 0,
+    af_xdp_fallbacks: usize = 0,
 
     pub fn allocate(counters: *CountersManager) ReceiverCounters {
         return .{
@@ -63,6 +65,8 @@ pub const ReceiverCounters = struct {
             .naks_sent = counters.allocate(1, "udp_naks_sent") orelse 0,
             .duplicate_packets = counters.allocate(1, "udp_duplicate_packets") orelse 0,
             .stale_session_packets = counters.allocate(1, "udp_stale_session_packets") orelse 0,
+            .af_xdp_enabled = counters.allocate(1, "af_xdp_enabled") orelse 0,
+            .af_xdp_fallbacks = counters.allocate(1, "af_xdp_fallbacks") orelse 0,
         };
     }
 };
@@ -135,7 +139,7 @@ pub const ReceiverEventLoop = struct {
     admin_cmd_queue: ?*AdminCommandQueue(64),
     benchmark_latency_tracing_enabled: bool,
     iouring_options: ReceiverIoUringOptions,
-    endpoint: ?udp.PosixEndpoint,
+    endpoint: ?udp.UdpEndpoint,
     endpoint_scratch: []u8,
     packet_buf: []u8,
     streams: [memory_constants.default_send_buffer_entry_count]?StreamReceiver,
@@ -225,12 +229,27 @@ pub const ReceiverEventLoop = struct {
     }
 
     pub fn configureEndpoint(self: *Self, host: []const u8, port: u16) !void {
-        if (self.endpoint) |*endpoint| endpoint.deinit();
         const local_address = try udp.Address.parseIp4(host, port);
-        self.endpoint = try udp.PosixEndpoint.init(.{
+        try self.configureEndpointWithConfig(.{
             .local_address = local_address,
             .mtu = self.iouring_options.mtu,
         });
+    }
+
+    pub fn configureEndpointWithConfig(self: *Self, config: udp.EndpointConfig) !void {
+        if (self.endpoint) |*endpoint| endpoint.deinit();
+        self.endpoint = null;
+
+        self.endpoint = try udp.UdpEndpoint.init(config);
+        const selection = self.endpoint.?.selection;
+        if (selection.engine == .af_xdp) {
+            self.counters.set(self.counter_ids.af_xdp_enabled, 1);
+        } else {
+            self.counters.set(self.counter_ids.af_xdp_enabled, 0);
+        }
+        if (selection.fell_back) {
+            self.counters.add(self.counter_ids.af_xdp_fallbacks, @intCast(selection.fallback_count));
+        }
     }
 
     pub fn doWork(self: *Self) u32 {
@@ -537,6 +556,28 @@ test "ReceiverEventLoop init and deinit" {
 
     try testing.expectEqual(@as(u8, 1), recv_loop.local_node_id);
     try testing.expectEqual(@as(u32, 0), recv_loop.peers.count);
+}
+
+test "ReceiverEventLoop records AF_XDP fallback selection" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const allocator = testing.allocator;
+    var registry = ServiceRegistry.init();
+    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
+    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
+    var counters = createTestCounters(&values_buf, &meta_buf);
+
+    var recv_loop = ReceiverEventLoop.init(&registry, &counters, 1, allocator);
+    defer recv_loop.deinit();
+
+    try recv_loop.configureEndpointWithConfig(.{
+        .local_address = .initIp4(.{ 127, 0, 0, 1 }, 0),
+        .engine_mode = .prefer_af_xdp,
+        .af_xdp = .{ .interfaces = &.{"lo"}, .ports = &.{9000} },
+    });
+
+    try testing.expectEqual(@as(i64, 0), counters.get(recv_loop.counter_ids.af_xdp_enabled));
+    try testing.expectEqual(@as(i64, 1), counters.get(recv_loop.counter_ids.af_xdp_fallbacks));
 }
 
 test "addPeer and removePeer use UDP addresses" {

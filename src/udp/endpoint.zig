@@ -122,6 +122,7 @@ pub const Engine = enum {
 
 pub const FallbackReason = enum {
     not_requested,
+    not_implemented,
     unavailable,
     unsupported_os,
     invalid_config,

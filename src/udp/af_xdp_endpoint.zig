@@ -12,10 +12,16 @@ pub fn validateConfig(config: endpoint.AfXdpConfig) !void {
     if (config.interfaces.len == 0) return error.MissingInterface;
     if (config.ports.len == 0) return error.NoConfiguredPorts;
     if (config.rx_queue > 4095) return error.InvalidQueue;
-    if (config.umem_frame_count == 0 or !std.math.isPowerOfTwo(config.umem_frame_count)) {
+    if (config.umem_frame_count == 0 or
+        config.umem_frame_count > 65_536 or
+        !std.math.isPowerOfTwo(config.umem_frame_count))
+    {
         return error.InvalidUmemFrameCount;
     }
-    if (config.umem_frame_size < 2048 or !std.math.isPowerOfTwo(config.umem_frame_size)) {
+    if (config.umem_frame_size < 2048 or
+        config.umem_frame_size > 16 * 1024 or
+        !std.math.isPowerOfTwo(config.umem_frame_size))
+    {
         return error.InvalidUmemFrameSize;
     }
 }
@@ -23,12 +29,52 @@ pub fn validateConfig(config: endpoint.AfXdpConfig) !void {
 pub fn probe(config: endpoint.AfXdpConfig) ProbeResult {
     validateConfig(config) catch return .{ .available = false, .reason = .invalid_config };
     if (builtin.os.tag != .linux) return .{ .available = false, .reason = .unsupported_os };
-    return .{ .available = false, .reason = .unavailable };
+    return .{ .available = false, .reason = .not_implemented };
 }
 
 pub const AfXdpEndpoint = struct {
     pub fn init(config: endpoint.EndpointConfig) !AfXdpEndpoint {
         try validateConfig(config.af_xdp);
+        return error.AfXdpUnavailable;
+    }
+
+    pub fn deinit(self: *AfXdpEndpoint) void {
+        self.* = undefined;
+    }
+
+    pub fn localAddress(self: *const AfXdpEndpoint) !endpoint.Address {
+        _ = self;
+        return error.AfXdpUnavailable;
+    }
+
+    pub fn poll(
+        self: *AfXdpEndpoint,
+        packets: []endpoint.PacketView,
+        scratch: []u8,
+    ) !usize {
+        _ = self;
+        _ = packets;
+        _ = scratch;
+        return error.AfXdpUnavailable;
+    }
+
+    pub fn send(
+        self: *AfXdpEndpoint,
+        packet: []const u8,
+        destination: endpoint.Address,
+    ) !usize {
+        _ = self;
+        _ = packet;
+        _ = destination;
+        return error.AfXdpUnavailable;
+    }
+
+    pub fn sendBatch(
+        self: *AfXdpEndpoint,
+        batch: []const endpoint.OutboundPacket,
+    ) !usize {
+        _ = self;
+        _ = batch;
         return error.AfXdpUnavailable;
     }
 };
@@ -121,6 +167,19 @@ test "AF_XDP config validation rejects missing interface invalid queue and missi
         .interfaces = &.{"eth0"},
         .ports = &.{9000},
         .rx_queue = 4096,
+    }));
+}
+
+test "AF_XDP config validation rejects unbounded UMEM sizes" {
+    try std.testing.expectError(error.InvalidUmemFrameCount, validateConfig(.{
+        .interfaces = &.{"eth0"},
+        .ports = &.{9000},
+        .umem_frame_count = 131_072,
+    }));
+    try std.testing.expectError(error.InvalidUmemFrameSize, validateConfig(.{
+        .interfaces = &.{"eth0"},
+        .ports = &.{9000},
+        .umem_frame_size = 32 * 1024,
     }));
 }
 
