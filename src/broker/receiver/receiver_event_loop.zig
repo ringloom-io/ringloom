@@ -10,6 +10,7 @@ const memory_constants = ringloom_common.memory.constants;
 const Clock = ringloom_common.platform.clock.Clock;
 const AtomicBool = ringloom_common.platform.atomic.AtomicBool;
 const CountersManager = ringloom_common.concurrent.counters.CountersManager;
+const latency_trace = ringloom_common.message.latency_trace;
 
 const PeerReceiver = @import("peer_receiver.zig").PeerReceiver;
 const LivenessState = @import("peer_receiver.zig").LivenessState;
@@ -359,6 +360,12 @@ pub const ReceiverEventLoop = struct {
             if ((delivery.header.route_flags & constants.flag_admin) != 0) {
                 self.handleAdminMessage(delivery.header, delivery.payload, source_node_id);
                 continue;
+            }
+            if (self.benchmark_latency_tracing_enabled) {
+                latency_trace.stampReceiverIngress(
+                    @constCast(delivery.payload),
+                    @intCast(Clock.monotonicNanosStable()),
+                );
             }
             const result = message_router.routeUdpDataToService(self.service_registry, delivery.header, delivery.payload);
             switch (result) {

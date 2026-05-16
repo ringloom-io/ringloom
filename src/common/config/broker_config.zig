@@ -1,6 +1,7 @@
 // src/config/broker_config.zig
 
 const std = @import("std");
+const memory_constants = @import("../memory/constants.zig");
 
 pub const ThreadingMode = enum {
     dedicated,
@@ -104,9 +105,9 @@ pub const BrokerConfig = struct {
     udp_nak_retry_delay_us: u32 = 250,
 
     // ── Per-destination send buffers ─────────────────────────────
-    send_buffers_max_entries: u32 = 256,
+    send_buffers_max_entries: u32 = memory_constants.default_send_buffer_entry_count,
     send_buffers_default_size: u32 = 1_048_576,
-    send_buffers_max_total_bytes: u64 = 256 * 1_048_576,
+    send_buffers_max_total_bytes: u64 = memory_constants.default_send_buffer_entry_count * 1_048_576,
     send_buffers_idle_timeout_ms: u64 = 60_000,
     send_buffers_drain_timeout_ms: u64 = 5_000,
 

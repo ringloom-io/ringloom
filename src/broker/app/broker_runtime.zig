@@ -180,7 +180,7 @@ pub const BrokerRuntime = struct {
             self.config.node_id,
             self.allocator,
             self.config.group_name,
-            false,
+            self.config.benchmark_latency_tracing_enabled,
             .{
                 .mtu = self.config.udp_mtu,
                 .term_length = self.config.udp_term_length,
@@ -203,7 +203,7 @@ pub const BrokerRuntime = struct {
             self.allocator,
             self.config.group_name,
             null,
-            false,
+            self.config.benchmark_latency_tracing_enabled,
             .{
                 .mtu = self.config.udp_mtu,
                 .term_length = self.config.udp_term_length,

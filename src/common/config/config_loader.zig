@@ -7,6 +7,7 @@ const ThreadingMode = @import("broker_config.zig").ThreadingMode;
 const IdleStrategyName = @import("broker_config.zig").IdleStrategyName;
 const TransportKind = @import("broker_config.zig").TransportKind;
 const TransportEngine = @import("broker_config.zig").TransportEngine;
+const memory_constants = @import("../memory/constants.zig");
 
 pub const ConfigError = error{
     FileNotFound,
@@ -423,8 +424,12 @@ fn validate(config: *BrokerConfig) ConfigError!void {
         return ConfigError.InvalidValue;
 
     config.send_buffers_default_size = alignToPowerOfTwo(config.send_buffers_default_size);
-    if (config.send_buffers_max_entries == 0 or config.send_buffers_default_size < 4096)
+    if (config.send_buffers_max_entries == 0 or
+        config.send_buffers_max_entries > memory_constants.default_send_buffer_entry_count or
+        config.send_buffers_default_size < 4096)
+    {
         return ConfigError.InvalidValue;
+    }
     const total_send_budget = @as(u64, config.send_buffers_max_entries) *
         @as(u64, config.send_buffers_default_size);
     if (total_send_budget > config.send_buffers_max_total_bytes)

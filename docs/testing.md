@@ -199,6 +199,9 @@ zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=Relea
 # Best-of-5 for 512 B saturated queueing latency
 ./scripts/bench-single-size.sh 512 5 --latency-mode saturated
 
+# Best-of-5 for 4096 B on loopback with an exact-fit UDP MTU
+RINGLOOM_BENCH_UDP_MTU=4160 RINGLOOM_BENCH_LATENCY_TRACING=false ./scripts/bench-single-size.sh 4096 5
+
 # Best-of-5 for 32 B local IPC
 ./scripts/bench-single-size.sh 32 5 --local
 
@@ -210,6 +213,14 @@ Best results are saved to `/tmp/ringloom-bench-best/` by default. The script pri
 a summary with throughput, end-to-end latency percentiles, and—when the payload
 is large enough for tracing (32 B+)—a stage breakdown for broker A queueing,
 transport, and broker B local delivery.
+
+Benchmark scripts default to `broker.udp.mtu=1408`, matching the transport
+default. Set `RINGLOOM_BENCH_UDP_MTU` to test loopback or jumbo-frame behavior.
+For a 4096-byte payload, `4160` is the exact-fit DATA frame size (4096-byte
+payload + 64-byte UDP DATA header), avoiding RingLoom-level fragmentation. Use
+larger MTUs only on loopback or networks with verified end-to-end jumbo support.
+Set `RINGLOOM_BENCH_LATENCY_TRACING=false` when measuring the raw fast path
+without stage-breakdown timestamp overhead.
 
 **Tip:** For the most reliable results, run each size independently with all
 other CPU-intensive processes stopped. Benchmark variance on a busy system can

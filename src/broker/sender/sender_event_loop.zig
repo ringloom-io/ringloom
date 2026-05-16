@@ -16,6 +16,7 @@ const SendBufferDirectory = ringloom_common.memory.SendBufferDirectory;
 const SendBufferEntry = ringloom_common.memory.SendBufferEntry;
 const SendBufferPressureState = ringloom_common.memory.SendBufferPressureState;
 const MessageHeader = ringloom_common.message.message_header.MessageHeader;
+const latency_trace = ringloom_common.message.latency_trace;
 
 const PeerSender = @import("peer_sender.zig").PeerSender;
 const ConnectionState = @import("peer_sender.zig").ConnectionState;
@@ -443,6 +444,12 @@ pub const SenderEventLoop = struct {
 
         if (entry) |dest| dest.subtractPending(@intCast(ringCost(payload.len)));
         const body = payload[MessageHeader.encoded_length..];
+        if (self.benchmark_latency_tracing_enabled) {
+            latency_trace.stampSenderDequeue(
+                @constCast(body),
+                @intCast(Clock.monotonicNanosStable()),
+            );
+        }
         try self.sendBodyFragments(stream, peer, envelope.*, body);
     }
 

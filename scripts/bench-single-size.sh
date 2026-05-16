@@ -77,6 +77,13 @@ IOURING_RECEIVER_CQE_BATCH="${RINGLOOM_BENCH_IOURING_RECEIVER_CQE_BATCH:-256}"
 IOURING_SENDER_CQE_BATCH="${RINGLOOM_BENCH_IOURING_SENDER_CQE_BATCH:-64}"
 SENDER_WRITEV_BATCH_SIZE="${RINGLOOM_BENCH_SENDER_WRITEV_BATCH_SIZE:-64}"
 SENDER_WRITE_BUDGET="${RINGLOOM_BENCH_SENDER_WRITE_BUDGET:-256}"
+BENCH_UDP_MTU="${RINGLOOM_BENCH_UDP_MTU:-1408}"
+BENCH_LATENCY_TRACING="${RINGLOOM_BENCH_LATENCY_TRACING:-true}"
+DEFAULT_AF_XDP_UMEM_FRAME_SIZE=2048
+if [[ "$BENCH_UDP_MTU" -gt "$DEFAULT_AF_XDP_UMEM_FRAME_SIZE" ]]; then
+    DEFAULT_AF_XDP_UMEM_FRAME_SIZE="$BENCH_UDP_MTU"
+fi
+AF_XDP_UMEM_FRAME_SIZE="${RINGLOOM_BENCH_AF_XDP_UMEM_FRAME_SIZE:-$DEFAULT_AF_XDP_UMEM_FRAME_SIZE}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -307,7 +314,9 @@ broker.io.uring.recv.buffer.size=$IOURING_RECV_BUFFER_SIZE
 broker.io.uring.recv.buffer.count=$IOURING_RECV_BUFFER_COUNT
 broker.sender.writev.batch.size=$SENDER_WRITEV_BATCH_SIZE
 broker.sender.write.budget.per.peer=$SENDER_WRITE_BUDGET
-broker.benchmark.latency.tracing.enabled=true
+broker.benchmark.latency.tracing.enabled=$BENCH_LATENCY_TRACING
+broker.udp.mtu=$BENCH_UDP_MTU
+broker.af_xdp.umem.frame.size=$AF_XDP_UMEM_FRAME_SIZE
 EOF
 
         cat > "$CONFIGS/broker_2.properties" << EOF
@@ -332,7 +341,9 @@ broker.io.uring.recv.buffer.size=$IOURING_RECV_BUFFER_SIZE
 broker.io.uring.recv.buffer.count=$IOURING_RECV_BUFFER_COUNT
 broker.sender.writev.batch.size=$SENDER_WRITEV_BATCH_SIZE
 broker.sender.write.budget.per.peer=$SENDER_WRITE_BUDGET
-broker.benchmark.latency.tracing.enabled=true
+broker.benchmark.latency.tracing.enabled=$BENCH_LATENCY_TRACING
+broker.udp.mtu=$BENCH_UDP_MTU
+broker.af_xdp.umem.frame.size=$AF_XDP_UMEM_FRAME_SIZE
 EOF
 
         start_bg_process "$LOGS/broker_a.log" "" \
@@ -371,6 +382,8 @@ broker.io.uring.recv.buffer.size=$IOURING_RECV_BUFFER_SIZE
 broker.io.uring.recv.buffer.count=$IOURING_RECV_BUFFER_COUNT
 broker.sender.writev.batch.size=$SENDER_WRITEV_BATCH_SIZE
 broker.sender.write.budget.per.peer=$SENDER_WRITE_BUDGET
+broker.udp.mtu=$BENCH_UDP_MTU
+broker.af_xdp.umem.frame.size=$AF_XDP_UMEM_FRAME_SIZE
 EOF
 
         start_bg_process "$LOGS/broker_local.log" "" \
