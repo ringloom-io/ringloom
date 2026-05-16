@@ -530,6 +530,7 @@ test "default values are applied for omitted properties" {
     try std.testing.expectEqual(@as(u16, 1408), config.udp_mtu);
     try std.testing.expectEqual(@as(u32, 64 * 1024), config.udp_term_length);
     try std.testing.expectEqual(@as(u32, 32 * 1024), config.udp_receiver_window_length);
+    try std.testing.expectEqual(memory_constants.default_send_buffer_entry_count, config.send_buffers_max_entries);
     try std.testing.expect(config.single_node_cluster);
 }
 
@@ -568,6 +569,21 @@ test "v2 udp transport properties are parsed" {
     try std.testing.expectEqual(@as(u32, 8), config.send_buffers_max_entries);
     try std.testing.expectEqualStrings("eth0", config.af_xdp_interface.?);
     try std.testing.expectEqual(@as(usize, 2), config.af_xdp_ports.len);
+}
+
+test "send buffer entry count is capped to supported stream table size" {
+    const content =
+        \\broker.node.id=1
+        \\broker.udp.local.host.port=127.0.0.1:9000
+        \\broker.send.buffers.max.entries=17
+        \\broker.send.buffers.max.total.bytes=17825792
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const loader = ConfigLoader.initForTesting(arena.allocator());
+
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(content));
 }
 
 test "windows-style line endings are handled" {

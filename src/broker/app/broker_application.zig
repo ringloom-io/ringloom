@@ -327,6 +327,8 @@ pub const BrokerApplication = struct {
                     self.config.fc_peer_send_counters_max_peers
                 else
                     0,
+                .send_buffer_entry_count = self.config.send_buffers_max_entries,
+                .send_buffer_capacity = self.config.send_buffers_default_size,
                 .counter_values_buffer_length = self.config.counter_values_buffer_size,
                 .counter_metadata_buffer_length = self.config.counter_metadata_buffer_size,
                 .error_log_buffer_length = self.config.error_log_buffer_size,

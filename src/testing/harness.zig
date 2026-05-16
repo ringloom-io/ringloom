@@ -80,9 +80,9 @@ pub const BrokerSpec = struct {
     udp_session_timeout_ms: u64 = 2_000,
     udp_nak_initial_delay_us: u32 = 50,
     udp_nak_retry_delay_us: u32 = 250,
-    send_buffers_max_entries: u32 = 256,
+    send_buffers_max_entries: u32 = 16,
     send_buffers_default_size: u32 = 1_048_576,
-    send_buffers_max_total_bytes: u64 = 256 * 1_048_576,
+    send_buffers_max_total_bytes: u64 = 16 * 1_048_576,
     af_xdp_interface: ?[]const u8 = null,
     af_xdp_ports: []const u16 = &.{},
     af_xdp_rx_queue: u32 = 0,
@@ -380,6 +380,7 @@ test "BrokerSpec has sensible defaults" {
     try std.testing.expectEqualStrings("backoff", spec.idle_strategy);
     try std.testing.expectEqual(@as(u32, 65_536), spec.control_buffer_size);
     try std.testing.expectEqual(@as(u32, 1_048_576), spec.messages_buffer_size);
+    try std.testing.expectEqual(@as(u32, 16), spec.send_buffers_max_entries);
 }
 
 test "ServiceSpec has sensible defaults" {

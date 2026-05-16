@@ -140,14 +140,52 @@ const LinuxPosixEndpoint = struct {
         self: *LinuxPosixEndpoint,
         batch: []const endpoint.OutboundPacket,
     ) EndpointError!usize {
-        var sent: usize = 0;
-        while (sent < batch.len) : (sent += 1) {
-            _ = self.send(batch[sent].bytes, batch[sent].destination) catch |err| switch (err) {
-                error.WouldBlock => if (sent == 0) return error.WouldBlock else return sent,
-                else => return err,
+        if (self.fd_value < 0) return error.SocketClosed;
+        if (batch.len == 0) return 0;
+
+        const packet_limit = @min(batch.len, endpoint.max_batch_packets);
+        var iovs: [endpoint.max_batch_packets]posix.iovec = undefined;
+        var messages: [endpoint.max_batch_packets]linux.mmsghdr = undefined;
+        var destinations: [endpoint.max_batch_packets]posix.sockaddr.in = undefined;
+
+        for (batch[0..packet_limit], 0..) |packet, i| {
+            if (packet.bytes.len > self.config.mtu or packet.bytes.len > endpoint.max_udp_payload) {
+                return error.MessageTooLarge;
+            }
+            destinations[i] = packet.destination.toSockaddr();
+            iovs[i] = .{
+                .base = @constCast(packet.bytes.ptr),
+                .len = packet.bytes.len,
+            };
+            messages[i] = .{
+                .hdr = .{
+                    .name = @ptrCast(&destinations[i]),
+                    .namelen = @sizeOf(posix.sockaddr.in),
+                    .iov = @ptrCast(&iovs[i]),
+                    .iovlen = 1,
+                    .control = null,
+                    .controllen = 0,
+                    .flags = 0,
+                },
+                .len = 0,
             };
         }
-        return sent;
+
+        const rc = linux.sendmmsg(
+            self.fd_value,
+            @ptrCast(&messages),
+            @intCast(packet_limit),
+            linux.MSG.DONTWAIT | linux.MSG.NOSIGNAL,
+        );
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .AGAIN => return error.WouldBlock,
+            .CONNREFUSED => return error.PeerUnreachable,
+            .MSGSIZE => return error.MessageTooLarge,
+            .ACCES => return error.PermissionDenied,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            else => |err| return posix.unexpectedErrno(err),
+        }
     }
 };
 

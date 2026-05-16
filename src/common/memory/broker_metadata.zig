@@ -82,6 +82,8 @@ pub const BrokerMetadataFile = struct {
     pub const FlowControlOptions = struct {
         fc_max_entries: u32 = 0,
         peer_send_max_peers: u32 = 0,
+        send_buffer_entry_count: u32 = constants.default_send_buffer_entry_count,
+        send_buffer_capacity: usize = 0,
         counter_values_buffer_length: usize = constants.default_counter_values_buffer_length,
         counter_metadata_buffer_length: usize = 0,
         error_log_buffer_length: usize = constants.default_error_log_buffer_length,
@@ -130,9 +132,17 @@ pub const BrokerMetadataFile = struct {
         // data capacity (must be power-of-two); we add the trailer here.
         const trailer = constants.ring_buffer_trailer_length;
         const ctrl_region = control_buffer_length + trailer;
-        const send_entry_count = constants.default_send_buffer_entry_count;
+        const send_entry_count = fc_options.send_buffer_entry_count;
+        if (send_entry_count == 0 or send_entry_count > constants.default_send_buffer_entry_count)
+            return error.InvalidSendBufferEntryCount;
+        const send_buffer_capacity = if (fc_options.send_buffer_capacity == 0)
+            messages_buffer_length
+        else
+            fc_options.send_buffer_capacity;
+        if (!constants.isPowerOfTwo(send_buffer_capacity))
+            return error.SendBufferNotPowerOfTwo;
         const send_directory_len = SendBufferDirectory.regionSize(send_entry_count);
-        const send_slot_len = SendBufferDirectory.slotLength(messages_buffer_length);
+        const send_slot_len = SendBufferDirectory.slotLength(send_buffer_capacity);
         const send_region_len = send_slot_len * @as(usize, send_entry_count);
 
         // Compute flow control region sizes.
@@ -193,7 +203,7 @@ pub const BrokerMetadataFile = struct {
             send_entry_count,
             send_region_offset,
             send_region_len,
-            messages_buffer_length,
+            send_buffer_capacity,
         ) catch return error.SendBufferDirectoryInitFailed;
 
         // Initialize FC regions if requested.
@@ -717,6 +727,36 @@ test "create broker metadata file and verify layout" {
 
     // Verify heartbeat was written.
     try testing.expect(file.loadHeartbeat() > 0);
+}
+
+test "create broker metadata honors send buffer geometry options" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(storage_path);
+
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
+
+    var file = try BrokerMetadataFile.createWithFlowControl(
+        storage_path,
+        "test-group",
+        43,
+        64 * 1024,
+        1024 * 1024,
+        .{
+            .send_buffer_entry_count = 4,
+            .send_buffer_capacity = 256 * 1024,
+        },
+    );
+    defer file.close();
+
+    try testing.expectEqual(@as(u32, 4), file.header.send_buffer_entry_count);
+    try testing.expectEqual(@as(u32, 4), file.send_buffer_directory.header.entry_count);
+    try testing.expectEqual(@as(u32, 256 * 1024), file.send_buffer_directory.header.destination_ring_capacity);
+    try testing.expectEqual(
+        SendBufferDirectory.slotLength(256 * 1024) * 4,
+        file.send_region.len,
+    );
 }
 
 test "incrementAndGetNextServiceId is atomic" {

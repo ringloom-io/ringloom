@@ -170,6 +170,10 @@ test "append single frame and scan it back" {
     const n = log.scan(1, 0, 256, &out);
     try std.testing.expectEqual(@as(u32, 1), n);
     try std.testing.expectEqualStrings("hello", out[0].payload);
+    try std.testing.expectEqual(
+        @intFromPtr(out[0].header) + protocol.DataHeader.encoded_length,
+        @intFromPtr(out[0].payload.ptr),
+    );
 }
 
 test "append fragments preserve message id and offsets" {

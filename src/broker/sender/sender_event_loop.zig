@@ -84,6 +84,7 @@ pub const SenderOptions = struct {
     setup_interval_ns: i64 = 500 * std.time.ns_per_ms,
     setup_retry_limit: u8 = 5,
     retransmit_linger_ns: i64 = 10 * std.time.ns_per_ms,
+    max_messages_per_destination_per_cycle: u32 = 2,
 };
 
 const PeerMap = struct {
@@ -344,9 +345,13 @@ pub const SenderEventLoop = struct {
             const ring_slice = directory.ringSliceForEntry(mapped, entry) catch continue;
             var ring = RingBuffer.init(ring_slice, false, null, null) catch continue;
 
+            const read_limit = @min(
+                limit - work_count,
+                self.options.max_messages_per_destination_per_cycle,
+            );
             tls_self = self;
             tls_destination_entry = entry;
-            const read_count = ring.read(onOutboundMessageThunk, 1);
+            const read_count = ring.read(onOutboundMessageThunk, read_limit);
             tls_destination_entry = null;
             tls_self = null;
 
@@ -442,8 +447,9 @@ pub const SenderEventLoop = struct {
         const stream = try self.ensureStreamForEntry(destination_entry);
         if (stream.setup_state != .confirmed) return error.PeerDisconnected;
 
-        if (entry) |dest| dest.subtractPending(@intCast(ringCost(payload.len)));
         const body = payload[MessageHeader.encoded_length..];
+        try self.preflightBodyFragments(stream, body.len);
+        if (entry) |dest| dest.subtractPending(@intCast(ringCost(payload.len)));
         if (self.benchmark_latency_tracing_enabled) {
             latency_trace.stampSenderDequeue(
                 @constCast(body),
@@ -451,6 +457,49 @@ pub const SenderEventLoop = struct {
             );
         }
         try self.sendBodyFragments(stream, peer, envelope.*, body);
+    }
+
+    fn preflightBodyFragments(self: *Self, stream: *StreamSender, body_len: usize) !void {
+        _ = self;
+        const max_payload: usize = stream.options.mtu - udp.DataHeader.encoded_length;
+        var simulated_position = stream.term_log.sender_position;
+        var offset: usize = 0;
+
+        while (offset < body_len or (body_len == 0 and offset == 0)) {
+            const term_offset: usize = @intCast(simulated_position % stream.options.term_length);
+            const term_remaining: usize = stream.options.term_length - term_offset;
+            if (term_remaining < udp.DataHeader.encoded_length) {
+                simulated_position += term_remaining;
+                continue;
+            }
+
+            const term_payload_capacity = term_remaining - udp.DataHeader.encoded_length;
+            const remaining = body_len - offset;
+            const chunk_len = if (body_len == 0)
+                0
+            else
+                @min(remaining, @min(max_payload, term_payload_capacity));
+            if (body_len != 0 and chunk_len == 0) {
+                simulated_position += term_remaining;
+                continue;
+            }
+
+            const frame_len = udp.DataHeader.encoded_length + chunk_len;
+            if (frame_len > stream.options.mtu) return error.FrameExceedsMtu;
+            simulated_position += udp.Position.alignFrameLength(frame_len);
+            if (body_len == 0) break;
+            offset += chunk_len;
+        }
+
+        if (simulated_position > stream.term_log.sender_limit) return error.SenderLimitReached;
+        if (!stream.congestion.canSend(
+            stream.acknowledged_position,
+            stream.term_log.sender_position,
+            @intCast(simulated_position - stream.term_log.sender_position),
+        )) return error.WouldBlock;
+        if (stream.acknowledged_position + @as(u64, stream.options.term_length) * 2 < simulated_position) {
+            return error.TermRotationBlocked;
+        }
     }
 
     fn sendBodyFragments(
@@ -463,6 +512,8 @@ pub const SenderEventLoop = struct {
         const max_payload = self.options.mtu - udp.DataHeader.encoded_length;
         var offset: usize = 0;
         const message_id = stream.term_log.sender_position;
+        var packet_batch: [8]udp.OutboundPacket = undefined;
+        var packet_count: usize = 0;
         while (offset < body.len or (body.len == 0 and offset == 0)) {
             const remaining = body.len - offset;
             const term_offset = stream.term_log.sender_position % stream.options.term_length;
@@ -499,25 +550,67 @@ pub const SenderEventLoop = struct {
                 .correlation_id = envelope.correlation_id,
             });
             const start_position = try stream.term_log.appendData(header, chunk);
-            try self.sendFromTerm(stream, peer, start_position, self.options.mtu);
-            stream.last_frame_sent_ns = Clock.monotonicNanos();
-            self.pending_send_count += 1;
-            self.counters.increment(self.counter_ids.frames_sent);
+            const frame = try self.scanFrameAt(stream, start_position, self.options.mtu);
+            const bytes = self.scannedFrameBytes(frame) catch {
+                try self.flushDataBatch(stream, peer, packet_batch[0..packet_count]);
+                packet_count = 0;
+                try self.sendScannedFrame(peer, frame);
+                stream.last_frame_sent_ns = Clock.monotonicNanos();
+                self.pending_send_count += 1;
+                self.counters.increment(self.counter_ids.frames_sent);
+                if (body.len == 0) break;
+                offset += chunk_len;
+                continue;
+            };
+            packet_batch[packet_count] = .{ .bytes = bytes, .destination = peer.address };
+            packet_count += 1;
+            if (packet_count == packet_batch.len) {
+                try self.flushDataBatch(stream, peer, packet_batch[0..packet_count]);
+                packet_count = 0;
+            }
             if (body.len == 0) break;
             offset += chunk_len;
         }
+        try self.flushDataBatch(stream, peer, packet_batch[0..packet_count]);
     }
 
     fn sendFromTerm(self: *Self, stream: *StreamSender, peer: *PeerSender, position: u64, max_length: u32) !void {
+        const frame = try self.scanFrameAt(stream, position, max_length);
+        try self.sendScannedFrame(peer, frame);
+    }
+
+    fn scanFrameAt(self: *Self, stream: *StreamSender, position: u64, max_length: u32) !udp.term_log.ScannedFrame {
+        _ = self;
         var out: [1]udp.term_log.ScannedFrame = undefined;
         const term_id = stream.initial_term_id + @as(i32, @intCast(position / stream.options.term_length));
         const term_offset: u32 = @intCast(position % stream.options.term_length);
         const count = stream.term_log.scan(term_id, term_offset, max_length, &out);
         if (count == 0) return error.TermFrameMissing;
-        try self.sendScannedFrame(peer, out[0]);
+        return out[0];
     }
 
     fn sendScannedFrame(self: *Self, peer: *PeerSender, frame: udp.term_log.ScannedFrame) !void {
+        const bytes = self.scannedFrameBytes(frame) catch |err| switch (err) {
+            error.NonContiguousFrame => return self.sendScannedFrameViaScratch(peer, frame),
+            else => return err,
+        };
+        try self.sendPacket(peer, bytes);
+    }
+
+    fn scannedFrameBytes(self: *Self, frame: udp.term_log.ScannedFrame) ![]const u8 {
+        _ = self;
+        const frame_len = frame.header.common.frame_length;
+        if (frame_len > udp.endpoint.max_udp_payload) return error.FrameTooLarge;
+        const header_addr = @intFromPtr(frame.header);
+        const expected_payload_addr = header_addr + udp.DataHeader.encoded_length;
+        if (frame.payload.len == 0 or @intFromPtr(frame.payload.ptr) == expected_payload_addr) {
+            const frame_bytes: [*]const u8 = @ptrCast(frame.header);
+            return frame_bytes[0..frame_len];
+        }
+        return error.NonContiguousFrame;
+    }
+
+    fn sendScannedFrameViaScratch(self: *Self, peer: *PeerSender, frame: udp.term_log.ScannedFrame) !void {
         const frame_len = frame.header.common.frame_length;
         if (frame_len > self.packet_buf.len) return error.FrameTooLarge;
         @memcpy(self.packet_buf[0..udp.DataHeader.encoded_length], std.mem.asBytes(frame.header));
@@ -525,6 +618,17 @@ pub const SenderEventLoop = struct {
             @memcpy(self.packet_buf[udp.DataHeader.encoded_length..][0..frame.payload.len], frame.payload);
         }
         try self.sendPacket(peer, self.packet_buf[0..frame_len]);
+    }
+
+    fn flushDataBatch(self: *Self, stream: *StreamSender, peer: *PeerSender, batch: []const udp.OutboundPacket) !void {
+        if (batch.len == 0) return;
+        const sent = try self.sendPacketBatch(peer, batch);
+        if (sent > 0) {
+            stream.last_frame_sent_ns = Clock.monotonicNanos();
+            self.pending_send_count += @intCast(sent);
+            self.counters.add(self.counter_ids.frames_sent, @intCast(sent));
+        }
+        if (sent < batch.len) return error.WouldBlock;
     }
 
     fn sendPacket(self: *Self, peer: *PeerSender, bytes: []const u8) !void {
@@ -542,6 +646,28 @@ pub const SenderEventLoop = struct {
         peer.last_send_ns = Clock.monotonicNanos();
         peer.total_bytes_sent += bytes.len;
         self.counters.add(self.counter_ids.bytes_sent, @intCast(bytes.len));
+    }
+
+    fn sendPacketBatch(self: *Self, peer: *PeerSender, batch: []const udp.OutboundPacket) !usize {
+        var endpoint = if (self.endpoint) |*ep| ep else return error.EndpointNotConfigured;
+        const sent = endpoint.sendBatch(batch) catch |err| switch (err) {
+            error.WouldBlock => {
+                self.counters.increment(self.counter_ids.endpoint_send_pressure);
+                return error.WouldBlock;
+            },
+            else => {
+                self.counters.increment(self.counter_ids.endpoint_send_errors);
+                return err;
+            },
+        };
+        if (sent > 0) {
+            peer.last_send_ns = Clock.monotonicNanos();
+            for (batch[0..sent]) |packet| {
+                peer.total_bytes_sent += packet.bytes.len;
+                self.counters.add(self.counter_ids.bytes_sent, @intCast(packet.bytes.len));
+            }
+        }
+        return sent;
     }
 
     fn sendSetupIfDue(self: *Self, stream: *StreamSender, entry: *const SendBufferEntry, now_ns: i64) void {
@@ -652,11 +778,30 @@ pub const SenderEventLoop = struct {
         for (&self.streams) |*maybe_stream| {
             if (maybe_stream.*) |*stream| {
                 const peer = self.peers.get(stream.target_node_id) orelse continue;
-                const count = stream.retransmitDue(now_ns, self.options.mtu, &frames);
+                const count: usize = stream.retransmitDue(now_ns, self.options.mtu, &frames);
+                if (count == 0) continue;
+                var packets: [4]udp.OutboundPacket = undefined;
+                var packet_count: usize = 0;
                 for (frames[0..count]) |frame| {
-                    self.sendScannedFrame(peer, frame) catch continue;
-                    self.counters.increment(self.counter_ids.retransmits_sent);
-                    work_count += 1;
+                    const bytes = self.scannedFrameBytes(frame) catch {
+                        if (packet_count > 0) {
+                            const sent = self.sendPacketBatch(peer, packets[0..packet_count]) catch 0;
+                            self.counters.add(self.counter_ids.retransmits_sent, @intCast(sent));
+                            work_count += @intCast(sent);
+                            packet_count = 0;
+                        }
+                        self.sendScannedFrame(peer, frame) catch continue;
+                        self.counters.increment(self.counter_ids.retransmits_sent);
+                        work_count += 1;
+                        continue;
+                    };
+                    packets[packet_count] = .{ .bytes = bytes, .destination = peer.address };
+                    packet_count += 1;
+                }
+                if (packet_count > 0) {
+                    const sent = self.sendPacketBatch(peer, packets[0..packet_count]) catch 0;
+                    self.counters.add(self.counter_ids.retransmits_sent, @intCast(sent));
+                    work_count += @intCast(sent);
                 }
             }
         }
@@ -668,7 +813,7 @@ pub const SenderEventLoop = struct {
             error.MalformedEnvelope => self.counters.increment(self.counter_ids.malformed_messages_dropped),
             error.UnknownPeer => self.counters.increment(self.counter_ids.unknown_peer_messages_dropped),
             error.PeerDisconnected, error.EndpointNotConfigured, error.NoDestinationEntry => self.counters.increment(self.counter_ids.peer_not_connected_drops),
-            error.SenderLimitReached, error.WouldBlock => self.counters.increment(self.counter_ids.send_back_pressure),
+            error.SenderLimitReached, error.WouldBlock, error.TermRotationBlocked => self.counters.increment(self.counter_ids.send_back_pressure),
             else => self.counters.increment(self.counter_ids.send_errors),
         }
         if (entry) |dest| {
@@ -682,6 +827,7 @@ pub const SenderEventLoop = struct {
         return switch (err) {
             error.SenderLimitReached => .flow_blocked,
             error.WouldBlock => .congested,
+            error.TermRotationBlocked => .term_blocked,
             error.PeerDisconnected, error.UnknownPeer, error.EndpointNotConfigured, error.NoDestinationEntry => .peer_down,
             else => .normal,
         };
@@ -826,4 +972,62 @@ test "onOutboundMessage drops malformed envelope" {
 
     sender.onOutboundMessage(constants.message_envelope_msg_type_id, "short");
     try testing.expectEqual(@as(i64, 1), counters.get(sender.counter_ids.malformed_messages_dropped));
+}
+
+test "preflight rejects whole message before advancing term log position" {
+    const allocator = testing.allocator;
+    const rb_capacity: usize = 1024;
+    const rb_buf_size = rb_capacity + constants.ring_buffer_trailer_length;
+    const rb_buf = try allocator.alignedAlloc(u8, .@"8", rb_buf_size);
+    defer allocator.free(rb_buf);
+    @memset(rb_buf, 0);
+    var rb = try RingBuffer.init(rb_buf, false, null, null);
+
+    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
+    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
+    var counters = createTestCounters(&values_buf, &meta_buf);
+
+    var sender = try SenderEventLoop.init(&rb, &counters, 1, allocator);
+    defer sender.deinit();
+
+    var stream = try StreamSender.init(allocator, 11, 2, 20, 7, 1, .{
+        .term_length = 1024,
+        .mtu = 256,
+        .initial_sender_limit = 512,
+        .congestion_window = 512,
+    });
+    defer stream.deinit(allocator);
+
+    try testing.expectError(error.SenderLimitReached, sender.preflightBodyFragments(&stream, 1000));
+    try testing.expectEqual(@as(u64, 0), stream.term_log.sender_position);
+}
+
+test "preflight accounts for term tail padding" {
+    const allocator = testing.allocator;
+    const rb_capacity: usize = 1024;
+    const rb_buf_size = rb_capacity + constants.ring_buffer_trailer_length;
+    const rb_buf = try allocator.alignedAlloc(u8, .@"8", rb_buf_size);
+    defer allocator.free(rb_buf);
+    @memset(rb_buf, 0);
+    var rb = try RingBuffer.init(rb_buf, false, null, null);
+
+    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
+    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
+    var counters = createTestCounters(&values_buf, &meta_buf);
+
+    var sender = try SenderEventLoop.init(&rb, &counters, 1, allocator);
+    defer sender.deinit();
+
+    var stream = try StreamSender.init(allocator, 11, 2, 20, 7, 1, .{
+        .term_length = 1024,
+        .mtu = 256,
+        .initial_sender_limit = 2048,
+        .congestion_window = 2048,
+    });
+    defer stream.deinit(allocator);
+    stream.term_log.sender_position = 1000;
+    stream.acknowledged_position = 1000;
+
+    try sender.preflightBodyFragments(&stream, 20);
+    try testing.expectEqual(@as(u64, 1000), stream.term_log.sender_position);
 }
