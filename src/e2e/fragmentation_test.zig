@@ -6,8 +6,8 @@ test "large messages are fragmented and reassembled correctly" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "fragmentation");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -43,8 +43,8 @@ test "very large messages beyond multiple fragment boundaries" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "fragmentation-large");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -80,8 +80,8 @@ test "mixed small and large messages are handled correctly" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "fragmentation-mixed");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);

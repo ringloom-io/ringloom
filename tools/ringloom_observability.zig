@@ -2,13 +2,14 @@
 //! ringloom-observability — Prometheus exporter for RingLoom metadata files.
 
 const std = @import("std");
-const net = @import("ringloom_tcp").socket;
 const ringloom_common = @import("ringloom_common");
 
 const memory = ringloom_common.memory;
 const platform = ringloom_common.platform;
+const net = platform.socket;
 const metadata_reader = ringloom_common.monitoring.metadata_reader;
 const prometheus = ringloom_common.monitoring.prometheus;
+const aeron_cnc_reader = ringloom_common.monitoring.aeron_cnc_reader;
 const ServiceCounter = ringloom_common.monitoring.ServiceCounter;
 const SystemCounter = ringloom_common.monitoring.SystemCounter;
 
@@ -135,6 +136,11 @@ fn renderMetrics(writer: *std.Io.Writer, args: Args, self_metrics: *SelfMetrics)
     try prometheus.writeHelpType(writer, "ringloom_ring_consumer_position", "Ring consumer position.", "gauge");
     try prometheus.writeHelpType(writer, "ringloom_ring_consumer_heartbeat_age_seconds", "Age of ring consumer heartbeat.", "gauge");
     try prometheus.writeHelpType(writer, "ringloom_counter", "Generic metadata counter by stored counter label.", "untyped");
+    try prometheus.writeHelpType(writer, "ringloom_aeron_driver_up", "Aeron CnC file parse and driver process liveness status.", "gauge");
+    try prometheus.writeHelpType(writer, "ringloom_aeron_driver_start_time_seconds", "Aeron media driver start timestamp.", "gauge");
+    try prometheus.writeHelpType(writer, "ringloom_aeron_cnc_version", "Aeron CnC semantic version.", "gauge");
+    try prometheus.writeHelpType(writer, "ringloom_aeron_client_liveness_timeout_seconds", "Aeron client liveness timeout.", "gauge");
+    try prometheus.writeHelpType(writer, "ringloom_aeron_counter", "Generic Aeron CnC counter by stored counter label.", "untyped");
 
     self_metrics.metadata_files = 0;
     const now_ms = platform.Clock.epochMillis();
@@ -173,7 +179,7 @@ fn renderMetrics(writer: *std.Io.Writer, args: Args, self_metrics: *SelfMetrics)
             if (args.broker_node_id) |wanted| {
                 if (node_id != wanted) continue;
             }
-                renderBroker(writer, args, node_id, now_ms, now_ns, self_metrics) catch {
+            renderBroker(writer, args, node_id, now_ms, now_ns, self_metrics) catch {
                 self_metrics.invalid_metadata_files_total += 1;
             };
         } else if (ServiceScanner.parseFileName(entry.name)) |parsed| {
@@ -203,12 +209,75 @@ fn renderBroker(writer: *std.Io.Writer, args: Args, node_id: i16, now_ms: i64, n
     try writer.print("ringloom_heartbeat_age_seconds{{group=\"{s}\",owner_type=\"broker\",node_id=\"{d}\",service_id=\"0\",service_name=\"broker\"}} {d:.3}\n", .{ args.group, node_id, metadata_reader.heartbeatAgeSeconds(now_ms, broker.loadHeartbeat()) });
     try writer.print("ringloom_process_start_time_seconds{{group=\"{s}\",owner_type=\"broker\",node_id=\"{d}\",service_id=\"0\",service_name=\"broker\"}} {d:.3}\n", .{ args.group, node_id, epochMillisToSeconds(broker.header.start_timestamp_ms) });
     try writer.print("ringloom_metadata_version{{group=\"{s}\",owner_type=\"broker\",node_id=\"{d}\",service_id=\"0\",service_name=\"broker\"}} {d}\n", .{ args.group, node_id, broker.loadMetadataMonitoringVersion() });
+    try renderAeronCnc(writer, args.group, node_id, metadata_reader.readBrokerAeron(broker.getAeronDiscovery()), self_metrics);
     try renderRing(writer, args.group, "broker", node_id, 0, "broker", "control", broker.getControlBuffer(), @intCast(broker.header.control_buffer_length), now_ms);
-    try renderRing(writer, args.group, "broker", node_id, 0, "broker", "send", broker.getSendBuffer(), @intCast(broker.header.messages_buffer_length), now_ms);
     try renderCounters(writer, args.group, "broker", node_id, 0, "broker", broker.getCounterValuesBuffer(), broker.getCounterMetadataBuffer());
     if (broker.getFlowControlRegion()) |region| try renderFlowControl(writer, args.group, node_id, region, now_ns);
-    if (broker.getPeerSendCountersRegion()) |region| try renderPeerCounters(writer, args.group, node_id, region, now_ns);
-    _ = self_metrics;
+}
+
+fn renderAeronCnc(
+    writer: *std.Io.Writer,
+    group: []const u8,
+    node_id: i16,
+    aeron: metadata_reader.BrokerAeronSample,
+    self_metrics: *SelfMetrics,
+) !void {
+    var cnc = aeron_cnc_reader.CncFile.open(platform.defaultIo(), aeron.aeron_directory) catch {
+        try writer.print("ringloom_aeron_driver_up{{group=\"{s}\",node_id=\"{d}\"}} 0\n", .{ group, node_id });
+        return;
+    };
+    defer cnc.close(platform.defaultIo());
+
+    const driver_up: u8 = if (cnc.metadata.driverAlive()) 1 else 0;
+    try writer.print("ringloom_aeron_driver_up{{group=\"{s}\",node_id=\"{d}\"}} {d}\n", .{ group, node_id, driver_up });
+    try writer.print("ringloom_aeron_driver_start_time_seconds{{group=\"{s}\",node_id=\"{d}\"}} {d:.3}\n", .{ group, node_id, cnc.metadata.startTimeSeconds() });
+    try writer.print("ringloom_aeron_cnc_version{{group=\"{s}\",node_id=\"{d}\"}} {d}\n", .{ group, node_id, cnc.metadata.cnc_version });
+    try writer.print("ringloom_aeron_client_liveness_timeout_seconds{{group=\"{s}\",node_id=\"{d}\"}} {d:.3}\n", .{ group, node_id, cnc.metadata.clientLivenessTimeoutSeconds() });
+
+    for (0..cnc.counterCapacity()) |id| {
+        const sample = cnc.readCounter(id) orelse continue;
+        try writer.print("ringloom_aeron_counter{{group=\"{s}\",node_id=\"{d}\",counter_id=\"{d}\",type_id=\"{d}\",counter=\"", .{ group, node_id, sample.id, sample.type_id });
+        try prometheus.writeLabelValue(writer, sample.label);
+        try writer.print("\"}} {d}\n", .{sample.value});
+
+        if (sample.systemCounter()) |counter| {
+            if (aeron_cnc_reader.systemMetricName(counter)) |metric| {
+                try writer.print("{s}{{group=\"{s}\",node_id=\"{d}\"}} {d}\n", .{ metric, group, node_id, sample.value });
+            }
+        }
+        if (sample.streamKey()) |stream_key| {
+            if (aeron_cnc_reader.streamMetricName(sample.type_id)) |metric| {
+                const kind = aeron_cnc_reader.channelKind(
+                    stream_key,
+                    aeron.broker_ingress_stream_id,
+                    aeron.admin_stream_base,
+                    aeron.data_stream_base,
+                );
+                try writer.print("{s}{{group=\"{s}\",node_id=\"{d}\",service_id=\"-1\",stream_id=\"{d}\",session_id=\"{d}\",channel_kind=\"{s}\",counter_id=\"{d}\"}} {d}\n", .{
+                    metric,
+                    group,
+                    node_id,
+                    stream_key.stream_id,
+                    stream_key.session_id,
+                    kind.label(),
+                    sample.id,
+                    sample.value,
+                });
+            }
+        } else if (aeron_cnc_reader.channelStatusMetricName(sample.type_id)) |metric| {
+            try writer.print("{s}{{group=\"{s}\",node_id=\"{d}\",service_id=\"-1\",counter_id=\"{d}\"}} {d}\n", .{
+                metric,
+                group,
+                node_id,
+                sample.id,
+                sample.value,
+            });
+        } else if (sample.type_id != aeron_cnc_reader.system_counter_type_id and
+            aeron_cnc_reader.isStreamPositionType(sample.type_id))
+        {
+            self_metrics.invalid_regions_total += 1;
+        }
+    }
 }
 
 fn renderService(writer: *std.Io.Writer, args: Args, parsed: ServiceScanner.ParsedFileName, now_ms: i64, self_metrics: *SelfMetrics) !void {
@@ -291,21 +360,6 @@ fn renderFlowControl(writer: *std.Io.Writer, group: []const u8, source_node_id: 
     }
 }
 
-fn renderPeerCounters(writer: *std.Io.Writer, group: []const u8, node_id: i16, region: memory.PeerSendCountersRegion, now_ns: i64) !void {
-    for (0..region.entry_count) |i| {
-        const entry = &region.entries[i];
-        if (entry.loadState() != 1) continue;
-        const connected: u8 = if (entry.loadConnectionState()) 1 else 0;
-        try writer.print("ringloom_broker_peer_connected{{group=\"{s}\",node_id=\"{d}\",peer_node_id=\"{d}\"}} {d}\n", .{ group, node_id, entry.node_id, connected });
-        try writer.print("ringloom_broker_peer_ring_pending_bytes{{group=\"{s}\",node_id=\"{d}\",peer_node_id=\"{d}\"}} {d}\n", .{ group, node_id, entry.node_id, entry.loadRingBytesPending() });
-        try writer.print("ringloom_broker_peer_queue_pending_bytes{{group=\"{s}\",node_id=\"{d}\",peer_node_id=\"{d}\"}} {d}\n", .{ group, node_id, entry.node_id, entry.loadQueueBytesPending() });
-        try writer.print("ringloom_broker_peer_queue_capacity_bytes{{group=\"{s}\",node_id=\"{d}\",peer_node_id=\"{d}\"}} {d}\n", .{ group, node_id, entry.node_id, entry.queue_capacity });
-        try writer.print("ringloom_broker_peer_bytes_sent_total{{group=\"{s}\",node_id=\"{d}\",peer_node_id=\"{d}\"}} {d}\n", .{ group, node_id, entry.node_id, entry.loadTotalBytesSent() });
-        try writer.print("ringloom_broker_peer_bytes_dropped_total{{group=\"{s}\",node_id=\"{d}\",peer_node_id=\"{d}\"}} {d}\n", .{ group, node_id, entry.node_id, entry.loadTotalBytesDropped() });
-        try writer.print("ringloom_broker_peer_counter_update_age_seconds{{group=\"{s}\",node_id=\"{d}\",peer_node_id=\"{d}\"}} {d:.3}\n", .{ group, node_id, entry.node_id, monotonicAgeSeconds(now_ns, @intCast(entry.loadLastUpdateNs())) });
-    }
-}
-
 fn renderDirectCounter(writer: *std.Io.Writer, group: []const u8, owner_type: []const u8, node_id: i16, service_id: i32, service_name: []const u8, sample: metadata_reader.CounterSample) !void {
     if (std.mem.eql(u8, owner_type, "broker")) {
         const metric = brokerDirectMetricName(sample) orelse return;
@@ -329,24 +383,27 @@ fn brokerDirectMetricName(sample: metadata_reader.CounterSample) ?[]const u8 {
         .bytes_received => "ringloom_broker_bytes_received_total",
         .messages_routed_local => "ringloom_broker_messages_routed_local_total",
         .messages_routed_remote => "ringloom_broker_messages_routed_remote_total",
-        .tcp_connections_accepted => "ringloom_broker_tcp_connections_accepted_total",
-        .tcp_connection_errors => "ringloom_broker_tcp_connection_errors_total",
-        .tcp_handshake_failures => "ringloom_broker_tcp_handshake_failures_total",
-        .tcp_reconnect_attempts => "ringloom_broker_tcp_reconnect_attempts_total",
+        .reserved_v1_transport_4,
+        .reserved_v1_transport_5,
+        .reserved_v1_transport_6,
+        .reserved_v1_transport_7,
+        .reserved_v1_transport_13,
+        .reserved_v1_transport_17,
+        .reserved_v1_transport_18,
+        .reserved_v1_transport_21,
+        .reserved_v1_transport_31,
+        .reserved_v1_transport_32,
+        => null,
         .heartbeats_sent => "ringloom_broker_heartbeats_sent_total",
         .heartbeats_received => "ringloom_broker_heartbeats_received_total",
         .heartbeat_timeouts => "ringloom_broker_heartbeat_timeouts_total",
         .services_registered => "ringloom_broker_services_registered_total",
         .services_removed => "ringloom_broker_services_removed_total",
-        .send_rb_back_pressure => "ringloom_broker_send_ring_backpressure_total",
         .service_back_pressure => "ringloom_broker_service_backpressure_total",
         .unknown_service_drops => "ringloom_broker_unknown_service_drops_total",
         .service_full_drops => "ringloom_broker_service_full_drops_total",
-        .peer_queue_overflow_drops => "ringloom_broker_peer_queue_overflow_drops_total",
-        .peer_not_connected_drops => "ringloom_broker_peer_not_connected_drops_total",
         .invalid_frames => "ringloom_broker_invalid_frames_total",
         .control_loop_cycle_time_max => "ringloom_broker_control_loop_cycle_time_max_ns",
-        .sender_cycle_time_max => "ringloom_broker_sender_cycle_time_max_ns",
         .receiver_cycle_time_max => "ringloom_broker_receiver_cycle_time_max_ns",
         .fc_updates_sent => "ringloom_broker_flow_control_updates_sent_total",
         .fc_updates_received => "ringloom_broker_flow_control_updates_received_total",
@@ -356,8 +413,6 @@ fn brokerDirectMetricName(sample: metadata_reader.CounterSample) ?[]const u8 {
         .fc_client_spin_timeouts => "ringloom_broker_flow_control_client_spin_timeouts_total",
         .fc_slot_allocations => "ringloom_broker_flow_control_slot_allocations_total",
         .fc_slot_reclamations => "ringloom_broker_flow_control_slot_reclamations_total",
-        .fc_peer_congestion_events => "ringloom_broker_flow_control_peer_congestion_events_total",
-        .fc_peer_disconnected_sends_avoided => "ringloom_broker_flow_control_peer_disconnected_sends_avoided_total",
     };
 }
 
@@ -368,13 +423,6 @@ fn brokerRuntimeMetricName(label: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, label, "send_back_pressure")) return "ringloom_broker_send_backpressure_total";
     if (std.mem.eql(u8, label, "malformed_messages_dropped")) return "ringloom_broker_malformed_messages_dropped_total";
     if (std.mem.eql(u8, label, "unknown_peer_messages_dropped")) return "ringloom_broker_unknown_peer_messages_dropped_total";
-    if (std.mem.eql(u8, label, "peer_not_connected_drops")) return "ringloom_broker_peer_not_connected_drops_total";
-    if (std.mem.eql(u8, label, "peer_queue_overflow_drops")) return "ringloom_broker_peer_queue_overflow_drops_total";
-    if (std.mem.eql(u8, label, "send_errors")) return "ringloom_broker_send_errors_total";
-    if (std.mem.eql(u8, label, "peers_connected")) return "ringloom_broker_peers_connected_total";
-    if (std.mem.eql(u8, label, "peers_disconnected")) return "ringloom_broker_peers_disconnected_total";
-    if (std.mem.eql(u8, label, "peers_timed_out")) return "ringloom_broker_peers_timed_out_total";
-    if (std.mem.eql(u8, label, "reconnect_attempts")) return "ringloom_broker_reconnect_attempts_total";
     if (std.mem.eql(u8, label, "recv_bytes_received")) return "ringloom_broker_bytes_received_total";
     if (std.mem.eql(u8, label, "recv_frames_routed")) return "ringloom_broker_frames_routed_total";
     if (std.mem.eql(u8, label, "recv_heartbeats_received")) return "ringloom_broker_heartbeats_received_total";
@@ -382,13 +430,36 @@ fn brokerRuntimeMetricName(label: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, label, "recv_service_full_drops")) return "ringloom_broker_service_full_drops_total";
     if (std.mem.eql(u8, label, "recv_invalid_frame_drops")) return "ringloom_broker_invalid_frame_drops_total";
     if (std.mem.eql(u8, label, "recv_unknown_peer_drops")) return "ringloom_broker_unknown_peer_drops_total";
-    if (std.mem.eql(u8, label, "recv_connections_accepted")) return "ringloom_broker_tcp_connections_accepted_total";
-    if (std.mem.eql(u8, label, "recv_handshake_failures")) return "ringloom_broker_tcp_handshake_failures_total";
-    if (std.mem.eql(u8, label, "recv_connection_errors")) return "ringloom_broker_tcp_connection_errors_total";
     if (std.mem.eql(u8, label, "recv_heartbeat_timeouts")) return "ringloom_broker_heartbeat_timeouts_total";
-    if (std.mem.eql(u8, label, "recv_peer_reconnects")) return "ringloom_broker_peer_reconnects_total";
     if (std.mem.eql(u8, label, "recv_admin_messages_received")) return "ringloom_broker_admin_messages_received_total";
     if (std.mem.eql(u8, label, "recv_admin_message_errors")) return "ringloom_broker_admin_message_errors_total";
+    if (std.mem.eql(u8, label, "recv_udp_misdirected_drops")) return "ringloom_broker_udp_misdirected_drops_total";
+    if (std.mem.eql(u8, label, "recv_admin_udp_invalid_frames")) return "ringloom_broker_admin_udp_invalid_frames_total";
+    if (std.mem.eql(u8, label, "recv_admin_udp_misdirected_drops")) return "ringloom_broker_admin_udp_misdirected_drops_total";
+    if (std.mem.eql(u8, label, "send_ingress_bytes_received")) return "ringloom_broker_send_ingress_bytes_received_total";
+    if (std.mem.eql(u8, label, "send_ingress_local_frames_routed")) return "ringloom_broker_send_ingress_local_frames_routed_total";
+    if (std.mem.eql(u8, label, "send_unknown_service_drops")) return "ringloom_broker_send_unknown_service_drops_total";
+    if (std.mem.eql(u8, label, "send_service_full_drops")) return "ringloom_broker_send_service_full_drops_total";
+    if (std.mem.eql(u8, label, "send_invalid_frame_drops")) return "ringloom_broker_send_invalid_frame_drops_total";
+    if (std.mem.eql(u8, label, "send_unknown_peer_drops")) return "ringloom_broker_send_unknown_peer_drops_total";
+    if (std.mem.eql(u8, label, "send_ingress_remote_pending_drops")) return "ringloom_broker_send_ingress_remote_pending_drops_total";
+    if (std.mem.eql(u8, label, "send_udp_frames_forwarded")) return "ringloom_broker_send_udp_frames_forwarded_total";
+    if (std.mem.eql(u8, label, "send_udp_bytes_forwarded")) return "ringloom_broker_send_udp_bytes_forwarded_total";
+    if (std.mem.eql(u8, label, "send_udp_forward_back_pressure")) return "ringloom_broker_send_udp_forward_back_pressure_total";
+    if (std.mem.eql(u8, label, "send_udp_forward_not_connected")) return "ringloom_broker_send_udp_forward_not_connected_total";
+    if (std.mem.eql(u8, label, "send_udp_forward_admin_action")) return "ringloom_broker_send_udp_forward_admin_action_total";
+    if (std.mem.eql(u8, label, "send_udp_forward_closed")) return "ringloom_broker_send_udp_forward_closed_total";
+    if (std.mem.eql(u8, label, "send_udp_forward_max_position_exceeded")) return "ringloom_broker_send_udp_forward_max_position_exceeded_total";
+    if (std.mem.eql(u8, label, "send_udp_forward_failed")) return "ringloom_broker_send_udp_forward_failed_total";
+    if (std.mem.eql(u8, label, "send_udp_forward_errors")) return "ringloom_broker_send_udp_forward_errors_total";
+    if (std.mem.eql(u8, label, "control_admin_udp_forwarded")) return "ringloom_broker_control_admin_udp_forwarded_total";
+    if (std.mem.eql(u8, label, "control_admin_udp_unknown_peer")) return "ringloom_broker_control_admin_udp_unknown_peer_total";
+    if (std.mem.eql(u8, label, "control_admin_udp_not_connected")) return "ringloom_broker_control_admin_udp_not_connected_total";
+    if (std.mem.eql(u8, label, "control_admin_udp_back_pressured")) return "ringloom_broker_control_admin_udp_back_pressured_total";
+    if (std.mem.eql(u8, label, "control_admin_udp_admin_action")) return "ringloom_broker_control_admin_udp_admin_action_total";
+    if (std.mem.eql(u8, label, "control_admin_udp_closed")) return "ringloom_broker_control_admin_udp_closed_total";
+    if (std.mem.eql(u8, label, "control_admin_udp_max_position_exceeded")) return "ringloom_broker_control_admin_udp_max_position_exceeded_total";
+    if (std.mem.eql(u8, label, "control_admin_udp_failed")) return "ringloom_broker_control_admin_udp_failed_total";
     return null;
 }
 
@@ -404,14 +475,20 @@ fn serviceDirectMetricName(sample: metadata_reader.CounterSample) ?[]const u8 {
         .send_buffer_full => "ringloom_service_send_buffer_full_total",
         .backpressure => "ringloom_service_backpressure_total",
         .backpressure_timeouts => "ringloom_service_backpressure_timeouts_total",
-        .peer_congestion => "ringloom_service_peer_congestion_total",
-        .peer_disconnected => "ringloom_service_peer_disconnected_total",
         .no_available_instance => "ringloom_service_no_available_instance_total",
         .control_messages_received => "ringloom_service_control_messages_received_total",
         .heartbeats_sent => "ringloom_service_heartbeats_sent_total",
         .registrations_sent => "ringloom_service_registrations_sent_total",
         .unregisters_sent => "ringloom_service_unregisters_sent_total",
         .subscriptions_sent => "ringloom_service_subscriptions_sent_total",
+        .remote_transport_unavailable => "ringloom_service_remote_transport_unavailable_total",
+        .aeron_remote_claimed => "ringloom_service_aeron_remote_claimed_total",
+        .aeron_remote_not_connected => "ringloom_service_aeron_remote_not_connected_total",
+        .aeron_remote_back_pressured => "ringloom_service_aeron_remote_back_pressured_total",
+        .aeron_remote_admin_action => "ringloom_service_aeron_remote_admin_action_total",
+        .aeron_remote_closed => "ringloom_service_aeron_remote_closed_total",
+        .aeron_remote_max_position_exceeded => "ringloom_service_aeron_remote_max_position_exceeded_total",
+        .aeron_remote_failed => "ringloom_service_aeron_remote_failed_total",
     };
 }
 
@@ -438,7 +515,8 @@ fn renderSelfMetrics(writer: *std.Io.Writer, group: []const u8, self_metrics: *c
 
 fn writeResponse(fd: std.posix.fd_t, status: []const u8, content_type: []const u8, body: []const u8) !void {
     var header_buf: [512]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buf,
+    const header = try std.fmt.bufPrint(
+        &header_buf,
         "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nCache-Control: no-cache\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
         .{ status, content_type, body.len },
     );

@@ -6,8 +6,8 @@ test "service discovery updates are delivered" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "discovery");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -46,8 +46,8 @@ test "late service registration triggers discovery notification" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "discovery-late-reg");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -97,8 +97,8 @@ test "service removal triggers discovery removal notification" {
     // Given — broker, echo, and forwarder are all running
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "discovery-removal");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);

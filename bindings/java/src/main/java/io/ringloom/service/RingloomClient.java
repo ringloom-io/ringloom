@@ -198,6 +198,16 @@ public final class RingloomClient implements AutoCloseable {
         return targetServices;
     }
 
+    public AeronPublicationStatus lastAeronSendStatus() {
+        ensureOpen();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outStatus = arena.allocate(ValueLayout.JAVA_INT);
+            int status = RingloomNative.clientLastAeronSendStatus(nativeHandle, outStatus);
+            RingloomNative.throwForStatus("ringloom_client_last_aeron_send_status", status);
+            return AeronPublicationStatus.fromNative(outStatus.get(ValueLayout.JAVA_INT, 0));
+        }
+    }
+
     /**
      * Registers a user lifecycle handler.
      *

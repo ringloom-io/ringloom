@@ -2,13 +2,12 @@
 //!
 //! This is the root source file for the `ringloom_common` library module.
 //! It re-exports all stable public APIs: platform abstractions, concurrent
-//! utilities, memory layout, message codecs, protocol definitions,
-//! monitoring primitives, and shared configuration helpers.
+//! utilities, memory layout, message codecs, monitoring primitives, and shared
+//! configuration helpers.
 
 pub const platform = @import("platform.zig");
 pub const memory = @import("memory.zig");
 pub const concurrent = @import("concurrent.zig");
-pub const protocol = @import("protocol.zig");
 pub const message = @import("message.zig");
 pub const monitoring = @import("monitoring.zig");
 
@@ -36,6 +35,7 @@ pub const Clock = platform.Clock;
 pub const MappedFile = platform.MappedFile;
 pub const ThreadRunner = platform.ThreadRunner;
 pub const EventLoop = platform.EventLoop;
+pub const CompositeEventLoop = platform.CompositeEventLoop;
 pub const IdleStrategy = platform.IdleStrategy;
 pub const ProcessSynchronizer = platform.ProcessSynchronizer;
 pub const WaitResult = platform.WaitResult;
@@ -63,14 +63,15 @@ comptime {
     _ = @import("platform/mapped_file.zig");
     _ = @import("platform/clock.zig");
     _ = @import("platform/thread.zig");
+    _ = @import("platform/composite_event_loop.zig");
     _ = @import("platform/process_sync.zig");
+    _ = @import("platform/socket.zig");
 
     // Memory layout layer
     _ = @import("memory/constants.zig");
     _ = @import("memory/broker_metadata.zig");
     _ = @import("memory/service_metadata.zig");
     _ = @import("memory/flow_control.zig");
-    _ = @import("memory/peer_send_counters.zig");
     _ = @import("memory/service_scanner.zig");
     _ = @import("memory/metadata_descriptor_provider.zig");
     _ = @import("memory/buffers_provider.zig");
@@ -82,11 +83,9 @@ comptime {
     _ = @import("concurrent/ring_buffer.zig");
     _ = @import("concurrent/command_queue.zig");
 
-    // Protocol layer
-    _ = @import("protocol/frame_parser.zig");
-
     // Message layer
     _ = @import("message/message_header.zig");
+    _ = @import("message/data_header.zig");
     _ = @import("message/control_encoding.zig");
     _ = @import("message/message_fragmenting_producer.zig");
     _ = @import("message/message_assembler.zig");
@@ -113,7 +112,6 @@ test "common module compiles" {
     _ = platform;
     _ = memory;
     _ = concurrent;
-    _ = protocol;
     _ = message;
     _ = config;
     _ = monitoring;

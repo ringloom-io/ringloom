@@ -85,15 +85,29 @@ std::string createWorkspace() {
 
 class TestBroker {
 public:
-    TestBroker(std::string repo_root, std::string workspace)
-        : repo_root_(std::move(repo_root)), workspace_(std::move(workspace)) {
+    TestBroker(
+        std::string repo_root,
+        std::string workspace,
+        int node_id = 1,
+        int port = 19001,
+        std::string group = "ringloom-java-test",
+        std::vector<std::string> peers = {})
+        : repo_root_(std::move(repo_root)),
+          workspace_(std::move(workspace)),
+          node_id_(node_id) {
         const std::string broker_bin = getenvOr(
             "RINGLOOM_BROKER_BIN",
             repo_root_ + "/zig-out/bin/ringloom-broker");
-        const std::string command =
+        std::string command =
             "bash " + shellQuote(repo_root_ + "/scripts/start-test-broker.sh") +
             " --workspace " + shellQuote(workspace_) +
+            " --node-id " + std::to_string(node_id_) +
+            " --port " + std::to_string(port) +
+            " --group " + shellQuote(group) +
             " --daemon --bin-dir " + shellQuote(std::filesystem::path(broker_bin).parent_path().string());
+        for (const std::string &peer : peers) {
+            command += " --peer " + shellQuote(peer);
+        }
         env_ = parseEnv(runCommandCapture(command));
     }
 
@@ -116,6 +130,10 @@ public:
         return env_.at("RINGLOOM_GROUP");
     }
 
+    int nodeId() const {
+        return node_id_;
+    }
+
     void stop() {
         if (closed_) {
             return;
@@ -125,6 +143,7 @@ public:
         const std::string command =
             "bash " + shellQuote(repo_root_ + "/scripts/start-test-broker.sh") +
             " --workspace " + shellQuote(workspace_) +
+            " --node-id " + std::to_string(node_id_) +
             " --stop";
         static_cast<void>(runCommandCapture(command));
     }
@@ -132,6 +151,7 @@ public:
 private:
     std::string repo_root_;
     std::string workspace_;
+    int node_id_;
     std::unordered_map<std::string, std::string> env_;
     bool closed_ = false;
 };
@@ -140,7 +160,7 @@ ringloom::ServiceConfig serviceConfig(const std::string &service_name, const Tes
     ringloom::ServiceConfig config = ringloom::ServiceConfig::of(service_name);
     config.storage_path = broker.storagePath();
     config.group = broker.group();
-    config.broker_node_id = 1;
+    config.broker_node_id = static_cast<std::int16_t>(broker.nodeId());
     config.heartbeat_timeout_ms = 10'000;
     config.control_buffer_length = 65'536;
     config.messages_buffer_length = 1'048'576;
@@ -172,6 +192,11 @@ void testLocalIpc() {
         auto ping = ringloom::Service::start(serviceConfig("cpp-ping", broker));
         auto client = ping.createClient("cpp-echo");
         ringloom::BufferClaim claim;
+
+        require(!ping.aeronDirectory().empty(), "expected Aeron directory diagnostic");
+        require(ping.aeronInboundStreamId() == 0, "local/direct-UDP path no longer uses broker ingress stream ids");
+        require(client.lastAeronSendStatus() == ringloom::AeronPublicationStatus::unknown, "unexpected initial Aeron status");
+        static_cast<void>(ping.publicationConnected());
 
         const std::string payload = "hello";
         bool sent = false;
@@ -232,12 +257,136 @@ void testLocalIpc() {
     }
 }
 
+void pollBoth(ringloom::Service &first, ringloom::Service &second) {
+    static_cast<void>(first.pollControl());
+    static_cast<void>(second.pollControl());
+}
+
+ringloom::TargetService waitForRemoteTarget(
+    ringloom::Service &ping,
+    ringloom::Service &echo,
+    ringloom::Client &client,
+    std::int16_t target_node_id) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        pollBoth(ping, echo);
+        client.refreshTargetServices();
+        const auto targets = client.targetServices();
+        const auto it = std::find_if(targets.begin(), targets.end(), [&](const ringloom::TargetService &target) {
+            return target.target_node_id == target_node_id;
+        });
+        if (it != targets.end()) {
+            return *it;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    throw std::runtime_error("timed out waiting for remote target discovery");
+}
+
+ringloom::Message waitForMessage(ringloom::MessageConsumer &consumer, std::string &payload_copy) {
+    ringloom::Message captured;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (payload_copy.empty() && std::chrono::steady_clock::now() < deadline) {
+        const int work = consumer.poll([&](const ringloom::Message &message) {
+            captured = message;
+            payload_copy = message.payloadString();
+        });
+        if (work < 0) {
+            throw ringloom::RingloomError("ringloom_message_consumer_poll", consumer.lastStatus());
+        }
+        if (work == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+    require(!payload_copy.empty(), "timed out waiting for remote payload");
+    return captured;
+}
+
+void testRemoteAeron() {
+    const std::string repo_root = getenvOr("RINGLOOM_PROJECT_ROOT", std::filesystem::current_path().string());
+    const std::string workspace = createWorkspace();
+    bool success = false;
+
+    try {
+        TestBroker broker_a(
+            repo_root,
+            workspace,
+            1,
+            19301,
+            "ringloom-cpp-remote",
+            {"2@127.0.0.1:19302"});
+        TestBroker broker_b(
+            repo_root,
+            workspace,
+            2,
+            19302,
+            "ringloom-cpp-remote",
+            {"1@127.0.0.1:19301"});
+
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+
+        auto echo = ringloom::Service::start(serviceConfig("cpp-remote-echo", broker_b));
+        auto consumer = echo.messageConsumer();
+        auto ping = ringloom::Service::start(serviceConfig("cpp-remote-ping", broker_a));
+        auto client = ping.createClient("cpp-remote-echo");
+        ringloom::BufferClaim claim;
+
+        const auto target = waitForRemoteTarget(ping, echo, client, 2);
+        const std::string payload = "remote";
+        bool sent = false;
+        const auto send_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < send_deadline) {
+            const ringloom::Status status = client.tryClaimTo(
+                target.target_node_id,
+                target.target_service_id,
+                77,
+                payload.size(),
+                claim);
+            if (status == ringloom::Status::ok) {
+                std::memcpy(claim.payload(), payload.data(), payload.size());
+                require(claim.commit() == ringloom::Status::ok, "remote claim commit failed");
+                sent = true;
+                break;
+            }
+            if (status != ringloom::Status::no_available_instance &&
+                status != ringloom::Status::backpressure &&
+                status != ringloom::Status::peer_disconnected) {
+                throw ringloom::RingloomError("ringloom_client_try_claim_to", status);
+            }
+            pollBoth(ping, echo);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        require(sent, "remote claim was not committed before deadline");
+        require(client.lastAeronSendStatus() == ringloom::AeronPublicationStatus::claimed, "unexpected last Aeron status");
+
+        std::string received;
+        const ringloom::Message message = waitForMessage(consumer, received);
+        require(received == "remote", "did not receive expected remote payload");
+        require(message.template_id == 77, "did not receive expected remote template id");
+        require(message.source_node_id == 1, "unexpected remote source node");
+        require(message.target_node_id == 2, "unexpected remote target node");
+
+        success = true;
+        broker_b.stop();
+        broker_a.stop();
+    } catch (...) {
+        std::cerr << "Preserving RingLoom C++ workspace: " << workspace << '\n';
+        throw;
+    }
+
+    if (success) {
+        std::filesystem::remove_all(workspace);
+    }
+}
+
 } // namespace
 
 int main() {
     try {
         testAbiBasics();
         testLocalIpc();
+        testRemoteAeron();
         std::cout << "C++ binding tests passed\n";
         return 0;
     } catch (const std::exception &ex) {

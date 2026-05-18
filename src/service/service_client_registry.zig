@@ -9,6 +9,7 @@ const IpcProducer = @import("ipc/ipc_producer.zig").IpcProducer;
 const ringloom_common = @import("ringloom_common");
 const memory = ringloom_common.memory;
 const control_encoding = ringloom_common.message.control_encoding;
+const ServiceAeronRuntime = @import("aeron_runtime.zig").ServiceAeronRuntime;
 
 const BuffersProvider = memory.BuffersProvider;
 const BrokerMetadataFile = memory.BrokerMetadataFile;
@@ -18,6 +19,7 @@ pub const ServiceClientRegistry = struct {
     clients: std.StringHashMap(*ServiceClient),
     allocator: std.mem.Allocator,
     broker_meta: ?*BrokerMetadataFile,
+    aeron_runtime: ?*ServiceAeronRuntime,
     local_node_id: i16,
     local_service_id: i32,
     storage_path: []const u8,
@@ -29,6 +31,7 @@ pub const ServiceClientRegistry = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         broker_meta: ?*BrokerMetadataFile,
+        aeron_runtime: ?*ServiceAeronRuntime,
         local_node_id: i16,
         local_service_id: i32,
         storage_path: []const u8,
@@ -39,6 +42,7 @@ pub const ServiceClientRegistry = struct {
             .clients = std.StringHashMap(*ServiceClient).init(allocator),
             .allocator = allocator,
             .broker_meta = broker_meta,
+            .aeron_runtime = aeron_runtime,
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
             .storage_path = storage_path,
@@ -63,6 +67,7 @@ pub const ServiceClientRegistry = struct {
             self.allocator,
             owned_service_name,
             self.broker_meta,
+            self.aeron_runtime,
             self.local_node_id,
             self.local_service_id,
             self.service_counters,

@@ -6,8 +6,8 @@ test "cross-broker routing works" {
     // Given — two brokers peered together
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "cross-broker");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker_a = try harness.startBroker(.{
         .node_id = 1,
@@ -56,8 +56,8 @@ test "same service name can register on multiple broker nodes" {
     // Given — two brokers share the same storage group.
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "cross-broker-duplicate-name");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker_a = try harness.startBroker(.{
         .node_id = 1,
@@ -103,8 +103,8 @@ test "cross-broker routing with late broker join" {
     // Given — broker A starts alone
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "cross-broker-late-join");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker_a = try harness.startBroker(.{
         .node_id = 1,
@@ -155,8 +155,8 @@ test "cross-broker routing with three brokers" {
     // Given — three brokers in a fully-meshed cluster
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "cross-broker-three");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker_a = try harness.startBroker(.{
         .node_id = 1,

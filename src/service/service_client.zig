@@ -8,15 +8,16 @@ const std = @import("std");
 const ringloom_common = @import("ringloom_common");
 const IpcProducer = @import("ipc/ipc_producer.zig").IpcProducer;
 const ServiceInstance = @import("service_instance.zig").ServiceInstance;
+const ServiceAeronRuntime = @import("aeron_runtime.zig").ServiceAeronRuntime;
 const load_balancer = @import("load_balancer.zig");
 const message_header = ringloom_common.message.message_header;
+const data_header = ringloom_common.message.data_header;
+const ringloom_aeron = @import("ringloom_aeron");
 const memory = ringloom_common.memory;
 const constants = ringloom_common.memory.constants;
 const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const FlowControlRegion = memory.FlowControlRegion;
 const FlowControlEntry = memory.FlowControlEntry;
-const PeerSendCountersRegion = memory.PeerSendCountersRegion;
-const PeerEntry = memory.PeerEntry;
 const fc_config_mod = @import("flow_control_config.zig");
 const FlowControlConfig = fc_config_mod.FlowControlConfig;
 const BackpressureStrategy = fc_config_mod.BackpressureStrategy;
@@ -24,8 +25,6 @@ const Clock = ringloom_common.platform.Clock;
 const ServiceCounters = ringloom_common.monitoring.ServiceCounters;
 const ServiceCounter = ringloom_common.monitoring.ServiceCounter;
 
-const frame_parser = ringloom_common.protocol.frame_parser;
-const TcpFrameHeader = frame_parser.TcpFrameHeader;
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const MessageHeader = message_header.MessageHeader;
 
@@ -54,6 +53,24 @@ pub const ServiceClient = struct {
         event: LifecycleEvent,
     ) void;
 
+    pub const RemotePublicationStatus = enum(u8) {
+        unknown,
+        claimed,
+        not_connected,
+        back_pressured,
+        admin_action,
+        closed,
+        max_position_exceeded,
+        failed,
+    };
+
+    pub const RemotePublicationHealth = struct {
+        configured: bool,
+        direct_peer_count: usize = 0,
+        last_status: RemotePublicationStatus,
+        last_status_ns: i64,
+    };
+
     service_name: []const u8,
     instances: std.ArrayList(ServiceInstance),
     instances_lock: std.atomic.Mutex = .unlocked,
@@ -65,7 +82,7 @@ pub const ServiceClient = struct {
 
     /// IPC context — set during RingLoomEngine initialization.
     broker_meta: ?*BrokerMetadataFile,
-    broker_send_ring_buffer: ?RingBuffer = null,
+    aeron_runtime: ?*ServiceAeronRuntime = null,
     local_node_id: i16,
     local_service_id: i32,
     service_counters: ?*ServiceCounters = null,
@@ -76,8 +93,10 @@ pub const ServiceClient = struct {
     /// Cached pointer to the flow control counters region (null if FC disabled).
     fc_region: ?FlowControlRegion = null,
 
-    /// Cached pointer to the per-peer send counters region (null if disabled).
-    peer_send_counters: ?PeerSendCountersRegion = null,
+    /// Last observed direct Aeron remote publication state.
+    remote_publication_status: RemotePublicationStatus = .unknown,
+    remote_publication_status_ns: i64 = 0,
+    remote_frame_scratch: ?[]u8 = null,
 
     const Self = @This();
 
@@ -85,25 +104,33 @@ pub const ServiceClient = struct {
         NoAvailableInstance,
         ProducerNotInitialized,
         SendBufferFull,
+        RemoteTransportUnavailable,
         NoLeaderAvailable,
         BackPressure,
         BackPressureTimeout,
-        PeerCongested,
-        PeerDisconnected,
+        OutOfMemory,
     } || RingBuffer.WriteError;
 
+    const ClaimStorage = union(enum) {
+        local: RingBuffer.Claim,
+        remote: ringloom_aeron.BufferClaim,
+    };
+
     pub const SendClaim = struct {
-        claim: RingBuffer.Claim,
+        claim: ClaimStorage,
         payload: []u8,
-        peer_counter_entry: ?*volatile PeerEntry = null,
-        peer_ring_cost: u64 = 0,
         service_counters: ?*ServiceCounters = null,
         logical_payload_len: usize = 0,
 
         pub fn commit(self: *SendClaim) void {
-            self.claim.commit();
-            if (self.peer_counter_entry) |entry| {
-                entry.addRingBytesPending(self.peer_ring_cost);
+            switch (self.claim) {
+                .local => |*claim| claim.commit(),
+                .remote => |*claim| claim.commit() catch {
+                    if (self.service_counters) |counters| {
+                        counters.increment(.remote_transport_unavailable);
+                    }
+                    return;
+                },
             }
             if (self.service_counters) |counters| {
                 counters.increment(.messages_sent);
@@ -112,7 +139,10 @@ pub const ServiceClient = struct {
         }
 
         pub fn abort(self: *SendClaim) void {
-            self.claim.abort();
+            switch (self.claim) {
+                .local => |*claim| claim.abort(),
+                .remote => |*claim| claim.abort() catch {},
+            }
         }
     };
 
@@ -120,6 +150,7 @@ pub const ServiceClient = struct {
         allocator: std.mem.Allocator,
         service_name: []const u8,
         broker_meta: ?*BrokerMetadataFile,
+        aeron_runtime: ?*ServiceAeronRuntime,
         local_node_id: i16,
         local_service_id: i32,
         service_counters: ?*ServiceCounters,
@@ -130,12 +161,11 @@ pub const ServiceClient = struct {
             .allocator = allocator,
             .balancer = .{ .round_robin = .{} },
             .broker_meta = broker_meta,
-            .broker_send_ring_buffer = initBrokerSendRingBuffer(broker_meta),
+            .aeron_runtime = aeron_runtime,
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
             .service_counters = service_counters,
             .fc_region = initFlowControlRegion(broker_meta),
-            .peer_send_counters = initPeerSendCountersRegion(broker_meta),
         };
     }
 
@@ -144,11 +174,11 @@ pub const ServiceClient = struct {
         allocator: std.mem.Allocator,
         service_name: []const u8,
         broker_meta: ?*BrokerMetadataFile,
+        aeron_runtime: ?*ServiceAeronRuntime,
         local_node_id: i16,
         local_service_id: i32,
         fc_config: FlowControlConfig,
         fc_region: ?FlowControlRegion,
-        peer_send_counters_region: ?PeerSendCountersRegion,
         service_counters: ?*ServiceCounters,
     ) Self {
         return .{
@@ -157,13 +187,12 @@ pub const ServiceClient = struct {
             .allocator = allocator,
             .balancer = .{ .round_robin = .{} },
             .broker_meta = broker_meta,
-            .broker_send_ring_buffer = initBrokerSendRingBuffer(broker_meta),
+            .aeron_runtime = aeron_runtime,
             .local_node_id = local_node_id,
             .local_service_id = local_service_id,
             .service_counters = service_counters,
             .fc_config = fc_config,
             .fc_region = fc_region,
-            .peer_send_counters = peer_send_counters_region,
         };
     }
 
@@ -519,6 +548,9 @@ pub const ServiceClient = struct {
             }
         }
         self.instances.deinit(self.allocator);
+        if (self.remote_frame_scratch) |scratch| {
+            self.allocator.free(scratch);
+        }
         if (self.owns_service_name) {
             self.allocator.free(self.service_name);
         }
@@ -557,31 +589,34 @@ pub const ServiceClient = struct {
         return self.readFcCounter(instance);
     }
 
-    /// Returns the estimated remaining bytes in the broker's send ring buffer.
+    /// Retained for legacy callers; v2 remote sends use Aeron publication flow control.
     pub fn sendBufferRemaining(self: *const Self) usize {
-        if (self.broker_send_ring_buffer) |send_rb| {
-            var ring = send_rb;
-            return ring.getCapacity() - ring.size();
-        }
+        _ = self;
         return 0;
     }
 
-    /// Returns the total bytes pending in the outbound pipeline for a specific peer.
-    /// Returns null if per-peer counters are disabled or the peer is not found.
-    pub fn peerSendPending(self: *const Self, node_id: i16) ?u64 {
-        const region = self.peer_send_counters orelse return null;
-        const entry = region.findPeer(node_id) orelse return null;
-        const ring_pending = @atomicLoad(u64, &entry.ring_bytes_pending, .acquire);
-        const queue_pending = @atomicLoad(u64, &entry.queue_bytes_pending, .acquire);
-        return ring_pending + queue_pending;
+    /// Progress service-side Aeron client work for single-threaded tools that
+    /// are about to send bursts without otherwise touching the publication.
+    pub fn pollTransport(self: *Self) void {
+        const runtime = self.aeron_runtime orelse return;
+        self.driveRemoteRuntime(runtime) catch {};
     }
 
-    /// Returns true if the peer broker is currently connected.
-    /// Returns null if per-peer counters are disabled or the peer is not found.
-    pub fn isPeerConnected(self: *const Self, node_id: i16) ?bool {
-        const region = self.peer_send_counters orelse return null;
-        const entry = region.findPeer(node_id) orelse return null;
-        return @atomicLoad(u8, &entry.connection_state, .acquire) == 1;
+    /// Returns the last observed state of the remote Aeron publication path.
+    pub fn remotePublicationHealth(self: *const Self) RemotePublicationHealth {
+        const runtime = self.aeron_runtime orelse {
+            return .{
+                .configured = false,
+                .last_status = .unknown,
+                .last_status_ns = 0,
+            };
+        };
+        return .{
+            .configured = true,
+            .direct_peer_count = runtime.directPeerCount(),
+            .last_status = self.remote_publication_status,
+            .last_status_ns = self.remote_publication_status_ns,
+        };
     }
 
     // ── Internal: Flow Control ───────────────────────────────────────
@@ -598,38 +633,17 @@ pub const ServiceClient = struct {
             }
         }
 
-        // Paths 2/4/5: Only apply to remote instances.
+        // Remote instances use the remote service capacity advisory counter here.
+        // Aeron remote publication pressure is authoritative only when tryClaim()
+        // returns a publication status in tryClaimRemoteService().
         if (instance.node_id != self.local_node_id) {
-            const send_cost = conservativeRingCost(TcpFrameHeader.size + payload_len);
-
-            // Path 5: Peer connectivity (cheapest — single byte read).
-            if (self.fc_config.check_peer_connectivity) {
-                if (self.isPeerConnected(instance.node_id)) |connected| {
-                    if (!connected) return error.PeerDisconnected;
-                }
-            }
-
-            // Path 4: Per-peer send congestion (two u64 reads).
-            if (self.fc_config.per_peer_pending_threshold > 0) {
-                if (self.peerSendPending(instance.node_id)) |pending| {
-                    if (pending + send_cost > self.fc_config.per_peer_pending_threshold) {
-                        try self.applyStrategy(.peer_congestion, 0, send_cost, instance);
-                    }
-                }
-            }
-
-            // Path 2: Global send ring buffer remaining.
-            const send_remaining = self.sendBufferRemaining();
-            if (send_remaining < send_cost) {
-                try self.applyStrategy(.send_buffer, send_remaining, send_cost, instance);
-            }
+            if (self.aeron_runtime == null)
+                return error.RemoteTransportUnavailable;
         }
     }
 
     const BackpressurePath = enum {
         target_buffer,
-        send_buffer,
-        peer_congestion,
     };
 
     /// Apply the configured backpressure strategy.
@@ -641,10 +655,7 @@ pub const ServiceClient = struct {
         instance: *const ServiceInstance,
     ) SendError!void {
         switch (self.fc_config.strategy) {
-            .drop => switch (path) {
-                .peer_congestion => return error.PeerCongested,
-                else => return error.BackPressure,
-            },
+            .drop => return error.BackPressure,
             .spin => try self.spinUntilCapacity(path, remaining, required, instance),
         }
     }
@@ -685,13 +696,6 @@ pub const ServiceClient = struct {
                 remaining >= @max(required, self.fc_config.min_remaining_bytes)
             else
                 true,
-            .send_buffer => self.sendBufferRemaining() >= required,
-            .peer_congestion => blk: {
-                const threshold = self.fc_config.per_peer_pending_threshold;
-                if (threshold == 0) break :blk true;
-                const pending = self.peerSendPending(instance.node_id) orelse break :blk true;
-                break :blk pending + required <= threshold;
-            },
         };
     }
 
@@ -787,6 +791,16 @@ pub const ServiceClient = struct {
         payload: []const u8,
         envelope_local: bool,
     ) SendError!void {
+        if (instance.node_id != self.local_node_id) {
+            return self.sendToRemoteService(
+                instance.node_id,
+                instance.service_id,
+                template_id,
+                correlation_id,
+                payload,
+            );
+        }
+
         var send_claim = try self.tryClaimToInstance(
             instance,
             template_id,
@@ -808,21 +822,67 @@ pub const ServiceClient = struct {
         correlation_id: i64,
         payload: []const u8,
     ) SendError!void {
-        var send_claim = try self.tryClaimRemoteService(
+        const runtime = self.aeron_runtime orelse {
+            self.recordSendError(error.RemoteTransportUnavailable);
+            return error.RemoteTransportUnavailable;
+        };
+        const total_len = data_header.RingLoomDataHeader.encoded_length + payload.len;
+        if (payload.len > std.math.maxInt(u32)) return error.MessageTooLong;
+
+        const fields = self.remoteDataFields(
             target_node_id,
             target_service_id,
             template_id,
             correlation_id,
             payload.len,
-        );
+        ) catch |err| return mapDataHeaderError(err);
 
-        // Copy the application payload immediately after the TCP frame header.
-        if (payload.len > 0) {
-            @memcpy(send_claim.payload, payload);
+        if (total_len <= runtime.maxPayloadLengthForNode(target_node_id)) {
+            var claim = try self.claimRemoteDirect(runtime, target_node_id, total_len);
+            errdefer claim.abort() catch {};
+            const claimed = claim.bytes();
+            data_header.encodeHeader(
+                claimed[0..data_header.RingLoomDataHeader.encoded_length],
+                fields,
+                payload.len,
+            ) catch |err| return mapDataHeaderError(err);
+            if (payload.len > 0) {
+                @memcpy(claimed[data_header.RingLoomDataHeader.encoded_length..][0..payload.len], payload);
+            }
+            claim.commit() catch {
+                self.recordSendError(error.RemoteTransportUnavailable);
+                return error.RemoteTransportUnavailable;
+            };
+            self.recordSend(payload.len);
+            return;
         }
 
-        // Commit — makes the message visible to the broker's sender event loop.
-        send_claim.commit();
+        const frame = try self.ensureRemoteFrameScratch(total_len);
+        data_header.encodeHeader(
+            frame[0..data_header.RingLoomDataHeader.encoded_length],
+            fields,
+            payload.len,
+        ) catch |err| return mapDataHeaderError(err);
+
+        if (payload.len > 0) {
+            @memcpy(frame[data_header.RingLoomDataHeader.encoded_length..], payload);
+        }
+
+        try self.offerRemoteDirect(runtime, target_node_id, frame);
+        self.recordSend(payload.len);
+    }
+
+    fn ensureRemoteFrameScratch(self: *Self, total_len: usize) SendError![]u8 {
+        if (self.remote_frame_scratch) |scratch| {
+            if (scratch.len >= total_len) return scratch[0..total_len];
+            const resized = try self.allocator.realloc(scratch, total_len);
+            self.remote_frame_scratch = resized;
+            return resized;
+        }
+
+        const scratch = try self.allocator.alloc(u8, total_len);
+        self.remote_frame_scratch = scratch;
+        return scratch;
     }
 
     fn tryClaimToInstance(
@@ -858,7 +918,7 @@ pub const ServiceClient = struct {
                     return error.SendBufferFull;
                 };
             return .{
-                .claim = claim,
+                .claim = .{ .local = claim },
                 .payload = claim.buffer,
                 .service_counters = self.service_counters,
                 .logical_payload_len = payload_len,
@@ -905,7 +965,7 @@ pub const ServiceClient = struct {
         });
 
         return .{
-            .claim = claim,
+            .claim = .{ .local = claim },
             .payload = claim.buffer[MessageHeader.encoded_length..][0..payload_len],
             .service_counters = self.service_counters,
             .logical_payload_len = payload_len,
@@ -920,39 +980,201 @@ pub const ServiceClient = struct {
         correlation_id: i64,
         payload_len: usize,
     ) SendError!SendClaim {
-        const send_rb = self.brokerSendRingBuffer() orelse return error.SendBufferFull;
-        const total_len = TcpFrameHeader.size + payload_len;
+        const runtime = self.aeron_runtime orelse {
+            self.recordSendError(error.RemoteTransportUnavailable);
+            return error.RemoteTransportUnavailable;
+        };
+        const total_len = data_header.RingLoomDataHeader.encoded_length + payload_len;
 
-        if (total_len > send_rb.maxMessageLength()) {
+        if (payload_len > std.math.maxInt(u32)) {
             return error.MessageTooLong;
         }
 
-        var claim = send_rb.tryClaim(constants.application_msg_type_id, total_len) orelse
-            {
-                self.recordSendError(error.SendBufferFull);
-                return error.SendBufferFull;
-            };
+        var claim = try self.claimRemoteDirect(runtime, target_node_id, total_len);
 
-        const header: *TcpFrameHeader = @ptrCast(@alignCast(claim.buffer.ptr));
-        header.* = .{
-            .frame_length = @intCast(total_len),
-            .flags = 0,
-            .source_node_id = @intCast(self.local_node_id),
-            .target_node_id = @intCast(target_node_id),
-            .source_service_id = @intCast(self.local_service_id),
-            .target_service_id = @intCast(target_service_id),
-            .template_id = template_id,
-            .correlation_id = correlation_id,
+        const claimed = claim.bytes();
+        const fields = self.remoteDataFields(
+            target_node_id,
+            target_service_id,
+            template_id,
+            correlation_id,
+            payload_len,
+        ) catch |err| {
+            claim.abort() catch {};
+            return mapDataHeaderError(err);
+        };
+
+        data_header.encodeHeader(
+            claimed[0..data_header.RingLoomDataHeader.encoded_length],
+            fields,
+            payload_len,
+        ) catch |err| {
+            claim.abort() catch {};
+            return mapDataHeaderError(err);
         };
 
         return .{
-            .claim = claim,
-            .payload = claim.buffer[TcpFrameHeader.size..][0..payload_len],
-            .peer_counter_entry = self.peerCounterEntry(target_node_id),
-            .peer_ring_cost = @intCast(ringCost(total_len)),
+            .claim = .{ .remote = claim },
+            .payload = claimed[data_header.RingLoomDataHeader.encoded_length..][0..payload_len],
             .service_counters = self.service_counters,
             .logical_payload_len = payload_len,
         };
+    }
+
+    fn claimRemoteDirect(
+        self: *Self,
+        runtime: *ServiceAeronRuntime,
+        target_node_id: i16,
+        total_len: usize,
+    ) SendError!ringloom_aeron.BufferClaim {
+        const timeout_ns: i64 = @as(i64, @intCast(self.fc_config.spin_timeout_ms)) * std.time.ns_per_ms;
+        const start = Clock.monotonicNanos();
+
+        while (true) {
+            try self.driveRemoteRuntime(runtime);
+            switch (runtime.tryClaimToNode(target_node_id, total_len)) {
+                .claim => |claim| {
+                    self.recordRemotePublicationStatus(.claimed);
+                    return claim;
+                },
+                .not_connected => {
+                    self.recordRemotePublicationStatus(.not_connected);
+                    if (self.shouldRetryAeronClaim(start, timeout_ns)) {
+                        std.atomic.spinLoopHint();
+                        continue;
+                    }
+                    self.recordSendError(error.RemoteTransportUnavailable);
+                    return error.RemoteTransportUnavailable;
+                },
+                .back_pressured => {
+                    self.recordRemotePublicationStatus(.back_pressured);
+                    if (!self.shouldRetryAeronClaim(start, timeout_ns)) {
+                        const err = self.aeronBackpressureError();
+                        self.recordSendError(err);
+                        return err;
+                    }
+                },
+                .admin_action => {
+                    self.recordRemotePublicationStatus(.admin_action);
+                    if (!self.shouldRetryAeronClaim(start, timeout_ns)) {
+                        const err = self.aeronBackpressureError();
+                        self.recordSendError(err);
+                        return err;
+                    }
+                },
+                .closed => {
+                    self.recordRemotePublicationStatus(.closed);
+                    self.recordSendError(error.RemoteTransportUnavailable);
+                    return error.RemoteTransportUnavailable;
+                },
+                .max_position_exceeded => {
+                    self.recordRemotePublicationStatus(.max_position_exceeded);
+                    self.recordSendError(error.RemoteTransportUnavailable);
+                    return error.RemoteTransportUnavailable;
+                },
+                .failed => {
+                    self.recordRemotePublicationStatus(.failed);
+                    self.recordSendError(error.RemoteTransportUnavailable);
+                    return error.RemoteTransportUnavailable;
+                },
+            }
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn shouldRetryAeronClaim(self: *const Self, start_ns: i64, timeout_ns: i64) bool {
+        if (self.fc_config.strategy != .spin) return false;
+        if (timeout_ns <= 0) return false;
+        return Clock.monotonicNanos() - start_ns < timeout_ns;
+    }
+
+    fn aeronBackpressureError(self: *const Self) SendError {
+        return if (self.fc_config.strategy == .spin) error.BackPressureTimeout else error.BackPressure;
+    }
+
+    fn offerRemoteDirect(
+        self: *Self,
+        runtime: *ServiceAeronRuntime,
+        target_node_id: i16,
+        frame: []const u8,
+    ) SendError!void {
+        const timeout_ns: i64 = @as(i64, @intCast(self.fc_config.spin_timeout_ms)) * std.time.ns_per_ms;
+        const start = Clock.monotonicNanos();
+
+        while (true) {
+            try self.driveRemoteRuntime(runtime);
+            switch (runtime.offerToNode(target_node_id, frame)) {
+                .position => {
+                    self.recordRemotePublicationStatus(.claimed);
+                    return;
+                },
+                .not_connected => {
+                    self.recordRemotePublicationStatus(.not_connected);
+                    if (self.shouldRetryAeronClaim(start, timeout_ns)) {
+                        std.atomic.spinLoopHint();
+                        continue;
+                    }
+                    self.recordSendError(error.RemoteTransportUnavailable);
+                    return error.RemoteTransportUnavailable;
+                },
+                .back_pressured => {
+                    self.recordRemotePublicationStatus(.back_pressured);
+                    if (!self.shouldRetryAeronClaim(start, timeout_ns)) {
+                        const err = self.aeronBackpressureError();
+                        self.recordSendError(err);
+                        return err;
+                    }
+                },
+                .admin_action => {
+                    self.recordRemotePublicationStatus(.admin_action);
+                    if (!self.shouldRetryAeronClaim(start, timeout_ns)) {
+                        const err = self.aeronBackpressureError();
+                        self.recordSendError(err);
+                        return err;
+                    }
+                },
+                .closed => {
+                    self.recordRemotePublicationStatus(.closed);
+                    self.recordSendError(error.RemoteTransportUnavailable);
+                    return error.RemoteTransportUnavailable;
+                },
+                .max_position_exceeded => {
+                    self.recordRemotePublicationStatus(.max_position_exceeded);
+                    self.recordSendError(error.RemoteTransportUnavailable);
+                    return error.RemoteTransportUnavailable;
+                },
+                .failed => {
+                    self.recordRemotePublicationStatus(.failed);
+                    self.recordSendError(error.RemoteTransportUnavailable);
+                    return error.RemoteTransportUnavailable;
+                },
+            }
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn driveRemoteRuntime(self: *Self, runtime: *ServiceAeronRuntime) SendError!void {
+        _ = runtime.doWork() catch {
+            self.recordRemotePublicationStatus(.failed);
+            self.recordSendError(error.RemoteTransportUnavailable);
+            return error.RemoteTransportUnavailable;
+        };
+    }
+
+    fn recordRemotePublicationStatus(self: *Self, status: RemotePublicationStatus) void {
+        self.remote_publication_status = status;
+        self.remote_publication_status_ns = Clock.monotonicNanos();
+        const counters = self.service_counters orelse return;
+        switch (status) {
+            .unknown => {},
+            .claimed => counters.increment(.aeron_remote_claimed),
+            .not_connected => counters.increment(.aeron_remote_not_connected),
+            .back_pressured => counters.increment(.aeron_remote_back_pressured),
+            .admin_action => counters.increment(.aeron_remote_admin_action),
+            .closed => counters.increment(.aeron_remote_closed),
+            .max_position_exceeded => counters.increment(.aeron_remote_max_position_exceeded),
+            .failed => counters.increment(.aeron_remote_failed),
+        }
     }
 
     fn recordSend(self: *const Self, payload_len: usize) void {
@@ -961,46 +1183,157 @@ pub const ServiceClient = struct {
         counters.add(.bytes_sent, @intCast(payload_len));
     }
 
+    fn remoteDataFields(
+        self: *const Self,
+        target_node_id: i16,
+        target_service_id: i32,
+        template_id: u16,
+        correlation_id: i64,
+        payload_len: usize,
+    ) data_header.CodecError!data_header.EncodeFields {
+        if (self.local_node_id < 0 or target_node_id < 0) return error.InvalidNodeId;
+        if (@as(u16, @intCast(self.local_node_id)) > data_header.max_node_id or
+            @as(u16, @intCast(target_node_id)) > data_header.max_node_id)
+            return error.InvalidNodeId;
+        if (self.local_service_id < 0 or target_service_id < 0) return error.InvalidServiceId;
+
+        return .{
+            .source_node_id = @intCast(self.local_node_id),
+            .source_service_id = @intCast(self.local_service_id),
+            .target_node_id = @intCast(target_node_id),
+            .target_service_id = @intCast(target_service_id),
+            .template_id = template_id,
+            .correlation_id = correlation_id,
+            .payload_length = payload_len,
+        };
+    }
+
+    fn mapDataHeaderError(err: data_header.CodecError) SendError {
+        return switch (err) {
+            error.InvalidNodeId,
+            error.InvalidServiceId,
+            error.InvalidPayloadLength,
+            error.MessageTooLong,
+            => error.MessageTooLong,
+            else => error.RemoteTransportUnavailable,
+        };
+    }
+
     fn recordSendError(self: *const Self, err: anyerror) void {
         const counters = self.service_counters orelse return;
         switch (err) {
             error.SendBufferFull, error.BufferFull => counters.increment(.send_buffer_full),
+            error.RemoteTransportUnavailable => counters.increment(.remote_transport_unavailable),
             error.BackPressure => counters.increment(.backpressure),
             error.BackPressureTimeout => counters.increment(.backpressure_timeouts),
-            error.PeerCongested => counters.increment(.peer_congestion),
-            error.PeerDisconnected => counters.increment(.peer_disconnected),
             error.NoAvailableInstance => counters.increment(.no_available_instance),
             else => {},
         }
-    }
-
-    fn brokerSendRingBuffer(self: *Self) ?*RingBuffer {
-        if (self.broker_send_ring_buffer == null) return null;
-        return &self.broker_send_ring_buffer.?;
-    }
-
-    fn initBrokerSendRingBuffer(broker_meta: ?*BrokerMetadataFile) ?RingBuffer {
-        const broker = broker_meta orelse return null;
-        return RingBuffer.init(
-            @alignCast(broker.getSendBuffer()),
-            false,
-            null,
-            null,
-        ) catch null;
     }
 
     fn initFlowControlRegion(broker_meta: ?*BrokerMetadataFile) ?FlowControlRegion {
         const broker = broker_meta orelse return null;
         return broker.getFlowControlRegion();
     }
-
-    fn initPeerSendCountersRegion(broker_meta: ?*BrokerMetadataFile) ?PeerSendCountersRegion {
-        const broker = broker_meta orelse return null;
-        return broker.getPeerSendCountersRegion();
-    }
-
-    fn peerCounterEntry(self: *const Self, node_id: i16) ?*volatile PeerEntry {
-        const region = self.peer_send_counters orelse return null;
-        return region.findPeer(node_id);
-    }
 };
+
+test "remote sends require service Aeron runtime" {
+    var client = ServiceClient.init(
+        std.testing.allocator,
+        "remote-runtime-test",
+        null,
+        null,
+        1,
+        100,
+        null,
+    );
+    defer client.deinit();
+
+    try client.addInstance(.{
+        .service_id = 200,
+        .service_name = "remote-runtime-test",
+        .node_id = 2,
+    });
+
+    try std.testing.expectError(
+        error.RemoteTransportUnavailable,
+        client.sendMessage(42, "payload"),
+    );
+}
+
+test "remote data fields encode RingLoomDataHeader fields" {
+    var client = ServiceClient.init(
+        std.testing.allocator,
+        "remote-header-test",
+        null,
+        null,
+        1,
+        100,
+        null,
+    );
+    defer client.deinit();
+
+    const fields = try client.remoteDataFields(2, 200, 77, 1234, 7);
+    var buf: [data_header.RingLoomDataHeader.encoded_length]u8 = undefined;
+    try data_header.encodeHeader(&buf, fields, 7);
+    const decoded = try data_header.decodeHeader(&buf, 7);
+
+    try std.testing.expectEqual(@as(u16, 1), decoded.source_node_id);
+    try std.testing.expectEqual(@as(u16, 100), decoded.source_service_id);
+    try std.testing.expectEqual(@as(u16, 2), decoded.target_node_id);
+    try std.testing.expectEqual(@as(u16, 200), decoded.target_service_id);
+    try std.testing.expectEqual(@as(u16, 77), decoded.template_id);
+    try std.testing.expectEqual(@as(i64, 1234), decoded.correlation_id);
+    try std.testing.expectEqual(@as(u32, 7), decoded.payload_length);
+}
+
+test "remote publication status updates health and counters" {
+    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
+    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
+    var counters_mgr = ringloom_common.concurrent.counters.CountersManager.init(&values_buf, &meta_buf);
+    var service_counters = try ServiceCounters.init(&counters_mgr);
+
+    var client = ServiceClient.init(
+        std.testing.allocator,
+        "remote-status-test",
+        null,
+        null,
+        1,
+        100,
+        &service_counters,
+    );
+    defer client.deinit();
+
+    client.recordRemotePublicationStatus(.back_pressured);
+    try std.testing.expectEqual(ServiceClient.RemotePublicationStatus.back_pressured, client.remote_publication_status);
+    try std.testing.expect(client.remote_publication_status_ns > 0);
+    try std.testing.expectEqual(@as(i64, 1), service_counters.get(.aeron_remote_back_pressured));
+
+    client.recordRemotePublicationStatus(.not_connected);
+    try std.testing.expectEqual(ServiceClient.RemotePublicationStatus.not_connected, client.remote_publication_status);
+    try std.testing.expectEqual(@as(i64, 1), service_counters.get(.aeron_remote_not_connected));
+
+    const health = client.remotePublicationHealth();
+    try std.testing.expect(!health.configured);
+    try std.testing.expectEqual(ServiceClient.RemotePublicationStatus.unknown, health.last_status);
+}
+
+test "Aeron claim backpressure error follows strategy" {
+    var client = ServiceClient.init(
+        std.testing.allocator,
+        "remote-error-test",
+        null,
+        null,
+        1,
+        100,
+        null,
+    );
+    defer client.deinit();
+
+    client.fc_config = .{ .enabled = true, .strategy = .drop };
+    try std.testing.expectEqual(error.BackPressure, client.aeronBackpressureError());
+
+    client.fc_config = .{ .enabled = true, .strategy = .spin, .spin_timeout_ms = 1 };
+    try std.testing.expectEqual(error.BackPressureTimeout, client.aeronBackpressureError());
+    try std.testing.expect(!client.shouldRetryAeronClaim(Clock.monotonicNanos(), 0));
+}

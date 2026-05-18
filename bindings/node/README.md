@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # RingLoom Node.js bindings
 
-These bindings expose the `ringloom_service` native library to Node.js through a Node-API addon. The addon uses the same C ABI as the Java bindings and loads `libringloom_service` from the addon build output.
+These bindings expose the `ringloom_service` native library to Node.js through a Node-API addon. The addon uses the same C ABI as the Java bindings and loads `libringloom_service` from the addon build output. Aeron is statically linked into that native library; packages do not need a separate Aeron dynamic library, and missing RingLoom native libraries fail at addon load time with the attempted path.
 
 ## Prerequisites
 
@@ -58,3 +58,5 @@ try {
 `RingloomClient.tryClaim(templateId, payloadLength, claim)` fills a reusable `BufferClaim`. `claim.payloadBuffer()` returns a borrowed writable `Buffer` over RingLoom ring-buffer memory; call `commit()` or `abort()` before reusing or closing the claim.
 
 `MessageConsumer.poll(handler, limit)` invokes `handler(message)` synchronously on the polling thread. The message payload buffer is borrowed and is valid only during the callback; copy it if it must outlive the handler.
+
+For v2 transport diagnostics, use `service.aeronDirectory()`, `service.aeronInboundStreamId()`, `service.publicationConnected()`, and `client.lastAeronSendStatus()`. `aeronInboundStreamId()` currently returns `0` because the direct-UDP data path no longer uses a service-to-broker ingress stream.

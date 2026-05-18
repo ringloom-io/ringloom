@@ -7,8 +7,8 @@ test "heartbeat timeout triggers service cleanup" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "heartbeat-timeout");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -46,8 +46,8 @@ test "heartbeat timeout does not affect healthy services" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "heartbeat-healthy");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);

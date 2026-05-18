@@ -1,19 +1,19 @@
 //! Broker metadata file layout for the RingLoom broker.
 //!
 //! The broker's metadata file is memory-mapped on /dev/shm and shared with
-//! all local services. It contains the broker's control ring buffer
-//! (services → broker) and send ring buffer (services → broker for cross-host).
+//! all local services. V2 metadata contains the broker control ring buffer
+//! (services → broker), Aeron discovery information, and monitoring regions.
 
 const std = @import("std");
 const constants = @import("constants.zig");
 const platform = @import("../platform.zig");
 const FlowControlRegion = @import("flow_control.zig").FlowControlRegion;
-const PeerSendCountersRegion = @import("peer_send_counters.zig").PeerSendCountersRegion;
 const counters = @import("../concurrent/counters.zig");
 
-/// Overlay for the first 32 bytes of the broker metadata header.
+/// Overlay for the immutable broker metadata header prefix.
 /// Read/written once at creation; immutable after that (except volatile fields).
 pub const BrokerMetadataHeader = extern struct {
+    metadata_version: i32,
     control_buffer_length: i32,
     messages_buffer_length: i32,
     service_id: i32,
@@ -23,13 +23,75 @@ pub const BrokerMetadataHeader = extern struct {
     start_timestamp_ms: i64,
 
     comptime {
-        // The fixed fields must pack to exactly 32 bytes.
-        std.debug.assert(@sizeOf(BrokerMetadataHeader) == 32);
+        // The fixed fields must stay within the immutable header area.
+        std.debug.assert(@sizeOf(BrokerMetadataHeader) == 40);
         // Ensure the struct doesn't grow past the volatile field offsets.
         std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.heartbeat_offset_within_header);
         std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.next_service_id_offset_within_header);
         std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.fc_buffer_length_offset);
-        std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.peer_send_counters_length_offset);
+        std.debug.assert(@sizeOf(BrokerMetadataHeader) <= platform.constants.broker_reserved_length_offset);
+        std.debug.assert(platform.constants.aeron_discovery_region_offset_offset >= @sizeOf(BrokerMetadataHeader));
+        std.debug.assert(platform.constants.aeron_discovery_region_length_offset >= @sizeOf(BrokerMetadataHeader));
+    }
+};
+
+pub const BrokerAeronPeerEndpoint = extern struct {
+    node_id: u8 = 0,
+    _reserved0: [3]u8 = [_]u8{0} ** 3,
+    data_stream_id: i32 = 0,
+    data_channel_length: u16 = 0,
+    _reserved1: [6]u8 = [_]u8{0} ** 6,
+    data_channel: [constants.max_aeron_channel_length]u8 = [_]u8{0} ** constants.max_aeron_channel_length,
+
+    pub fn dataChannel(self: *const BrokerAeronPeerEndpoint) []const u8 {
+        const length = @min(@as(usize, @intCast(self.data_channel_length)), self.data_channel.len);
+        return self.data_channel[0..length];
+    }
+};
+
+pub const BrokerAeronPeerConfig = struct {
+    node_id: u8,
+    data_stream_id: i32,
+    data_channel: []const u8,
+};
+
+pub const BrokerAeronDiscovery = extern struct {
+    broker_ingress_stream_id: i32 = 0,
+    admin_stream_base: i32 = 0,
+    data_stream_base: i32 = 0,
+    peer_count: u8 = 0,
+    _reserved0: [3]u8 = [_]u8{0} ** 3,
+    aeron_directory_length: u16 = 0,
+    local_data_channel_length: u16 = 0,
+    local_admin_channel_length: u16 = 0,
+    _reserved1: u16 = 0,
+    aeron_directory: [constants.max_aeron_directory_length]u8 = [_]u8{0} ** constants.max_aeron_directory_length,
+    local_data_channel: [constants.max_aeron_channel_length]u8 = [_]u8{0} ** constants.max_aeron_channel_length,
+    local_admin_channel: [constants.max_aeron_channel_length]u8 = [_]u8{0} ** constants.max_aeron_channel_length,
+    peer_data_channels: [constants.default_max_peers]BrokerAeronPeerEndpoint = [_]BrokerAeronPeerEndpoint{.{}} ** constants.default_max_peers,
+
+    pub fn directory(self: *const BrokerAeronDiscovery) []const u8 {
+        return self.aeron_directory[0..@as(usize, @intCast(self.aeron_directory_length))];
+    }
+
+    pub fn dataChannel(self: *const BrokerAeronDiscovery) []const u8 {
+        return self.local_data_channel[0..@as(usize, @intCast(self.local_data_channel_length))];
+    }
+
+    pub fn adminChannel(self: *const BrokerAeronDiscovery) []const u8 {
+        return self.local_admin_channel[0..@as(usize, @intCast(self.local_admin_channel_length))];
+    }
+
+    pub fn peers(self: *const BrokerAeronDiscovery) []const BrokerAeronPeerEndpoint {
+        const count = @min(@as(usize, @intCast(self.peer_count)), self.peer_data_channels.len);
+        return self.peer_data_channels[0..count];
+    }
+
+    pub fn peerByNodeId(self: *const BrokerAeronDiscovery, node_id: u8) ?*const BrokerAeronPeerEndpoint {
+        for (self.peers()) |*peer| {
+            if (peer.node_id == node_id) return peer;
+        }
+        return null;
     }
 };
 
@@ -43,14 +105,11 @@ pub const BrokerMetadataFile = struct {
     /// Byte slice covering the control ring buffer region.
     control_buffer: []u8,
 
-    /// Byte slice covering the send ring buffer region.
-    send_buffer: []u8,
+    /// V2 Aeron discovery region.
+    aeron_discovery: *BrokerAeronDiscovery,
 
     /// Flow control counters region (null if disabled).
     fc_region: ?FlowControlRegion = null,
-
-    /// Per-peer send counters region (null if disabled).
-    peer_send_counters: ?PeerSendCountersRegion = null,
 
     /// Generic counter values region, stored in the metadata monitoring tail.
     counter_values_buffer: []align(constants.cache_line_pad) u8,
@@ -71,10 +130,16 @@ pub const BrokerMetadataFile = struct {
     /// Options for flow control region allocation (optional).
     pub const FlowControlOptions = struct {
         fc_max_entries: u32 = 0,
-        peer_send_max_peers: u32 = 0,
         counter_values_buffer_length: usize = constants.default_counter_values_buffer_length,
         counter_metadata_buffer_length: usize = 0,
         error_log_buffer_length: usize = constants.default_error_log_buffer_length,
+        aeron_directory: []const u8 = "",
+        broker_ingress_stream_id: i32 = 0,
+        admin_stream_base: i32 = 0,
+        data_stream_base: i32 = 0,
+        local_data_channel: []const u8 = "",
+        local_admin_channel: []const u8 = "",
+        peer_data_channels: []const BrokerAeronPeerConfig = &.{},
     };
 
     /// Create and initialize a new broker metadata file.
@@ -83,7 +148,8 @@ pub const BrokerMetadataFile = struct {
     /// - `group`: e.g. "default"
     /// - `node_id`: this broker's node identifier
     /// - `control_buffer_length`: must be a power of two
-    /// - `messages_buffer_length`: must be a power of two
+    /// - `messages_buffer_length`: ignored by v2 metadata; retained for callers
+    ///   that still size the transitional process-local sender ring.
     /// - `fc_options`: optional flow control region sizes (0 = disabled)
     pub fn create(
         storage_path: []const u8,
@@ -113,25 +179,20 @@ pub const BrokerMetadataFile = struct {
     ) !BrokerMetadataFile {
         if (!constants.isPowerOfTwo(control_buffer_length))
             return error.ControlBufferNotPowerOfTwo;
-        if (!constants.isPowerOfTwo(messages_buffer_length))
-            return error.MessagesBufferNotPowerOfTwo;
+        _ = messages_buffer_length;
+        try validateAeronOptions(fc_options);
 
         // The ring buffer needs data_capacity + trailer. The caller specifies the
         // data capacity (must be power-of-two); we add the trailer here.
         const trailer = constants.ring_buffer_trailer_length;
         const ctrl_region = control_buffer_length + trailer;
-        const msgs_region = messages_buffer_length + trailer;
+        const aeron_region_len = constants.alignUp(@sizeOf(BrokerAeronDiscovery), constants.cache_line_pad);
 
         // Compute flow control region sizes.
         const fc_buf_len: usize = if (fc_options.fc_max_entries > 0)
             FlowControlRegion.regionSize(fc_options.fc_max_entries)
         else
             0;
-        const peer_send_len: usize = if (fc_options.peer_send_max_peers > 0)
-            PeerSendCountersRegion.regionSize(fc_options.peer_send_max_peers)
-        else
-            0;
-
         const counter_values_len = alignedCounterValuesLength(fc_options.counter_values_buffer_length);
         const counter_metadata_len = counterMetadataLength(
             fc_options.counter_values_buffer_length,
@@ -139,7 +200,9 @@ pub const BrokerMetadataFile = struct {
         );
         const error_log_len = constants.alignUp(fc_options.error_log_buffer_length, @sizeOf(i64));
 
-        const base_size = constants.metadata_header_length + ctrl_region + msgs_region + fc_buf_len + peer_send_len;
+        const aeron_region_offset = constants.metadata_header_length;
+        const control_region_offset = aeron_region_offset + aeron_region_len;
+        const base_size = control_region_offset + ctrl_region + fc_buf_len;
         const monitoring_tail_offset = constants.alignUp(base_size, constants.cache_line_pad);
         const monitoring_tail_len = counter_values_len + counter_metadata_len + error_log_len;
 
@@ -166,8 +229,7 @@ pub const BrokerMetadataFile = struct {
         // Zero-fill.
         @memset(mapped, 0);
 
-        const fc_region_offset = constants.metadata_header_length + ctrl_region + msgs_region;
-        const peer_send_region_offset = fc_region_offset + fc_buf_len;
+        const fc_region_offset = control_region_offset + ctrl_region;
         const counter_values_offset = monitoring_tail_offset;
         const counter_metadata_offset = counter_values_offset + counter_values_len;
         const error_log_offset = counter_metadata_offset + counter_metadata_len;
@@ -180,20 +242,12 @@ pub const BrokerMetadataFile = struct {
                 return error.FlowControlInitFailed;
         }
 
-        var peer_send_counters: ?PeerSendCountersRegion = null;
-        if (peer_send_len > 0) {
-            const peer_slice = mapped[peer_send_region_offset..][0..peer_send_len];
-            peer_send_counters = PeerSendCountersRegion.initNew(peer_slice, fc_options.peer_send_max_peers) catch
-                return error.PeerSendCountersInitFailed;
-        }
-
         var self = BrokerMetadataFile{
             .mapped_bytes = mapped,
             .header = @ptrCast(@alignCast(mapped.ptr)),
-            .control_buffer = mapped[constants.metadata_header_length..][0..ctrl_region],
-            .send_buffer = mapped[constants.metadata_header_length + ctrl_region ..][0..msgs_region],
+            .control_buffer = mapped[control_region_offset..][0..ctrl_region],
+            .aeron_discovery = @ptrCast(@alignCast(mapped.ptr + aeron_region_offset)),
             .fc_region = fc_region,
-            .peer_send_counters = peer_send_counters,
             .counter_values_buffer = @alignCast(mapped[counter_values_offset..][0..counter_values_len]),
             .counter_metadata_buffer = mapped[counter_metadata_offset..][0..counter_metadata_len],
             .error_log_buffer = mapped[error_log_offset..][0..error_log_len],
@@ -201,22 +255,46 @@ pub const BrokerMetadataFile = struct {
         };
 
         // Write the immutable header fields — store data capacity (without trailer).
+        self.header.metadata_version = constants.metadata_version;
         self.header.control_buffer_length = @intCast(control_buffer_length);
-        self.header.messages_buffer_length = @intCast(messages_buffer_length);
+        self.header.messages_buffer_length = 0;
         self.header.service_id = constants.broker_service_id;
         self.header.node_id = node_id;
         self.header.pid = platform.getPid();
         self.header.start_timestamp_ms = platform.Clock.epochMillis();
+        self.aeron_discovery.* = .{
+            .broker_ingress_stream_id = fc_options.broker_ingress_stream_id,
+            .admin_stream_base = fc_options.admin_stream_base,
+            .data_stream_base = fc_options.data_stream_base,
+        };
+        copyAeronDirectory(
+            &self.aeron_discovery.aeron_directory,
+            &self.aeron_discovery.aeron_directory_length,
+            fc_options.aeron_directory,
+        );
+        copyAeronChannel(
+            &self.aeron_discovery.local_data_channel,
+            &self.aeron_discovery.local_data_channel_length,
+            fc_options.local_data_channel,
+        );
+        copyAeronChannel(
+            &self.aeron_discovery.local_admin_channel,
+            &self.aeron_discovery.local_admin_channel_length,
+            fc_options.local_admin_channel,
+        );
+        copyAeronPeerChannels(self.aeron_discovery, fc_options.peer_data_channels);
 
         // Store FC region sizes in the header (at fixed offsets beyond 32-byte struct).
         self.storeFcBufferLength(@intCast(fc_buf_len));
-        self.storePeerSendCountersLength(@intCast(peer_send_len));
+        self.storeBrokerReservedLength(0);
         self.storeMetadataMonitoringVersion(constants.metadata_monitoring_version);
         self.storeCounterValuesBufferLength(@intCast(counter_values_len));
         self.storeCounterMetadataBufferLength(@intCast(counter_metadata_len));
         self.storeErrorLogBufferLength(@intCast(error_log_len));
         self.storeMonitoringTailOffset(@intCast(monitoring_tail_offset));
         self.storeMonitoringTailLength(@intCast(monitoring_tail_len));
+        self.storeAeronDiscoveryRegionOffset(@intCast(aeron_region_offset));
+        self.storeAeronDiscoveryRegionLength(@intCast(aeron_region_len));
 
         // Initialize next_service_id to 1 (0 is reserved for broker).
         self.storeNextServiceId(1);
@@ -249,35 +327,42 @@ pub const BrokerMetadataFile = struct {
             return error.FileTooSmall;
 
         const header: *BrokerMetadataHeader = @ptrCast(@alignCast(mapped.ptr));
+        if (header.metadata_version != constants.metadata_version)
+            return error.UnsupportedMetadataVersion;
 
         const ctrl_len: usize = @intCast(header.control_buffer_length);
         const msgs_len: usize = @intCast(header.messages_buffer_length);
 
         if (!constants.isPowerOfTwo(ctrl_len))
             return error.ControlBufferNotPowerOfTwo;
-        if (!constants.isPowerOfTwo(msgs_len))
-            return error.MessagesBufferNotPowerOfTwo;
+        if (msgs_len != 0)
+            return error.UnsupportedMetadataVersion;
 
         const trailer = constants.ring_buffer_trailer_length;
         const ctrl_region = ctrl_len + trailer;
-        const msgs_region = msgs_len + trailer;
-
-        const base_size = constants.metadata_header_length + ctrl_region + msgs_region;
 
         // Read FC/monitoring region lengths from header.
         var self = BrokerMetadataFile{
             .mapped_bytes = mapped,
             .header = header,
-            .control_buffer = mapped[constants.metadata_header_length..][0..ctrl_region],
-            .send_buffer = mapped[constants.metadata_header_length + ctrl_region ..][0..msgs_region],
+            .control_buffer = undefined,
+            .aeron_discovery = undefined,
             .counter_values_buffer = undefined,
             .counter_metadata_buffer = undefined,
             .error_log_buffer = undefined,
             .fd = fd,
         };
 
+        const aeron_region_offset: usize = @intCast(self.loadAeronDiscoveryRegionOffset());
+        const aeron_region_len: usize = @intCast(self.loadAeronDiscoveryRegionLength());
+        if (aeron_region_offset < constants.metadata_header_length)
+            return error.FileSizeMismatch;
+        if (aeron_region_len < @sizeOf(BrokerAeronDiscovery))
+            return error.FileSizeMismatch;
+
+        const control_region_offset = aeron_region_offset + aeron_region_len;
+        const base_size = control_region_offset + ctrl_region;
         const fc_buf_len: usize = @intCast(self.loadFcBufferLength());
-        const peer_send_len: usize = @intCast(self.loadPeerSendCountersLength());
         const counter_values_len: usize = @intCast(self.loadCounterValuesBufferLength());
         const counter_metadata_len: usize = @intCast(self.loadCounterMetadataBufferLength());
         const error_log_len: usize = @intCast(self.loadErrorLogBufferLength());
@@ -285,14 +370,13 @@ pub const BrokerMetadataFile = struct {
         const monitoring_tail_len: usize = @intCast(self.loadMonitoringTailLength());
 
         const fc_region_offset = base_size;
-        const peer_send_region_offset = fc_region_offset + fc_buf_len;
         const counter_values_offset = monitoring_tail_offset;
         const counter_metadata_offset = counter_values_offset + counter_values_len;
         const error_log_offset = counter_metadata_offset + counter_metadata_len;
 
         if (monitoring_tail_len != counter_values_len + counter_metadata_len + error_log_len)
             return error.FileSizeMismatch;
-        if (monitoring_tail_offset < peer_send_region_offset + peer_send_len)
+        if (monitoring_tail_offset < fc_region_offset + fc_buf_len)
             return error.FileSizeMismatch;
         if (counter_values_len % counters.counter_value_length != 0)
             return error.FileSizeMismatch;
@@ -314,12 +398,8 @@ pub const BrokerMetadataFile = struct {
                 return error.FlowControlInitFailed;
         }
 
-        if (peer_send_len > 0) {
-            const peer_slice = mapped[peer_send_region_offset..][0..peer_send_len];
-            self.peer_send_counters = PeerSendCountersRegion.initExisting(peer_slice) catch
-                return error.PeerSendCountersInitFailed;
-        }
-
+        self.control_buffer = mapped[control_region_offset..][0..ctrl_region];
+        self.aeron_discovery = @ptrCast(@alignCast(mapped.ptr + aeron_region_offset));
         self.counter_values_buffer = @alignCast(mapped[counter_values_offset..][0..counter_values_len]);
         self.counter_metadata_buffer = mapped[counter_metadata_offset..][0..counter_metadata_len];
         self.error_log_buffer = mapped[error_log_offset..][0..error_log_len];
@@ -374,15 +454,15 @@ pub const BrokerMetadataFile = struct {
         @atomicStore(i32, ptr, value, .release);
     }
 
-    /// Load the peer send counters region length from the header (0 = absent).
-    pub fn loadPeerSendCountersLength(self: *const BrokerMetadataFile) i32 {
-        const ptr = self.peerSendCountersLengthPtr();
+    /// Load the reserved v2 broker metadata length slot.
+    pub fn loadBrokerReservedLength(self: *const BrokerMetadataFile) i32 {
+        const ptr = self.brokerReservedLengthPtr();
         return @atomicLoad(i32, ptr, .acquire);
     }
 
-    /// Store the peer send counters region length in the header.
-    pub fn storePeerSendCountersLength(self: *BrokerMetadataFile, value: i32) void {
-        const ptr = self.peerSendCountersLengthPtr();
+    /// Store the reserved v2 broker metadata length slot.
+    pub fn storeBrokerReservedLength(self: *BrokerMetadataFile, value: i32) void {
+        const ptr = self.brokerReservedLengthPtr();
         @atomicStore(i32, ptr, value, .release);
     }
 
@@ -434,16 +514,27 @@ pub const BrokerMetadataFile = struct {
         @atomicStore(i64, self.monitoringTailLengthPtr(), value, .release);
     }
 
+    pub fn loadAeronDiscoveryRegionOffset(self: *const BrokerMetadataFile) i64 {
+        return @atomicLoad(i64, self.aeronDiscoveryRegionOffsetPtr(), .acquire);
+    }
+
+    pub fn storeAeronDiscoveryRegionOffset(self: *BrokerMetadataFile, value: i64) void {
+        @atomicStore(i64, self.aeronDiscoveryRegionOffsetPtr(), value, .release);
+    }
+
+    pub fn loadAeronDiscoveryRegionLength(self: *const BrokerMetadataFile) i64 {
+        return @atomicLoad(i64, self.aeronDiscoveryRegionLengthPtr(), .acquire);
+    }
+
+    pub fn storeAeronDiscoveryRegionLength(self: *BrokerMetadataFile, value: i64) void {
+        @atomicStore(i64, self.aeronDiscoveryRegionLengthPtr(), value, .release);
+    }
+
     // ── Flow Control Accessors ───────────────────────────────────────
 
     /// Returns the flow control region, or null if not present.
     pub fn getFlowControlRegion(self: *const BrokerMetadataFile) ?FlowControlRegion {
         return self.fc_region;
-    }
-
-    /// Returns the peer send counters region, or null if not present.
-    pub fn getPeerSendCountersRegion(self: *const BrokerMetadataFile) ?PeerSendCountersRegion {
-        return self.peer_send_counters;
     }
 
     // ── Buffer Accessors ──────────────────────────────────────────────
@@ -453,9 +544,12 @@ pub const BrokerMetadataFile = struct {
         return self.control_buffer;
     }
 
-    /// Returns the byte slice backing the send ring buffer.
-    pub fn getSendBuffer(self: *const BrokerMetadataFile) []u8 {
-        return self.send_buffer;
+    pub fn getAeronDiscovery(self: *const BrokerMetadataFile) *const BrokerAeronDiscovery {
+        return self.aeron_discovery;
+    }
+
+    pub fn getMutableAeronDiscovery(self: *BrokerMetadataFile) *BrokerAeronDiscovery {
+        return self.aeron_discovery;
     }
 
     pub fn getCounterValuesBuffer(self: *const BrokerMetadataFile) []align(constants.cache_line_pad) u8 {
@@ -499,9 +593,9 @@ pub const BrokerMetadataFile = struct {
         return @ptrCast(@alignCast(base + offset));
     }
 
-    fn peerSendCountersLengthPtr(self: *const BrokerMetadataFile) *volatile i32 {
+    fn brokerReservedLengthPtr(self: *const BrokerMetadataFile) *volatile i32 {
         const base: [*]u8 = self.mapped_bytes.ptr;
-        const offset = constants.peer_send_counters_length_offset;
+        const offset = constants.broker_reserved_length_offset;
         return @ptrCast(@alignCast(base + offset));
     }
 
@@ -535,6 +629,16 @@ pub const BrokerMetadataFile = struct {
         return @ptrCast(@alignCast(base + constants.monitoring_tail_length_offset));
     }
 
+    fn aeronDiscoveryRegionOffsetPtr(self: *const BrokerMetadataFile) *volatile i64 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.aeron_discovery_region_offset_offset));
+    }
+
+    fn aeronDiscoveryRegionLengthPtr(self: *const BrokerMetadataFile) *volatile i64 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.aeron_discovery_region_length_offset));
+    }
+
     fn alignedCounterValuesLength(counter_values_buffer_length: usize) usize {
         return constants.alignUp(counter_values_buffer_length, constants.cache_line_pad);
     }
@@ -543,6 +647,59 @@ pub const BrokerMetadataFile = struct {
         if (explicit_length > 0) return constants.alignUp(explicit_length, counters.counter_metadata_length);
         const slots = @max(@as(usize, 1), alignedCounterValuesLength(counter_values_buffer_length) / counters.counter_value_length);
         return slots * counters.counter_metadata_length;
+    }
+
+    fn validateAeronOptions(opts: FlowControlOptions) !void {
+        if (opts.aeron_directory.len > constants.max_aeron_directory_length)
+            return error.AeronDirectoryTooLong;
+        if (opts.local_data_channel.len > constants.max_aeron_channel_length)
+            return error.AeronChannelTooLong;
+        if (opts.local_admin_channel.len > constants.max_aeron_channel_length)
+            return error.AeronChannelTooLong;
+        if (opts.peer_data_channels.len > constants.default_max_peers)
+            return error.TooManyAeronPeers;
+        for (opts.peer_data_channels) |peer| {
+            if (peer.data_channel.len > constants.max_aeron_channel_length)
+                return error.AeronChannelTooLong;
+        }
+    }
+
+    fn copyAeronDirectory(
+        dest: *[constants.max_aeron_directory_length]u8,
+        length: *u16,
+        value: []const u8,
+    ) void {
+        @memset(dest, 0);
+        @memcpy(dest[0..value.len], value);
+        length.* = @intCast(value.len);
+    }
+
+    fn copyAeronChannel(
+        dest: *[constants.max_aeron_channel_length]u8,
+        length: *u16,
+        value: []const u8,
+    ) void {
+        @memset(dest, 0);
+        @memcpy(dest[0..value.len], value);
+        length.* = @intCast(value.len);
+    }
+
+    fn copyAeronPeerChannels(
+        discovery: *BrokerAeronDiscovery,
+        peers: []const BrokerAeronPeerConfig,
+    ) void {
+        discovery.peer_count = @intCast(peers.len);
+        for (&discovery.peer_data_channels) |*slot| {
+            slot.* = .{};
+        }
+        for (peers, 0..) |peer, i| {
+            discovery.peer_data_channels[i] = .{
+                .node_id = peer.node_id,
+                .data_stream_id = peer.data_stream_id,
+                .data_channel_length = @intCast(peer.data_channel.len),
+            };
+            @memcpy(discovery.peer_data_channels[i].data_channel[0..peer.data_channel.len], peer.data_channel);
+        }
     }
 
     fn buildBrokerPath(
@@ -585,10 +742,10 @@ pub const BrokerMetadataFile = struct {
 const testing = std.testing;
 
 test "BrokerMetadataHeader has correct size" {
-    try testing.expectEqual(@as(usize, 32), @sizeOf(BrokerMetadataHeader));
+    try testing.expectEqual(@as(usize, 40), @sizeOf(BrokerMetadataHeader));
 }
 
-test "create broker metadata file and verify layout" {
+test "create broker metadata v2 file and verify layout" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
     const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
@@ -601,13 +758,14 @@ test "create broker metadata file and verify layout" {
         "test-group",
         42, // node_id
         64 * 1024, // 64 KB control buffer
-        1024 * 1024, // 1 MB send buffer
+        1024 * 1024, // transitional process-local sender capacity, not mapped
     );
     defer file.close();
 
     // Verify header fields.
+    try testing.expectEqual(constants.metadata_version, file.header.metadata_version);
     try testing.expectEqual(@as(i32, 64 * 1024), file.header.control_buffer_length);
-    try testing.expectEqual(@as(i32, 1024 * 1024), file.header.messages_buffer_length);
+    try testing.expectEqual(@as(i32, 0), file.header.messages_buffer_length);
     try testing.expectEqual(@as(i32, 0), file.header.service_id);
     try testing.expectEqual(@as(i16, 42), file.header.node_id);
     try testing.expect(file.header.pid > 0);
@@ -616,21 +774,78 @@ test "create broker metadata file and verify layout" {
     // Verify buffer slice sizes (include ring buffer trailer).
     const trailer = constants.ring_buffer_trailer_length;
     try testing.expectEqual(@as(usize, 64 * 1024 + trailer), file.control_buffer.len);
-    try testing.expectEqual(@as(usize, 1024 * 1024 + trailer), file.send_buffer.len);
 
-    // Verify control buffer starts at offset 512.
+    // Verify control buffer starts after the fixed Aeron discovery region.
+    const aeron_region_len = constants.alignUp(@sizeOf(BrokerAeronDiscovery), constants.cache_line_pad);
     const control_offset = @intFromPtr(file.control_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
-    try testing.expectEqual(@as(usize, 512), control_offset);
+    try testing.expectEqual(@as(usize, 512 + aeron_region_len), control_offset);
 
-    // Verify send buffer starts right after control buffer.
-    const send_offset = @intFromPtr(file.send_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
-    try testing.expectEqual(@as(usize, 512 + 64 * 1024 + trailer), send_offset);
+    try testing.expectEqual(@as(i64, 512), file.loadAeronDiscoveryRegionOffset());
+    try testing.expectEqual(@as(i64, @intCast(aeron_region_len)), file.loadAeronDiscoveryRegionLength());
 
     // Verify nextServiceId initialized to 1.
     try testing.expectEqual(@as(i32, 1), file.loadNextServiceId());
 
     // Verify heartbeat was written.
     try testing.expect(file.loadHeartbeat() > 0);
+}
+
+test "broker metadata v2 Aeron discovery round trip and file size exclude send ring" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(storage_path);
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
+
+    var file = try BrokerMetadataFile.createWithFlowControl(
+        storage_path,
+        "test-group",
+        1,
+        4096,
+        1024 * 1024,
+        .{
+            .aeron_directory = "/tmp/ringloom-aeron-test",
+            .broker_ingress_stream_id = 10_001,
+            .admin_stream_base = 20_000,
+            .data_stream_base = 30_000,
+            .local_data_channel = "aeron:udp?endpoint=127.0.0.1:40123",
+            .local_admin_channel = "aeron:udp?endpoint=127.0.0.1:40124",
+            .peer_data_channels = &.{
+                .{
+                    .node_id = 2,
+                    .data_stream_id = 30_002,
+                    .data_channel = "aeron:udp?endpoint=127.0.0.2:40123|term-length=16777216",
+                },
+            },
+        },
+    );
+    const mapped_len = file.mapped_bytes.len;
+    file.close();
+
+    var opened = try BrokerMetadataFile.open(storage_path, "test-group", 1);
+    defer opened.close();
+
+    const discovery = opened.getAeronDiscovery();
+    try testing.expectEqual(@as(i32, 10_001), discovery.broker_ingress_stream_id);
+    try testing.expectEqual(@as(i32, 20_000), discovery.admin_stream_base);
+    try testing.expectEqual(@as(i32, 30_000), discovery.data_stream_base);
+    try testing.expectEqualStrings("/tmp/ringloom-aeron-test", discovery.directory());
+    try testing.expectEqualStrings("aeron:udp?endpoint=127.0.0.1:40123", discovery.dataChannel());
+    try testing.expectEqualStrings("aeron:udp?endpoint=127.0.0.1:40124", discovery.adminChannel());
+    try testing.expectEqual(@as(u8, 1), discovery.peer_count);
+    const peer = discovery.peerByNodeId(2).?;
+    try testing.expectEqual(@as(i32, 30_002), peer.data_stream_id);
+    try testing.expectEqualStrings(
+        "aeron:udp?endpoint=127.0.0.2:40123|term-length=16777216",
+        peer.dataChannel(),
+    );
+    try testing.expect(discovery.peerByNodeId(3) == null);
+
+    const trailer = constants.ring_buffer_trailer_length;
+    const aeron_region_len = constants.alignUp(@sizeOf(BrokerAeronDiscovery), constants.cache_line_pad);
+    const base_without_send = constants.metadata_header_length + aeron_region_len + 4096 + trailer;
+    const minimum_with_send = constants.alignUp(base_without_send + 1024 * 1024 + trailer, constants.page_size);
+    try testing.expect(mapped_len < minimum_with_send);
 }
 
 test "incrementAndGetNextServiceId is atomic" {
@@ -667,7 +882,7 @@ test "reject non-power-of-two buffer sizes" {
     try testing.expectError(error.ControlBufferNotPowerOfTwo, result);
 }
 
-test "two threads share a broker metadata file" {
+test "two mappings share a broker metadata v2 file" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
     const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
@@ -696,13 +911,12 @@ test "two threads share a broker metadata file" {
     const read_pattern = std.mem.bytesToValue(u64, service_view.control_buffer[0..8]);
     try testing.expectEqual(pattern, read_pattern);
 
-    // Service writes to the send buffer.
-    const msg: u64 = 0x1234567890ABCDEF;
-    @memcpy(service_view.send_buffer[0..8], std.mem.asBytes(&msg));
-
-    // Broker reads it back.
-    const read_msg = std.mem.bytesToValue(u64, broker_file.send_buffer[0..8]);
-    try testing.expectEqual(msg, read_msg);
+    // Aeron discovery metadata is mapped into both views.
+    broker_file.getMutableAeronDiscovery().broker_ingress_stream_id = 10_001;
+    try testing.expectEqual(
+        @as(i32, 10_001),
+        service_view.getAeronDiscovery().broker_ingress_stream_id,
+    );
 }
 
 test "atomic nextServiceId visible across mappings" {
@@ -779,19 +993,17 @@ test "create with flow control regions" {
         1,
         4096,
         4096,
-        .{ .fc_max_entries = 8, .peer_send_max_peers = 4 },
+        .{ .fc_max_entries = 8 },
     );
     defer file.close();
 
     // Verify FC region is present.
     try testing.expect(file.fc_region != null);
-    try testing.expect(file.peer_send_counters != null);
 
     // Verify header stores the region lengths.
     const expected_fc_len: i32 = @intCast(FlowControlRegion.regionSize(8));
-    const expected_peer_len: i32 = @intCast(PeerSendCountersRegion.regionSize(4));
     try testing.expectEqual(expected_fc_len, file.loadFcBufferLength());
-    try testing.expectEqual(expected_peer_len, file.loadPeerSendCountersLength());
+    try testing.expectEqual(@as(i32, 0), file.loadBrokerReservedLength());
 
     // Use the FC region: allocate a slot.
     var fc = file.fc_region.?;
@@ -815,7 +1027,7 @@ test "open reads back flow control regions" {
         1,
         4096,
         4096,
-        .{ .fc_max_entries = 4, .peer_send_max_peers = 2 },
+        .{ .fc_max_entries = 4 },
     );
 
     // Write data into FC region.
@@ -829,9 +1041,8 @@ test "open reads back flow control regions" {
     // Re-open and verify FC region is detected.
     var file2 = try BrokerMetadataFile.open(storage_path, "test-group", 1);
     defer file2.close();
-
     try testing.expect(file2.fc_region != null);
-    try testing.expect(file2.peer_send_counters != null);
+    try testing.expect(file2.fc_region != null);
 
     // Verify data survived.
     const fc2 = file2.fc_region.?;
@@ -853,11 +1064,10 @@ test "open backward compat with no FC regions" {
     // Open should succeed, FC regions should be null.
     var file2 = try BrokerMetadataFile.open(storage_path, "test-group", 1);
     defer file2.close();
-
     try testing.expect(file2.fc_region == null);
-    try testing.expect(file2.peer_send_counters == null);
+    try testing.expect(file2.fc_region == null);
     try testing.expectEqual(@as(i32, 0), file2.loadFcBufferLength());
-    try testing.expectEqual(@as(i32, 0), file2.loadPeerSendCountersLength());
+    try testing.expectEqual(@as(i32, 0), file2.loadBrokerReservedLength());
 }
 
 test "different node_ids create independent files" {

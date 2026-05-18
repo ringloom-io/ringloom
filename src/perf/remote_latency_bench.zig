@@ -1,8 +1,9 @@
 //! Cross-Broker Single Direction Latency Benchmark
 //!
 //! Measures single direction trip latency for messages routed between two brokers
-//! connected via loopback TCP. Topology: broker A (node 1) ↔ broker B (node 2),
-//! ping service on broker A, echo service on broker B.
+//! over loopback Aeron UDP. Topology: broker A (node 1) ↔ broker B (node 2),
+//! ping service on broker A, echo service on broker B. Local service handoff
+//! still uses the service messages ring buffer.
 //!
 //! Message sizes tested: 32, 128, 512, 1024, 4096 bytes.
 
@@ -97,6 +98,7 @@ fn runRemoteLatencyBench(
             "--message-size",    size_str,
             "--warmup-count",    warmup_count,
             "--spin-timeout-ms", "100",
+            "--target-ready-timeout-ms", "10000",
         },
     });
     try harness.waitForServiceReady(ping, service_ready_timeout_ms);
@@ -105,7 +107,7 @@ fn runRemoteLatencyBench(
     const exit_code = try ping.waitForExit(ping_completion_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), exit_code);
 
-    // Allow in-flight messages to drain through the TCP pipeline.
+    // Allow in-flight messages to drain through the Aeron UDP pipeline.
     platform.sleepNanos(2 * std.time.ns_per_s);
 
     // Cleanup — stop services first, then brokers in reverse order.

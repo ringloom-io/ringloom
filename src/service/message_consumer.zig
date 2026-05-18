@@ -16,6 +16,7 @@ pub const MessageConsumer = struct {
     ring_buffer: RingBuffer,
     handler: ?RingBuffer.MessageHandler,
     service_counters: ?*ServiceCounters,
+    batch_bytes_received: u64 = 0,
 
     const Self = @This();
 
@@ -37,14 +38,23 @@ pub const MessageConsumer = struct {
     /// Duty-cycle function. Called by the ThreadRunner's event loop.
     /// Returns the number of messages processed (work count).
     pub fn doWork(self: *Self) u32 {
-        const h = self.handler orelse return 0;
-        tls_consumer = self;
-        tls_handler = h;
-        defer {
-            tls_consumer = null;
-            tls_handler = null;
+        if (self.handler == null) return 0;
+
+        self.batch_bytes_received = 0;
+        const messages_read = self.ring_buffer.readWithContext(
+            @ptrCast(self),
+            onMessage,
+            read_limit,
+        );
+
+        if (messages_read > 0) {
+            if (self.service_counters) |counters| {
+                counters.add(.messages_received, messages_read);
+                counters.add(.bytes_received, @intCast(self.batch_bytes_received));
+            }
         }
-        return self.ring_buffer.read(onMessage, read_limit);
+
+        return messages_read;
     }
 
     /// EventLoop-compatible function pointer (casts context to *Self).
@@ -57,17 +67,11 @@ pub const MessageConsumer = struct {
     pub fn onCloseFn(_: *anyopaque) void {}
 };
 
-threadlocal var tls_consumer: ?*MessageConsumer = null;
-threadlocal var tls_handler: ?RingBuffer.MessageHandler = null;
+fn onMessage(context: *anyopaque, msg_type_id: i32, payload: []const u8) void {
+    const consumer: *MessageConsumer = @ptrCast(@alignCast(context));
+    consumer.batch_bytes_received += payload.len;
 
-fn onMessage(msg_type_id: i32, payload: []const u8) void {
-    if (tls_consumer) |consumer| {
-        if (consumer.service_counters) |counters| {
-            counters.increment(.messages_received);
-            counters.add(.bytes_received, @intCast(payload.len));
-        }
-    }
-    if (tls_handler) |handler| {
+    if (consumer.handler) |handler| {
         if (message_header.tryDecodeEnvelope(msg_type_id, payload)) |envelope| {
             handler(message_header.msgTypeFromTemplateId(envelope.header.template_id), envelope.payload);
         } else {

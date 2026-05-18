@@ -48,7 +48,7 @@ final class TestSupport {
             serviceName,
             broker.storagePath(),
             broker.group(),
-            (short) 1,
+            broker.nodeId(),
             false,
             10_000,
             65_536L,

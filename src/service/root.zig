@@ -22,6 +22,9 @@ pub const MessageConsumer = message_consumer.MessageConsumer;
 pub const control_agent = @import("control_agent.zig");
 pub const ControlAgent = control_agent.ControlAgent;
 
+pub const aeron_runtime = @import("aeron_runtime.zig");
+pub const ServiceAeronRuntime = aeron_runtime.ServiceAeronRuntime;
+
 // ── Service clients and discovery ────────────────────────────────────
 
 pub const service_client = @import("service_client.zig");
@@ -69,6 +72,7 @@ comptime {
     _ = @import("ringloom_engine.zig");
     _ = @import("message_consumer.zig");
     _ = @import("control_agent.zig");
+    _ = @import("aeron_runtime.zig");
 
     // Client types
     _ = @import("service_client.zig");

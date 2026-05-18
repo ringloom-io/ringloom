@@ -6,8 +6,8 @@ test "single service registers with broker" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "registration");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -31,8 +31,8 @@ test "multiple services register with broker" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "registration-multi");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -73,8 +73,8 @@ test "service registers and gets unique service id" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "registration-unique-id");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);

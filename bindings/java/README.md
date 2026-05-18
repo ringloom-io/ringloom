@@ -2,7 +2,7 @@
 
 These bindings expose the `ringloom_service` native library through the Java Foreign Function & Memory API on Java 25.
 
-The Gradle build embeds the current platform's shared library into the jar under the classpath, and the Java API loads that packaged copy by default. You can still override loading with `-Dringloom.nativeLibPath=/absolute/path/to/libringloom_service.so` or `-Dringloom.nativeLibDir=/directory/containing/the/library`.
+The Gradle build embeds the current platform's shared library into the jar under the classpath, and the Java API loads that packaged copy by default. You can still override loading with `-Dringloom.nativeLibPath=/absolute/path/to/libringloom_service.so` or `-Dringloom.nativeLibDir=/directory/containing/the/library`. Aeron is statically linked into `libringloom_service`; deployments do not need to ship a separate Aeron dynamic library, but missing or mismatched RingLoom native libraries fail during binding initialization with the path that was attempted.
 
 `RingloomClient.targetServices()` returns the client's cached discovered targets. Each `TargetService` contains both `targetNodeId()` and `targetServiceId()` plus the leader flag; pass both ids to `sendTo(targetNodeId, targetServiceId, ...)` because service ids can repeat on different broker nodes.
 
@@ -23,6 +23,8 @@ try (RingloomService service = RingloomService.start(ServiceConfig.of("orders"))
 ```
 
 For hot-path sends, allocate a `BufferClaim` during setup with `client.newClaim()`, reuse it with `tryClaim(...)`, write to `claim.payloadSegment()`, and finish with `commit()` or `abort()`. `MessageConsumer.poll(...)` reuses a single `RingloomMessage` view; copy payload bytes inside the handler if they must outlive the callback.
+
+`RingloomService.aeronDirectory()`, `aeronInboundStreamId()`, and `publicationConnected()` expose v2 transport diagnostics. `aeronInboundStreamId()` currently returns `0` because the direct-UDP data path no longer uses a service-to-broker ingress stream. `RingloomClient.lastAeronSendStatus()` returns the last observed direct Aeron publication state.
 
 ## Prerequisites
 

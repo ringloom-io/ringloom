@@ -11,6 +11,7 @@
 //! ├── storage/          # shared-memory metadata (replaces /dev/shm)
 //! │   └── <group>/
 //! │       └── services/
+//! ├── aeron/            # per-broker embedded Aeron driver directories
 //! ├── logs/             # stdout / stderr captures from child processes
 //! ├── config/           # generated .properties files
 //! ├── results/          # JSON result files (perf, correctness)
@@ -39,10 +40,12 @@ pub const TempEnv = struct {
     allocator: Allocator,
     base_path: []const u8,
     storage_path: []const u8,
+    aeron_path: []const u8,
     logs_path: []const u8,
     config_path: []const u8,
     results_path: []const u8,
     artifacts_path: []const u8,
+    udp_port_base: u16,
     preserved: bool,
 
     /// Creates a new temporary environment rooted at
@@ -66,6 +69,9 @@ pub const TempEnv = struct {
         const storage_path = try std.fmt.allocPrint(allocator, "{s}/storage", .{base_path});
         errdefer allocator.free(storage_path);
 
+        const aeron_path = try std.fmt.allocPrint(allocator, "{s}/aeron", .{base_path});
+        errdefer allocator.free(aeron_path);
+
         const logs_path = try std.fmt.allocPrint(allocator, "{s}/logs", .{base_path});
         errdefer allocator.free(logs_path);
 
@@ -85,19 +91,25 @@ pub const TempEnv = struct {
         defer allocator.free(default_services);
 
         try test_io.createDirPath(default_services);
+        try test_io.createDirPath(aeron_path);
         try test_io.createDirPath(logs_path);
         try test_io.createDirPath(config_path);
         try test_io.createDirPath(results_path);
         try test_io.createDirPath(artifacts_path);
 
+        const scenario_hash = std.hash.Wyhash.hash(@intCast(pid), safe_name);
+        const port_bucket: u16 = @intCast(scenario_hash % 40);
+
         return TempEnv{
             .allocator = allocator,
             .base_path = base_path,
             .storage_path = storage_path,
+            .aeron_path = aeron_path,
             .logs_path = logs_path,
             .config_path = config_path,
             .results_path = results_path,
             .artifacts_path = artifacts_path,
+            .udp_port_base = 20_000 + port_bucket * 1000,
             .preserved = false,
         };
     }
@@ -117,6 +129,7 @@ pub const TempEnv = struct {
         self.allocator.free(self.results_path);
         self.allocator.free(self.config_path);
         self.allocator.free(self.logs_path);
+        self.allocator.free(self.aeron_path);
         self.allocator.free(self.storage_path);
         self.allocator.free(self.base_path);
     }
@@ -140,6 +153,16 @@ pub const TempEnv = struct {
         try test_io.createDirPath(services_path);
 
         return group_path;
+    }
+
+    /// Returns `<aeron_path>/node-<node_id>`, heap-allocated and caller-owned.
+    pub fn aeronDirectoryPath(self: *const TempEnv, node_id: u8) ![]const u8 {
+        return std.fmt.allocPrint(self.allocator, "{s}/node-{d}", .{ self.aeron_path, node_id });
+    }
+
+    /// Maps a scenario-local broker port into this harness's isolated UDP port window.
+    pub fn mapUdpPort(self: *const TempEnv, port: u16) u16 {
+        return self.udp_port_base + (port % 1000);
     }
 
     /// Returns `<logs_path>/<filename>`, heap-allocated and caller-owned.
@@ -171,6 +194,9 @@ test "init creates expected directory structure" {
 
     var logs_dir = try test_io.openDir(env.logs_path, .{});
     logs_dir.close(test_io.io());
+
+    var aeron_dir = try test_io.openDir(env.aeron_path, .{});
+    aeron_dir.close(test_io.io());
 
     var config_dir = try test_io.openDir(env.config_path, .{});
     config_dir.close(test_io.io());
@@ -224,6 +250,36 @@ test "groupStoragePath creates group directory on demand" {
     const services_path = try std.fmt.allocPrint(allocator, "{s}/services", .{path});
     var dir = try test_io.openDir(services_path, .{});
     dir.close(test_io.io());
+}
+
+test "aeronDirectoryPath returns per-node path under harness base" {
+    // Given
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var env = try TempEnv.init(allocator, "aeron_path_test");
+    defer env.deinit();
+
+    // When
+    const path = try env.aeronDirectoryPath(7);
+
+    // Then
+    try std.testing.expect(std.mem.endsWith(u8, path, "/aeron/node-7"));
+}
+
+test "mapUdpPort keeps ports inside scenario namespace" {
+    // Given
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var env = try TempEnv.init(allocator, "udp_port_test");
+    defer env.deinit();
+
+    // When / Then
+    try std.testing.expectEqual(env.udp_port_base + 1, env.mapUdpPort(19001));
+    try std.testing.expectEqual(env.udp_port_base + 32, env.mapUdpPort(19032));
 }
 
 test "deinit removes directory tree" {

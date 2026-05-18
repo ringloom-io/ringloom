@@ -13,6 +13,7 @@ const counters = @import("../concurrent/counters.zig");
 
 /// Overlay for the fixed fields of the service metadata header.
 pub const ServiceMetadataHeader = extern struct {
+    metadata_version: i32,
     control_buffer_length: i32,
     messages_buffer_length: i32,
     service_id: i32,
@@ -23,7 +24,21 @@ pub const ServiceMetadataHeader = extern struct {
     heartbeat_timeout_ms: i32,
 
     comptime {
-        std.debug.assert(@sizeOf(ServiceMetadataHeader) == 40);
+        std.debug.assert(@sizeOf(ServiceMetadataHeader) == 48);
+        std.debug.assert(@sizeOf(ServiceMetadataHeader) <= @import("../platform.zig").constants.heartbeat_offset_within_header);
+    }
+};
+
+pub const ServiceAeronDiscovery = extern struct {
+    broker_ingress_stream_id: i32 = 0,
+    _reserved0: i32 = 0,
+    broker_start_timestamp_ms: i64 = 0,
+    aeron_directory_length: u16 = 0,
+    _reserved1: [6]u8 = [_]u8{0} ** 6,
+    aeron_directory: [constants.max_aeron_directory_length]u8 = [_]u8{0} ** constants.max_aeron_directory_length,
+
+    pub fn directory(self: *const ServiceAeronDiscovery) []const u8 {
+        return self.aeron_directory[0..@as(usize, @intCast(self.aeron_directory_length))];
     }
 };
 
@@ -65,6 +80,7 @@ pub const ServiceMetadataFile = struct {
     /// Non-null only when blocking_mode == 1.
     blocking_trailer: ?*BlockingTrailer,
 
+    aeron_discovery: *ServiceAeronDiscovery,
     control_buffer: []u8,
     messages_buffer: []u8,
     counter_values_buffer: []align(constants.cache_line_pad) u8,
@@ -89,6 +105,9 @@ pub const ServiceMetadataFile = struct {
         counter_values_buffer_length: usize = constants.default_counter_values_buffer_length,
         counter_metadata_buffer_length: usize = 0,
         error_log_buffer_length: usize = constants.default_error_log_buffer_length,
+        aeron_directory: []const u8 = "",
+        broker_ingress_stream_id: i32 = 0,
+        broker_start_timestamp_ms: i64 = 0,
     };
 
     /// Create and initialize a new service metadata file.
@@ -97,11 +116,14 @@ pub const ServiceMetadataFile = struct {
             return error.ControlBufferNotPowerOfTwo;
         if (!constants.isPowerOfTwo(opts.messages_buffer_length))
             return error.MessagesBufferNotPowerOfTwo;
+        if (opts.aeron_directory.len > constants.max_aeron_directory_length)
+            return error.AeronDirectoryTooLong;
 
         const blocking_extra: usize = if (opts.blocking_mode)
             constants.blocking_trailer_length
         else
             0;
+        const aeron_region_len = constants.alignUp(@sizeOf(ServiceAeronDiscovery), constants.cache_line_pad);
 
         // Ring buffers need data_capacity + trailer. The caller specifies data
         // capacity (power-of-two); we add the trailer here.
@@ -115,6 +137,7 @@ pub const ServiceMetadataFile = struct {
         );
         const error_log_len = constants.alignUp(opts.error_log_buffer_length, @sizeOf(i64));
         const base_size = constants.metadata_header_length +
+            aeron_region_len +
             blocking_extra +
             ctrl_region +
             msgs_region;
@@ -147,7 +170,9 @@ pub const ServiceMetadataFile = struct {
 
         @memset(mapped, 0);
 
-        const buffers_offset = constants.metadata_header_length + blocking_extra;
+        const aeron_region_offset = constants.metadata_header_length;
+        const blocking_offset = aeron_region_offset + aeron_region_len;
+        const buffers_offset = blocking_offset + blocking_extra;
         const counter_values_offset = monitoring_tail_offset;
         const counter_metadata_offset = counter_values_offset + counter_values_len;
         const error_log_offset = counter_metadata_offset + counter_metadata_len;
@@ -156,9 +181,10 @@ pub const ServiceMetadataFile = struct {
             .mapped_bytes = mapped,
             .header = @ptrCast(@alignCast(mapped.ptr)),
             .blocking_trailer = if (opts.blocking_mode)
-                @ptrCast(@alignCast(mapped.ptr + constants.metadata_header_length))
+                @ptrCast(@alignCast(mapped.ptr + blocking_offset))
             else
                 null,
+            .aeron_discovery = @ptrCast(@alignCast(mapped.ptr + aeron_region_offset)),
             .control_buffer = mapped[buffers_offset..][0..ctrl_region],
             .messages_buffer = mapped[buffers_offset + ctrl_region ..][0..msgs_region],
             .counter_values_buffer = @alignCast(mapped[counter_values_offset..][0..counter_values_len]),
@@ -168,6 +194,7 @@ pub const ServiceMetadataFile = struct {
         };
 
         // Write immutable header fields — store data capacity (without trailer).
+        self.header.metadata_version = constants.metadata_version;
         self.header.control_buffer_length = @intCast(opts.control_buffer_length);
         self.header.messages_buffer_length = @intCast(opts.messages_buffer_length);
         self.header.service_id = opts.service_id;
@@ -176,12 +203,23 @@ pub const ServiceMetadataFile = struct {
         self.header.pid = platform.getPid();
         self.header.start_timestamp_ms = platform.Clock.epochMillis();
         self.header.heartbeat_timeout_ms = opts.heartbeat_timeout_ms;
+        self.aeron_discovery.* = .{
+            .broker_ingress_stream_id = opts.broker_ingress_stream_id,
+            .broker_start_timestamp_ms = opts.broker_start_timestamp_ms,
+        };
+        copyAeronDirectory(
+            &self.aeron_discovery.aeron_directory,
+            &self.aeron_discovery.aeron_directory_length,
+            opts.aeron_directory,
+        );
         self.storeMetadataMonitoringVersion(constants.metadata_monitoring_version);
         self.storeCounterValuesBufferLength(@intCast(counter_values_len));
         self.storeCounterMetadataBufferLength(@intCast(counter_metadata_len));
         self.storeErrorLogBufferLength(@intCast(error_log_len));
         self.storeMonitoringTailOffset(@intCast(monitoring_tail_offset));
         self.storeMonitoringTailLength(@intCast(monitoring_tail_len));
+        self.storeAeronDiscoveryRegionOffset(@intCast(aeron_region_offset));
+        self.storeAeronDiscoveryRegionLength(@intCast(aeron_region_len));
 
         // Write initial heartbeat.
         self.storeHeartbeat(platform.Clock.epochMillis());
@@ -241,6 +279,8 @@ pub const ServiceMetadataFile = struct {
             return error.FileTooSmall;
 
         const header: *ServiceMetadataHeader = @ptrCast(@alignCast(mapped.ptr));
+        if (header.metadata_version != constants.metadata_version)
+            return error.UnsupportedMetadataVersion;
 
         const ctrl_len: usize = @intCast(header.control_buffer_length);
         const msgs_len: usize = @intCast(header.messages_buffer_length);
@@ -252,7 +292,14 @@ pub const ServiceMetadataFile = struct {
             return error.MessagesBufferNotPowerOfTwo;
 
         const blocking_extra: usize = if (is_blocking) constants.blocking_trailer_length else 0;
-        const buffers_offset = constants.metadata_header_length + blocking_extra;
+        const aeron_region_offset: usize = @intCast(loadAt(i64, mapped, constants.aeron_discovery_region_offset_offset));
+        const aeron_region_len: usize = @intCast(loadAt(i64, mapped, constants.aeron_discovery_region_length_offset));
+        if (aeron_region_offset < constants.metadata_header_length)
+            return error.FileSizeMismatch;
+        if (aeron_region_len < @sizeOf(ServiceAeronDiscovery))
+            return error.FileSizeMismatch;
+        const blocking_offset = aeron_region_offset + aeron_region_len;
+        const buffers_offset = blocking_offset + blocking_extra;
 
         const trailer = constants.ring_buffer_trailer_length;
         const ctrl_region = ctrl_len + trailer;
@@ -288,9 +335,10 @@ pub const ServiceMetadataFile = struct {
             .mapped_bytes = mapped,
             .header = header,
             .blocking_trailer = if (is_blocking)
-                @ptrCast(@alignCast(mapped.ptr + constants.metadata_header_length))
+                @ptrCast(@alignCast(mapped.ptr + blocking_offset))
             else
                 null,
+            .aeron_discovery = @ptrCast(@alignCast(mapped.ptr + aeron_region_offset)),
             .control_buffer = mapped[buffers_offset..][0..ctrl_region],
             .messages_buffer = mapped[buffers_offset + ctrl_region ..][0..msgs_region],
             .counter_values_buffer = @alignCast(mapped[counter_values_offset..][0..counter_values_len]),
@@ -360,6 +408,22 @@ pub const ServiceMetadataFile = struct {
         @atomicStore(i64, self.monitoringTailLengthPtr(), value, .release);
     }
 
+    pub fn loadAeronDiscoveryRegionOffset(self: *const ServiceMetadataFile) i64 {
+        return @atomicLoad(i64, self.aeronDiscoveryRegionOffsetPtr(), .acquire);
+    }
+
+    pub fn storeAeronDiscoveryRegionOffset(self: *ServiceMetadataFile, value: i64) void {
+        @atomicStore(i64, self.aeronDiscoveryRegionOffsetPtr(), value, .release);
+    }
+
+    pub fn loadAeronDiscoveryRegionLength(self: *const ServiceMetadataFile) i64 {
+        return @atomicLoad(i64, self.aeronDiscoveryRegionLengthPtr(), .acquire);
+    }
+
+    pub fn storeAeronDiscoveryRegionLength(self: *ServiceMetadataFile, value: i64) void {
+        @atomicStore(i64, self.aeronDiscoveryRegionLengthPtr(), value, .release);
+    }
+
     /// Returns true if this service's process is still alive.
     pub fn isProcessAlive(self: *const ServiceMetadataFile) bool {
         return platform.isProcessAlive(@intCast(self.header.pid));
@@ -378,6 +442,10 @@ pub const ServiceMetadataFile = struct {
 
     pub fn getMessagesBuffer(self: *const ServiceMetadataFile) []u8 {
         return self.messages_buffer;
+    }
+
+    pub fn getAeronDiscovery(self: *const ServiceMetadataFile) *const ServiceAeronDiscovery {
+        return self.aeron_discovery;
     }
 
     pub fn getCounterValuesBuffer(self: *const ServiceMetadataFile) []align(constants.cache_line_pad) u8 {
@@ -441,6 +509,16 @@ pub const ServiceMetadataFile = struct {
         return @ptrCast(@alignCast(base + constants.monitoring_tail_length_offset));
     }
 
+    fn aeronDiscoveryRegionOffsetPtr(self: *const ServiceMetadataFile) *volatile i64 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.aeron_discovery_region_offset_offset));
+    }
+
+    fn aeronDiscoveryRegionLengthPtr(self: *const ServiceMetadataFile) *volatile i64 {
+        const base: [*]u8 = self.mapped_bytes.ptr;
+        return @ptrCast(@alignCast(base + constants.aeron_discovery_region_length_offset));
+    }
+
     fn alignedCounterValuesLength(counter_values_buffer_length: usize) usize {
         return constants.alignUp(counter_values_buffer_length, constants.cache_line_pad);
     }
@@ -449,6 +527,16 @@ pub const ServiceMetadataFile = struct {
         if (explicit_length > 0) return constants.alignUp(explicit_length, counters.counter_metadata_length);
         const slots = @max(@as(usize, 1), alignedCounterValuesLength(counter_values_buffer_length) / counters.counter_value_length);
         return slots * counters.counter_metadata_length;
+    }
+
+    fn copyAeronDirectory(
+        dest: *[constants.max_aeron_directory_length]u8,
+        length: *u16,
+        value: []const u8,
+    ) void {
+        @memset(dest, 0);
+        @memcpy(dest[0..value.len], value);
+        length.* = @intCast(value.len);
     }
 
     fn loadAt(comptime T: type, mapped: []align(constants.page_size) u8, offset: usize) T {
@@ -503,7 +591,7 @@ pub const ServiceMetadataFile = struct {
 const testing = std.testing;
 
 test "ServiceMetadataHeader has correct size" {
-    try testing.expectEqual(@as(usize, 40), @sizeOf(ServiceMetadataHeader));
+    try testing.expectEqual(@as(usize, 48), @sizeOf(ServiceMetadataHeader));
 }
 
 test "BlockingTrailer has correct size" {
@@ -530,20 +618,22 @@ test "create service metadata file without blocking — verify offsets" {
     defer file.close();
 
     // Header fields.
+    try testing.expectEqual(constants.metadata_version, file.header.metadata_version);
     try testing.expectEqual(@as(i32, 5), file.header.service_id);
     try testing.expectEqual(@as(i16, 1), file.header.node_id);
     try testing.expectEqual(@as(i16, 0), file.header.blocking_mode);
     try testing.expect(!file.isBlocking());
     try testing.expect(file.blocking_trailer == null);
 
-    // Non-blocking: control buffer starts at offset 512 (no blocking trailer).
+    // Non-blocking: control buffer starts after the fixed Aeron discovery region.
+    const aeron_region_len = constants.alignUp(@sizeOf(ServiceAeronDiscovery), constants.cache_line_pad);
     const ctrl_offset = @intFromPtr(file.control_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
-    try testing.expectEqual(@as(usize, 512), ctrl_offset);
+    try testing.expectEqual(@as(usize, 512 + aeron_region_len), ctrl_offset);
 
     // Messages buffer starts right after control buffer (including ring buffer trailer).
     const rb_trailer = constants.ring_buffer_trailer_length;
     const msgs_offset = @intFromPtr(file.messages_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
-    try testing.expectEqual(@as(usize, 512 + 64 * 1024 + rb_trailer), msgs_offset);
+    try testing.expectEqual(@as(usize, 512 + aeron_region_len + 64 * 1024 + rb_trailer), msgs_offset);
 }
 
 test "create service metadata file with blocking — verify offsets include trailer" {
@@ -569,18 +659,52 @@ test "create service metadata file with blocking — verify offsets include trai
     try testing.expect(file.isBlocking());
     try testing.expect(file.blocking_trailer != null);
 
-    // Blocking: control buffer starts at 512 + 384 = 896.
+    // Blocking: control buffer starts after header + Aeron discovery + trailer.
+    const aeron_region_len = constants.alignUp(@sizeOf(ServiceAeronDiscovery), constants.cache_line_pad);
     const ctrl_offset = @intFromPtr(file.control_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
-    try testing.expectEqual(@as(usize, 512 + 384), ctrl_offset);
+    try testing.expectEqual(@as(usize, 512 + aeron_region_len + 384), ctrl_offset);
 
     // Messages buffer starts at 896 + 64 KB + ring buffer trailer.
     const rb_trailer = constants.ring_buffer_trailer_length;
     const msgs_offset = @intFromPtr(file.messages_buffer.ptr) - @intFromPtr(file.mapped_bytes.ptr);
-    try testing.expectEqual(@as(usize, 512 + 384 + 64 * 1024 + rb_trailer), msgs_offset);
+    try testing.expectEqual(@as(usize, 512 + aeron_region_len + 384 + 64 * 1024 + rb_trailer), msgs_offset);
 
     // Blocking trailer should have the default timeout.
     const trailer = file.blocking_trailer.?;
     try testing.expectEqual(@as(i64, 1_000_000_000), trailer.wait_timeout.value);
+}
+
+test "service metadata v2 Aeron discovery round trip keeps messages buffer" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const storage_path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(storage_path);
+    try tmp_dir.dir.createDirPath(testing.io, "test-group/services");
+
+    var file = try ServiceMetadataFile.create(.{
+        .storage_path = storage_path,
+        .group = "test-group",
+        .service_name = "orders",
+        .service_id = 7,
+        .node_id = 2,
+        .messages_buffer_length = 128 * 1024,
+        .aeron_directory = "/tmp/ringloom-aeron-service",
+        .broker_ingress_stream_id = 10_007,
+        .broker_start_timestamp_ms = 1234,
+    });
+    file.close();
+
+    var opened = try ServiceMetadataFile.open(storage_path, "test-group", "orders", 7, 2);
+    defer opened.close();
+
+    const discovery = opened.getAeronDiscovery();
+    try testing.expectEqual(@as(i32, 10_007), discovery.broker_ingress_stream_id);
+    try testing.expectEqual(@as(i64, 1234), discovery.broker_start_timestamp_ms);
+    try testing.expectEqualStrings("/tmp/ringloom-aeron-service", discovery.directory());
+    try testing.expectEqual(
+        @as(usize, 128 * 1024 + constants.ring_buffer_trailer_length),
+        opened.getMessagesBuffer().len,
+    );
 }
 
 test "heartbeat read and write are consistent" {

@@ -9,6 +9,8 @@
 # Usage:
 #   ./scripts/bench-single-size.sh <size> [runs] [--local]
 #       [--latency-mode transit|saturated] [--send-interval-ns NS]
+#       [--echo-idle-strategy busy_spin|yielding|sleeping|backoff]
+#       [--ping-idle-strategy busy_spin|yielding|sleeping|backoff]
 #       [--output-dir DIR]
 #
 # Arguments:
@@ -20,6 +22,11 @@
 #   --latency-mode      "transit" (paced, unloaded latency) or
 #                       "saturated" (queueing latency under load). Default: transit.
 #   --send-interval-ns  Override pacing interval for transit mode (default: 10000 ns).
+#   --echo-idle-strategy
+#                       Override echo service idle strategy. Default: busy_spin for
+#                       local transit latency, yielding otherwise.
+#   --ping-idle-strategy
+#                       Override ping service idle strategy. Default: yielding.
 #   --output-dir        Directory for best-of-N result JSON files (default: /tmp/ringloom-bench-best).
 #
 # Prerequisites:
@@ -67,6 +74,8 @@ MODE="remote"
 BEST_DIR="/tmp/ringloom-bench-best"
 LATENCY_MODE="transit"
 SEND_INTERVAL_NS=""
+ECHO_IDLE_STRATEGY=""
+PING_IDLE_STRATEGY="${RINGLOOM_BENCH_PING_IDLE_STRATEGY:-yielding}"
 IOURING_RECEIVER_ENABLED="${RINGLOOM_BENCH_IOURING_RECEIVER:-false}"
 IOURING_SENDER_ENABLED="${RINGLOOM_BENCH_IOURING_SENDER:-false}"
 IOURING_SQPOLL="${RINGLOOM_BENCH_IOURING_SQPOLL:-true}"
@@ -77,12 +86,16 @@ IOURING_RECEIVER_CQE_BATCH="${RINGLOOM_BENCH_IOURING_RECEIVER_CQE_BATCH:-256}"
 IOURING_SENDER_CQE_BATCH="${RINGLOOM_BENCH_IOURING_SENDER_CQE_BATCH:-64}"
 SENDER_WRITEV_BATCH_SIZE="${RINGLOOM_BENCH_SENDER_WRITEV_BATCH_SIZE:-64}"
 SENDER_WRITE_BUDGET="${RINGLOOM_BENCH_SENDER_WRITE_BUDGET:-256}"
+AERON_MTU_LENGTH="${RINGLOOM_BENCH_AERON_MTU_LENGTH:-8192}"
+AERON_IPC_MTU_LENGTH="${RINGLOOM_BENCH_AERON_IPC_MTU_LENGTH:-8192}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --local)            MODE="local"; shift ;;
         --latency-mode)     LATENCY_MODE="$2"; shift 2 ;;
         --send-interval-ns) SEND_INTERVAL_NS="$2"; shift 2 ;;
+        --echo-idle-strategy) ECHO_IDLE_STRATEGY="$2"; shift 2 ;;
+        --ping-idle-strategy) PING_IDLE_STRATEGY="$2"; shift 2 ;;
         --output-dir)       BEST_DIR="$2"; shift 2 ;;
         [0-9]*)             RUNS="$1"; shift ;;
         *)                  echo "Unknown option: $1"; exit 1 ;;
@@ -94,6 +107,18 @@ if [[ "$LATENCY_MODE" != "transit" && "$LATENCY_MODE" != "saturated" ]]; then
     exit 1
 fi
 
+validate_idle_strategy() {
+    local name="$1"
+    local value="$2"
+    case "$value" in
+        busy_spin|yielding|sleeping|backoff) ;;
+        *)
+            echo "ERROR: $name must be one of: busy_spin, yielding, sleeping, backoff"
+            exit 1
+            ;;
+    esac
+}
+
 if [[ -z "$SEND_INTERVAL_NS" ]]; then
     if [[ "$LATENCY_MODE" == "transit" ]]; then
         SEND_INTERVAL_NS=10000
@@ -101,6 +126,17 @@ if [[ -z "$SEND_INTERVAL_NS" ]]; then
         SEND_INTERVAL_NS=0
     fi
 fi
+
+if [[ -z "$ECHO_IDLE_STRATEGY" ]]; then
+    if [[ "$MODE" == "local" && "$LATENCY_MODE" == "transit" ]]; then
+        ECHO_IDLE_STRATEGY="${RINGLOOM_BENCH_ECHO_IDLE_STRATEGY:-busy_spin}"
+    else
+        ECHO_IDLE_STRATEGY="${RINGLOOM_BENCH_ECHO_IDLE_STRATEGY:-yielding}"
+    fi
+fi
+
+validate_idle_strategy "--echo-idle-strategy" "$ECHO_IDLE_STRATEGY"
+validate_idle_strategy "--ping-idle-strategy" "$PING_IDLE_STRATEGY"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -250,6 +286,7 @@ echo "Size:     $TAG"
 echo "Runs:     $RUNS"
 echo "Latency:  $LATENCY_MODE"
 echo "Pacing:   ${SEND_INTERVAL_NS} ns"
+echo "Echo idle: $ECHO_IDLE_STRATEGY"
 echo "Best dir: $BEST_DIR"
 echo ""
 
@@ -275,6 +312,8 @@ broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
+broker.aeron.mtu.length=$AERON_MTU_LENGTH
+broker.aeron.ipc.mtu.length=$AERON_IPC_MTU_LENGTH
 broker.threading.mode=dedicated
 broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
@@ -300,6 +339,8 @@ broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
+broker.aeron.mtu.length=$AERON_MTU_LENGTH
+broker.aeron.ipc.mtu.length=$AERON_IPC_MTU_LENGTH
 broker.threading.mode=dedicated
 broker.idle.strategy=yielding
 broker.sender.cpu.affinity=4
@@ -339,6 +380,8 @@ broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
+broker.aeron.mtu.length=$AERON_MTU_LENGTH
+broker.aeron.ipc.mtu.length=$AERON_IPC_MTU_LENGTH
 broker.threading.mode=dedicated
 broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
@@ -376,7 +419,7 @@ EOF
         --service-name echo \
         --broker-node-id "$ECHO_NODE" \
         --quiet \
-        --idle-strategy yielding \
+        --idle-strategy "$ECHO_IDLE_STRATEGY" \
         --result-file "$RESULTS/$PREFIX-echo-$TAG.json"
     local_ECHO_PID=${PIDS[-1]}
     wait_for_ready "$LOGS/echo.log" 5
@@ -392,7 +435,7 @@ EOF
         --message-count "$COUNT" \
         --message-size "$SIZE" \
         --warmup-count "$WARMUP" \
-        --idle-strategy yielding \
+        --idle-strategy "$PING_IDLE_STRATEGY" \
         --result-file "$RESULTS/$PREFIX-ping-$TAG.json" \
         --spin-timeout-ms 100 \
         --send-interval-ns "$SEND_INTERVAL_NS"

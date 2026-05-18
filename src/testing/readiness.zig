@@ -23,7 +23,9 @@ const test_io = @import("io.zig");
 const process_runner = @import("process_runner.zig");
 const ProcessHandle = process_runner.ProcessHandle;
 const ProcessState = process_runner.ProcessState;
-const Clock = @import("ringloom_common").platform.Clock;
+const ringloom_common = @import("ringloom_common");
+const Clock = ringloom_common.platform.Clock;
+const CncFile = ringloom_common.monitoring.aeron_cnc_reader.CncFile;
 
 /// Default polling interval used by wait functions (50 ms).
 pub const default_poll_interval_ms: u64 = 50;
@@ -169,6 +171,9 @@ pub fn waitForBrokerReady(handle: *ProcessHandle, timeout_ms: u64) !void {
         if (handle.stdout_capture.contains("broker started") or
             handle.stdout_capture.contains("broker ready"))
         {
+            if (handle.aeron_directory) |directory| {
+                try waitForAeronDriverReady(handle, directory, remainingMillis(deadline_ns));
+            }
             handle.markReady();
             return;
         }
@@ -178,6 +183,9 @@ pub fn waitForBrokerReady(handle: *ProcessHandle, timeout_ms: u64) !void {
             if (handle.stdout_capture.contains("broker started") or
                 handle.stdout_capture.contains("broker ready"))
             {
+                if (handle.aeron_directory) |directory| {
+                    try waitForAeronDriverReady(handle, directory, remainingMillis(deadline_ns));
+                }
                 handle.markReady();
                 return;
             }
@@ -271,6 +279,40 @@ fn countDirectoryEntries(path: []const u8) !usize {
         count += 1;
     }
     return count;
+}
+
+fn remainingMillis(deadline_ns: i128) u64 {
+    const now = Clock.monotonicNanosStable();
+    if (now >= deadline_ns) return 0;
+    const remaining_ns: u64 = @intCast(deadline_ns - now);
+    return @max(1, remaining_ns / time.ns_per_ms);
+}
+
+fn waitForAeronDriverReady(handle: *ProcessHandle, directory: []const u8, timeout_ms: u64) !void {
+    const deadline_ns: i128 = @as(i128, Clock.monotonicNanosStable()) + @as(i128, timeout_ms) * time.ns_per_ms;
+
+    while (Clock.monotonicNanosStable() < deadline_ns) {
+        var cnc = CncFile.open(test_io.io(), directory) catch |err| switch (err) {
+            error.MissingCncFile, error.InvalidCncFile => {
+                _ = handle.drainAvailableOutput() catch {};
+                if (!handle.isAlive() and handle.state == .exited) return error.ProcessExited;
+                test_io.sleepMs(default_poll_interval_ms);
+                continue;
+            },
+            else => return err,
+        };
+        defer cnc.close(test_io.io());
+
+        if (cnc.metadata.cnc_version > 0 and cnc.metadata.driverAlive()) {
+            return;
+        }
+
+        _ = handle.drainAvailableOutput() catch {};
+        if (!handle.isAlive() and handle.state == .exited) return error.ProcessExited;
+        test_io.sleepMs(default_poll_interval_ms);
+    }
+
+    return error.Timeout;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -438,6 +480,27 @@ test "waitForBrokerReady detects broker started marker" {
     defer handle.deinit();
 
     // When / Then — should find the marker.
+    try waitForBrokerReady(&handle, 5000);
+    try std.testing.expectEqual(ProcessState.ready, handle.state);
+}
+
+test "waitForBrokerReady without Aeron directory keeps legacy marker behavior" {
+    // Given
+    const allocator = std.testing.allocator;
+    const logs_dir = "/tmp/ringloom-test-readiness-broker-no-aeron";
+    try test_io.createDirPath(logs_dir);
+    defer test_io.deleteTree(logs_dir) catch {};
+
+    var handle = try ProcessHandle.spawn(
+        allocator,
+        "broker_ready_no_aeron_test",
+        "/bin/echo",
+        &.{"INFO: broker started successfully"},
+        logs_dir,
+    );
+    defer handle.deinit();
+
+    // When / Then
     try waitForBrokerReady(&handle, 5000);
     try std.testing.expectEqual(ProcessState.ready, handle.state);
 }

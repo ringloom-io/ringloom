@@ -105,6 +105,10 @@ pub fn freeBrokerConfig(allocator: std.mem.Allocator, config: *BrokerConfig) voi
         allocator.free(config.storage_path);
     }
 
+    if (config.aeron_directory.len > 0) {
+        allocator.free(config.aeron_directory);
+    }
+
     if (config.peer_endpoints.len > 0) {
         for (config.peer_endpoints) |peer| {
             if (peer.host.len > 0) {
@@ -177,6 +181,7 @@ test "freeBrokerConfig releases owned fields" {
         .peer_endpoints = peers,
         .group_name = try testing.allocator.dupe(u8, "custom-group"),
         .storage_path = try testing.allocator.dupe(u8, "/tmp/custom-storage"),
+        .aeron_directory = try testing.allocator.dupe(u8, "/tmp/custom-aeron"),
     };
 
     // When

@@ -30,6 +30,11 @@ final class RingloomLocalIpcIT {
              RingloomClient client = ping.createClient("echo");
              BufferClaim claim = client.newClaim()) {
 
+            assertFalse(ping.aeronDirectory().isEmpty(), "expected Aeron directory diagnostic");
+            assertEquals(0, ping.aeronInboundStreamId(), "local/direct-UDP path no longer uses broker ingress stream ids");
+            assertEquals(AeronPublicationStatus.UNKNOWN, client.lastAeronSendStatus());
+            ping.publicationConnected();
+
             AtomicBoolean running = new AtomicBoolean(true);
             CountDownLatch received = new CountDownLatch(1);
             LinkedBlockingQueue<CapturedMessage> messages = new LinkedBlockingQueue<>();
@@ -160,6 +165,113 @@ final class RingloomLocalIpcIT {
         } finally {
             TestSupport.cleanupWorkspace(workspace, success);
         }
+    }
+
+    @Test
+    void javaServicesRouteRemotePayloadOverAeron() throws Exception {
+        Path workspace = TestSupport.createWorkspace("ringloom-java-remote-aeron-");
+        boolean success = false;
+        String group = "ringloom-java-remote";
+
+        try (TestBroker brokerA = TestBroker.start(
+                 TestSupport.repoRoot(),
+                 workspace,
+                 (short) 1,
+                 19101,
+                 group,
+                 "2@127.0.0.1:19102"
+             );
+             TestBroker brokerB = TestBroker.start(
+                 TestSupport.repoRoot(),
+                 workspace,
+                 (short) 2,
+                 19102,
+                 group,
+                 "1@127.0.0.1:19101"
+             );
+             RingloomService echo = RingloomService.start(TestSupport.serviceConfig("remote-echo", brokerB));
+             MessageConsumer consumer = echo.messageConsumer();
+             RingloomService ping = RingloomService.start(TestSupport.serviceConfig("remote-ping", brokerA));
+             RingloomClient client = ping.createClient("remote-echo");
+             BufferClaim claim = client.newClaim()) {
+
+            LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(2));
+
+            TargetService target = awaitRemoteTarget(ping, echo, client, (short) 2);
+            byte[] payload = "remote".getBytes(StandardCharsets.UTF_8);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            boolean sent = false;
+
+            while (System.nanoTime() < deadline) {
+                int status = client.tryClaimTo(target.targetNodeId(), target.targetServiceId(), 77, payload.length, claim);
+                if (status == RingloomStatus.OK) {
+                    MemorySegment.copy(payload, 0, claim.payloadSegment(), ValueLayout.JAVA_BYTE, 0, payload.length);
+                    assertEquals(RingloomStatus.OK, claim.commit());
+                    sent = true;
+                    break;
+                }
+                if (status != RingloomStatus.NO_AVAILABLE_INSTANCE
+                    && status != RingloomStatus.BACKPRESSURE
+                    && status != RingloomStatus.PEER_DISCONNECTED) {
+                    RingloomNative.throwForStatus("ringloom_client_try_claim_to", status);
+                }
+                pollBoth(ping, echo);
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(20));
+            }
+
+            assertTrue(sent, "remote claim was not committed before deadline");
+            assertEquals(AeronPublicationStatus.CLAIMED, client.lastAeronSendStatus());
+
+            CapturedMessage message = pollReceived(consumer);
+            assertEquals("remote", message.payload());
+            assertEquals(77, message.templateId());
+            assertEquals(ping.nodeId(), message.sourceNodeId());
+            assertEquals(echo.nodeId(), message.targetNodeId());
+            success = true;
+        } finally {
+            TestSupport.cleanupWorkspace(workspace, success);
+        }
+    }
+
+    private static TargetService awaitRemoteTarget(
+        RingloomService ping,
+        RingloomService echo,
+        RingloomClient client,
+        short targetNodeId
+    ) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            pollBoth(ping, echo);
+            for (TargetService target : client.targetServices()) {
+                if (target.targetNodeId() == targetNodeId) {
+                    return target;
+                }
+            }
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(20));
+        }
+        throw new AssertionError("timed out waiting for remote target discovery");
+    }
+
+    private static CapturedMessage pollReceived(MessageConsumer consumer) {
+        LinkedBlockingQueue<CapturedMessage> messages = new LinkedBlockingQueue<>();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            int work = consumer.poll(message -> messages.add(CapturedMessage.copyOf(message)), 256);
+            if (work < 0) {
+                RingloomNative.throwForStatus("ringloom_message_consumer_poll", consumer.lastStatus());
+            }
+            CapturedMessage message = messages.poll();
+            if (message != null) {
+                return message;
+            }
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(20));
+        }
+        throw new AssertionError("timed out waiting for remote payload");
+    }
+
+    private static void pollBoth(RingloomService first, RingloomService second) {
+        first.pollControl(256);
+        second.pollControl(256);
     }
 
     private record CapturedMessage(

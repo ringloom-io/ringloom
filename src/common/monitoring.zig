@@ -27,6 +27,7 @@ pub const PeriodicMonitoringDump = periodic_dump.PeriodicMonitoringDump;
 
 pub const metadata_reader = @import("monitoring/metadata_reader.zig");
 pub const prometheus = @import("monitoring/prometheus.zig");
+pub const aeron_cnc_reader = @import("monitoring/aeron_cnc_reader.zig");
 
 // Ensure all monitoring module tests are discovered by `zig build test`.
 comptime {
@@ -39,4 +40,5 @@ comptime {
     _ = @import("monitoring/periodic_dump.zig");
     _ = @import("monitoring/metadata_reader.zig");
     _ = @import("monitoring/prometheus.zig");
+    _ = @import("monitoring/aeron_cnc_reader.zig");
 }

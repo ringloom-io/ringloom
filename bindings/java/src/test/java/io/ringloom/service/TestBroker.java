@@ -10,26 +10,52 @@ import java.util.Map;
 final class TestBroker implements AutoCloseable {
     private final Path repoRoot;
     private final Path workspace;
+    private final short nodeId;
     private final String storagePath;
     private final String group;
     private boolean closed;
 
-    private TestBroker(Path repoRoot, Path workspace, String storagePath, String group) {
+    private TestBroker(Path repoRoot, Path workspace, short nodeId, String storagePath, String group) {
         this.repoRoot = repoRoot;
         this.workspace = workspace;
+        this.nodeId = nodeId;
         this.storagePath = storagePath;
         this.group = group;
     }
 
     static TestBroker start(Path repoRoot, Path workspace) throws IOException, InterruptedException {
+        return start(repoRoot, workspace, (short) 1, 19001, "ringloom-java-test");
+    }
+
+    static TestBroker start(
+        Path repoRoot,
+        Path workspace,
+        short nodeId,
+        int port,
+        String group,
+        String... peers
+    ) throws IOException, InterruptedException {
         Path brokerBin = Path.of(System.getProperty("ringloom.brokerBin"));
-        Process process = new ProcessBuilder(
-            "bash",
-            repoRoot.resolve("scripts/start-test-broker.sh").toString(),
-            "--workspace", workspace.toString(),
-            "--daemon",
-            "--bin-dir", brokerBin.getParent().toString()
-        ).directory(repoRoot.toFile()).redirectErrorStream(true).start();
+        var command = new java.util.ArrayList<String>();
+        command.add("bash");
+        command.add(repoRoot.resolve("scripts/start-test-broker.sh").toString());
+        command.add("--workspace");
+        command.add(workspace.toString());
+        command.add("--node-id");
+        command.add(Short.toString(nodeId));
+        command.add("--port");
+        command.add(Integer.toString(port));
+        command.add("--group");
+        command.add(group);
+        command.add("--daemon");
+        command.add("--bin-dir");
+        command.add(brokerBin.getParent().toString());
+        for (String peer : peers) {
+            command.add("--peer");
+            command.add(peer);
+        }
+
+        Process process = new ProcessBuilder(command).directory(repoRoot.toFile()).redirectErrorStream(true).start();
 
         String output = new String(process.getInputStream().readAllBytes());
         int exitCode = process.waitFor();
@@ -41,9 +67,14 @@ final class TestBroker implements AutoCloseable {
         return new TestBroker(
             repoRoot,
             workspace,
+            Short.parseShort(env.get("RINGLOOM_BROKER_NODE_ID")),
             env.get("RINGLOOM_STORAGE_PATH"),
             env.get("RINGLOOM_GROUP")
         );
+    }
+
+    short nodeId() {
+        return nodeId;
     }
 
     String storagePath() {
@@ -65,6 +96,7 @@ final class TestBroker implements AutoCloseable {
             "bash",
             repoRoot.resolve("scripts/start-test-broker.sh").toString(),
             "--workspace", workspace.toString(),
+            "--node-id", Short.toString(nodeId),
             "--stop"
         ).directory(repoRoot.toFile()).redirectErrorStream(true).start();
 

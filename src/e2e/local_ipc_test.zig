@@ -6,8 +6,8 @@ test "two local services communicate via direct IPC" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "local-ipc");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     // Given — broker is running
     const broker = try harness.startBroker(.{});
@@ -44,8 +44,8 @@ test "multiple services communicate via local IPC concurrently" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "local-ipc-concurrent");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     // Given — broker is running
     const broker = try harness.startBroker(.{});
@@ -91,8 +91,8 @@ test "local IPC with forwarder chain" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "local-ipc-chain");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     // Given — broker is running
     const broker = try harness.startBroker(.{});

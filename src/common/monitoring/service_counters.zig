@@ -11,16 +11,22 @@ pub const ServiceCounter = enum(u8) {
     send_buffer_full = 4,
     backpressure = 5,
     backpressure_timeouts = 6,
-    peer_congestion = 7,
-    peer_disconnected = 8,
-    no_available_instance = 9,
-    control_messages_received = 10,
-    heartbeats_sent = 11,
-    registrations_sent = 12,
-    unregisters_sent = 13,
-    subscriptions_sent = 14,
+    no_available_instance = 7,
+    control_messages_received = 8,
+    heartbeats_sent = 9,
+    registrations_sent = 10,
+    unregisters_sent = 11,
+    subscriptions_sent = 12,
+    remote_transport_unavailable = 13,
+    aeron_remote_claimed = 14,
+    aeron_remote_not_connected = 15,
+    aeron_remote_back_pressured = 16,
+    aeron_remote_admin_action = 17,
+    aeron_remote_closed = 18,
+    aeron_remote_max_position_exceeded = 19,
+    aeron_remote_failed = 20,
 
-    pub const count: usize = 15;
+    pub const count: usize = 21;
 
     pub fn label(self: ServiceCounter) []const u8 {
         return switch (self) {
@@ -31,14 +37,20 @@ pub const ServiceCounter = enum(u8) {
             .send_buffer_full => "service_send_buffer_full_total",
             .backpressure => "service_backpressure_total",
             .backpressure_timeouts => "service_backpressure_timeouts_total",
-            .peer_congestion => "service_peer_congestion_total",
-            .peer_disconnected => "service_peer_disconnected_total",
             .no_available_instance => "service_no_available_instance_total",
             .control_messages_received => "service_control_messages_received_total",
             .heartbeats_sent => "service_heartbeats_sent_total",
             .registrations_sent => "service_registrations_sent_total",
             .unregisters_sent => "service_unregisters_sent_total",
             .subscriptions_sent => "service_subscriptions_sent_total",
+            .remote_transport_unavailable => "service_remote_transport_unavailable_total",
+            .aeron_remote_claimed => "service_aeron_remote_claimed_total",
+            .aeron_remote_not_connected => "service_aeron_remote_not_connected_total",
+            .aeron_remote_back_pressured => "service_aeron_remote_back_pressured_total",
+            .aeron_remote_admin_action => "service_aeron_remote_admin_action_total",
+            .aeron_remote_closed => "service_aeron_remote_closed_total",
+            .aeron_remote_max_position_exceeded => "service_aeron_remote_max_position_exceeded_total",
+            .aeron_remote_failed => "service_aeron_remote_failed_total",
         };
     }
 };

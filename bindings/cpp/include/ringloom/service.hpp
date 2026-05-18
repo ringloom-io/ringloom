@@ -36,6 +36,17 @@ enum class Status : int {
     internal = RINGLOOM_ERR_INTERNAL,
 };
 
+enum class AeronPublicationStatus : int {
+    unknown = RINGLOOM_AERON_PUBLICATION_UNKNOWN,
+    claimed = RINGLOOM_AERON_PUBLICATION_CLAIMED,
+    not_connected = RINGLOOM_AERON_PUBLICATION_NOT_CONNECTED,
+    back_pressured = RINGLOOM_AERON_PUBLICATION_BACK_PRESSURED,
+    admin_action = RINGLOOM_AERON_PUBLICATION_ADMIN_ACTION,
+    closed = RINGLOOM_AERON_PUBLICATION_CLOSED,
+    max_position_exceeded = RINGLOOM_AERON_PUBLICATION_MAX_POSITION_EXCEEDED,
+    failed = RINGLOOM_AERON_PUBLICATION_FAILED,
+};
+
 inline Status toStatus(ringloom_status_t status) noexcept {
     return static_cast<Status>(static_cast<int>(status));
 }
@@ -54,6 +65,12 @@ inline std::uint32_t abiVersion() noexcept {
 
 inline std::string statusName(Status status) {
     const char *name = ringloom_status_string(toNativeStatus(status));
+    return name == nullptr ? std::string{} : std::string{name};
+}
+
+inline std::string aeronPublicationStatusName(AeronPublicationStatus status) {
+    const char *name = ringloom_aeron_publication_status_string(
+        static_cast<ringloom_aeron_publication_status_t>(static_cast<int>(status)));
     return name == nullptr ? std::string{} : std::string{name};
 }
 
@@ -243,6 +260,24 @@ public:
         return toStatus(ringloom_client_try_claim(handle_, template_id, payload_len, claim.native()));
     }
 
+    Status tryClaimTo(
+        std::int16_t target_node_id,
+        std::int32_t target_service_id,
+        std::uint16_t template_id,
+        std::size_t payload_len,
+        BufferClaim &claim) noexcept {
+        if (claim.active()) {
+            return Status::invalid_argument;
+        }
+        return toStatus(ringloom_client_try_claim_to(
+            handle_,
+            target_node_id,
+            target_service_id,
+            template_id,
+            payload_len,
+            claim.native()));
+    }
+
     Status send(const void *payload, std::size_t payload_len) noexcept {
         return toStatus(ringloom_client_send(
             handle_,
@@ -285,6 +320,14 @@ public:
     std::vector<TargetService> targetServices() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return target_services_;
+    }
+
+    AeronPublicationStatus lastAeronSendStatus() {
+        ringloom_aeron_publication_status_t status = RINGLOOM_AERON_PUBLICATION_UNKNOWN;
+        throwIfNotOk(
+            "ringloom_client_last_aeron_send_status",
+            toStatus(ringloom_client_last_aeron_send_status(handle_, &status)));
+        return static_cast<AeronPublicationStatus>(static_cast<int>(status));
     }
 
     void refreshTargetServices() {
@@ -593,6 +636,34 @@ public:
         const Status status = toStatus(ringloom_service_create_message_consumer(handle_, &consumer));
         throwIfNotOk("ringloom_service_create_message_consumer", status);
         return MessageConsumer(consumer);
+    }
+
+    std::string aeronDirectory() const {
+        const char *directory = nullptr;
+        std::size_t length = 0;
+        throwIfNotOk(
+            "ringloom_service_aeron_directory",
+            toStatus(ringloom_service_aeron_directory(handle_, &directory, &length)));
+        if (directory == nullptr || length == 0) {
+            return {};
+        }
+        return std::string(directory, length);
+    }
+
+    std::int32_t aeronInboundStreamId() const {
+        std::int32_t stream_id = 0;
+        throwIfNotOk(
+            "ringloom_service_aeron_inbound_stream_id",
+            toStatus(ringloom_service_aeron_inbound_stream_id(handle_, &stream_id)));
+        return stream_id;
+    }
+
+    bool publicationConnected() const {
+        bool connected = false;
+        throwIfNotOk(
+            "ringloom_service_publication_connected",
+            toStatus(ringloom_service_publication_connected(handle_, &connected)));
+        return connected;
     }
 
     void stop() noexcept {

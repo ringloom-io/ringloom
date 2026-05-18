@@ -15,8 +15,8 @@ test "system remains stable under backpressure with slow consumer" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "backpressure");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -63,8 +63,8 @@ test "broker stays healthy when multiple producers overwhelm a single consumer" 
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "backpressure-multi-producer");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);

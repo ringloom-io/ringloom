@@ -71,6 +71,7 @@ pub const RingBuffer = struct {
     };
 
     pub const MessageHandler = *const fn (msg_type_id: i32, payload: []const u8) void;
+    pub const ContextMessageHandler = *const fn (context: *anyopaque, msg_type_id: i32, payload: []const u8) void;
 
     // ── Initialization ────────────────────────────────────────────────
 
@@ -279,6 +280,25 @@ pub const RingBuffer = struct {
     // ── Read (single consumer) ────────────────────────────────────────
 
     pub fn read(self: *RingBuffer, handler: MessageHandler, limit: u32) u32 {
+        return self.readInternal(false, {}, handler, limit);
+    }
+
+    pub fn readWithContext(
+        self: *RingBuffer,
+        context: *anyopaque,
+        handler: ContextMessageHandler,
+        limit: u32,
+    ) u32 {
+        return self.readInternal(true, context, handler, limit);
+    }
+
+    fn readInternal(
+        self: *RingBuffer,
+        comptime with_context: bool,
+        context: if (with_context) *anyopaque else void,
+        handler: if (with_context) ContextMessageHandler else MessageHandler,
+        limit: u32,
+    ) u32 {
         const head = self.loadHeadPosition(.monotonic);
         const tail = self.loadTailPosition(.acquire);
 
@@ -311,25 +331,21 @@ pub const RingBuffer = struct {
                 const payload_offset = record_offset + record_header_length;
                 const payload_len = record_length - record_header_length;
                 const payload = self.buffer[payload_offset .. payload_offset + payload_len];
-                handler(msg_type_id, payload);
+                if (with_context) {
+                    handler(context, msg_type_id, payload);
+                } else {
+                    handler(msg_type_id, payload);
+                }
                 messages_read += 1;
             }
 
+            // Clear only the guard word needed to prevent stale-positive reads on
+            // reuse; clearing payload bytes dirties cache lines for producers.
+            @atomicStore(i32, self.recordLengthPtr(record_offset), 0, .monotonic);
             bytes_consumed += aligned_length;
         }
 
         if (bytes_consumed > 0) {
-            // Zero out the consumed region.
-            const head_index: usize = @intCast(@as(i64, @intCast(mask)) & head);
-            // We need to zero in ring-buffer order; handle wrap-around.
-            if (head_index + bytes_consumed <= self.capacity) {
-                @memset(self.buffer[head_index .. head_index + bytes_consumed], 0);
-            } else {
-                const first_part = self.capacity - head_index;
-                @memset(self.buffer[head_index .. head_index + first_part], 0);
-                @memset(self.buffer[0 .. bytes_consumed - first_part], 0);
-            }
-
             // Advance head.
             self.storeHeadPosition(head + @as(i64, @intCast(bytes_consumed)), .release);
 

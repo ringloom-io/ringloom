@@ -5,6 +5,8 @@ const BrokerConfig = @import("broker_config.zig").BrokerConfig;
 const PeerEndpoint = @import("broker_config.zig").PeerEndpoint;
 const ThreadingMode = @import("broker_config.zig").ThreadingMode;
 const IdleStrategyName = @import("broker_config.zig").IdleStrategyName;
+const aeron_term_min_length = @import("broker_config.zig").aeron_term_min_length;
+const aeron_network_publication_max_messages_per_send_max = @import("broker_config.zig").aeron_network_publication_max_messages_per_send_max;
 
 pub const ConfigError = error{
     FileNotFound,
@@ -144,6 +146,48 @@ pub const ConfigLoader = struct {
             config.reconnect_max_delay_ms = std.fmt.parseInt(u32, v, 10) catch
                 return ConfigError.InvalidValue;
 
+        if (props.get("broker.aeron.directory")) |v|
+            config.aeron_directory = self.allocator.dupe(u8, v) catch return ConfigError.IoError;
+        if (props.get("broker.aeron.ipc.term.length")) |v|
+            config.aeron_ipc_term_length = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.aeron.udp.term.length")) |v|
+            config.aeron_udp_term_length = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.aeron.ipc.mtu.length")) |v|
+            config.aeron_ipc_mtu_length = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.aeron.mtu.length")) |v|
+            config.aeron_mtu_length = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.aeron.sparse.files")) |v|
+            config.aeron_sparse_files = std.mem.eql(u8, v, "true");
+        if (props.get("broker.aeron.delete.directory.on.start")) |v|
+            config.aeron_delete_directory_on_start = std.mem.eql(u8, v, "true");
+        if (props.get("broker.aeron.delete.directory.on.shutdown")) |v|
+            config.aeron_delete_directory_on_shutdown = std.mem.eql(u8, v, "true");
+        if (props.get("broker.aeron.publication.linger.timeout.ns")) |v|
+            config.aeron_publication_linger_timeout_ns = std.fmt.parseInt(u64, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.aeron.client.liveness.timeout.ns")) |v|
+            config.aeron_client_liveness_timeout_ns = std.fmt.parseInt(u64, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.aeron.network.publication.max.messages.per.send")) |v|
+            config.aeron_network_publication_max_messages_per_send = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.aeron.ingress.stream.base")) |v|
+            config.aeron_ingress_stream_base = std.fmt.parseInt(i32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.aeron.admin.stream.base")) |v|
+            config.aeron_admin_stream_base = std.fmt.parseInt(i32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.aeron.data.stream.base")) |v|
+            config.aeron_data_stream_base = std.fmt.parseInt(i32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.aeron.threading.mode")) |v|
+            config.aeron_threading_mode = ThreadingMode.fromString(v) orelse
+                return ConfigError.InvalidValue;
+
         if (props.get("broker.threading.mode")) |v|
             config.threading_mode = ThreadingMode.fromString(v) orelse
                 return ConfigError.InvalidValue;
@@ -171,43 +215,6 @@ pub const ConfigLoader = struct {
             config.max_peers = std.fmt.parseInt(u8, v, 10) catch
                 return ConfigError.InvalidValue;
 
-        if (props.get("broker.io.uring.queue.depth")) |v|
-            config.io_uring_queue_depth = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.cq.depth")) |v|
-            config.io_uring_cq_depth = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.sqpoll")) |v|
-            config.io_uring_sqpoll = std.mem.eql(u8, v, "true");
-        if (props.get("broker.io.uring.single.issuer")) |v|
-            config.io_uring_single_issuer = std.mem.eql(u8, v, "true");
-        if (props.get("broker.io.uring.coop.taskrun")) |v|
-            config.io_uring_coop_taskrun = std.mem.eql(u8, v, "true");
-        if (props.get("broker.io.uring.registered.buffers")) |v|
-            config.io_uring_registered_buffers = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.sender.enabled")) |v|
-            config.io_uring_sender_enabled = std.mem.eql(u8, v, "true");
-        if (props.get("broker.io.uring.sender.cqe.batch.size")) |v|
-            config.io_uring_sender_cqe_batch_size = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.receiver.enabled")) |v|
-            config.io_uring_receiver_enabled = std.mem.eql(u8, v, "true");
-        if (props.get("broker.io.uring.receiver.cqe.batch.size")) |v|
-            config.io_uring_receiver_cqe_batch_size = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.recv.buffer.size")) |v|
-            config.io_uring_recv_buffer_size = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.io.uring.recv.buffer.count")) |v|
-            config.io_uring_recv_buffer_count = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.sender.writev.batch.size")) |v|
-            config.sender_writev_batch_size = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
-        if (props.get("broker.sender.write.budget.per.peer")) |v|
-            config.sender_write_budget_per_peer = std.fmt.parseInt(u32, v, 10) catch
-                return ConfigError.InvalidValue;
         if (props.get("broker.benchmark.latency.tracing.enabled")) |v|
             config.benchmark_latency_tracing_enabled = std.mem.eql(u8, v, "true");
 
@@ -333,6 +340,21 @@ fn applyEnvOverrides(
         "broker.heartbeat.timeout.ms",
         "broker.reconnect.initial.delay.ms",
         "broker.reconnect.max.delay.ms",
+        "broker.aeron.directory",
+        "broker.aeron.ipc.term.length",
+        "broker.aeron.udp.term.length",
+        "broker.aeron.ipc.mtu.length",
+        "broker.aeron.mtu.length",
+        "broker.aeron.sparse.files",
+        "broker.aeron.delete.directory.on.start",
+        "broker.aeron.delete.directory.on.shutdown",
+        "broker.aeron.publication.linger.timeout.ns",
+        "broker.aeron.client.liveness.timeout.ns",
+        "broker.aeron.network.publication.max.messages.per.send",
+        "broker.aeron.ingress.stream.base",
+        "broker.aeron.admin.stream.base",
+        "broker.aeron.data.stream.base",
+        "broker.aeron.threading.mode",
         "broker.threading.mode",
         "broker.idle.strategy",
         "broker.counter.values.buffer.size",
@@ -409,33 +431,46 @@ fn validate(config: *BrokerConfig) ConfigError!void {
     if (config.max_frame_length < 256 or config.max_frame_length > 1_048_576)
         return ConfigError.InvalidValue;
 
-    if (config.io_uring_queue_depth == 0 or config.io_uring_queue_depth > 32768)
+    try validateAeronTermLength(config.aeron_ipc_term_length);
+    try validateAeronTermLength(config.aeron_udp_term_length);
+    try validateAeronMtuLength(config.aeron_ipc_mtu_length);
+    try validateAeronMtuLength(config.aeron_mtu_length);
+    if (config.aeron_publication_linger_timeout_ns == 0 or config.aeron_client_liveness_timeout_ns == 0)
         return ConfigError.InvalidValue;
-    config.io_uring_queue_depth = alignToPowerOfTwo(config.io_uring_queue_depth);
-    if (config.io_uring_cq_depth == 0)
-        config.io_uring_cq_depth = config.io_uring_queue_depth * 4;
-    config.io_uring_cq_depth = alignToPowerOfTwo(config.io_uring_cq_depth);
-    if (config.io_uring_cq_depth < config.io_uring_queue_depth)
-        config.io_uring_cq_depth = config.io_uring_queue_depth;
-    if (config.io_uring_sender_cqe_batch_size == 0 or config.io_uring_sender_cqe_batch_size > 256)
+    if (config.aeron_network_publication_max_messages_per_send == 0 or
+        config.aeron_network_publication_max_messages_per_send > aeron_network_publication_max_messages_per_send_max)
+    {
         return ConfigError.InvalidValue;
-    if (config.io_uring_receiver_cqe_batch_size == 0 or config.io_uring_receiver_cqe_batch_size > 256)
+    }
+    if (config.aeron_ingress_stream_base <= 0 or
+        config.aeron_admin_stream_base <= 0 or
+        config.aeron_data_stream_base <= 0)
+    {
         return ConfigError.InvalidValue;
-    if (config.io_uring_recv_buffer_size < 1024 or config.io_uring_recv_buffer_size > config.max_frame_length)
-        return ConfigError.InvalidValue;
-    config.io_uring_recv_buffer_size = alignToPowerOfTwo(config.io_uring_recv_buffer_size);
-    if (config.io_uring_recv_buffer_count == 0 or config.io_uring_recv_buffer_count > 32768)
-        return ConfigError.InvalidValue;
-    config.io_uring_recv_buffer_count = alignToPowerOfTwo(config.io_uring_recv_buffer_count);
-    if (config.sender_writev_batch_size == 0 or config.sender_writev_batch_size > 1024)
-        return ConfigError.InvalidValue;
-    if (config.sender_write_budget_per_peer == 0 or config.sender_write_budget_per_peer > 4096)
-        return ConfigError.InvalidValue;
+    }
 
     // ── Compute derived fields ──────────────────────────────────
     config.max_counter_id = config.counter_values_buffer_size / 128;
     config.counter_metadata_buffer_size = config.max_counter_id * 256;
     config.single_node_cluster = config.peer_endpoints.len == 0;
+}
+
+fn validateAeronTermLength(value: u32) ConfigError!void {
+    if (!std.math.isPowerOfTwo(value)) {
+        return ConfigError.InvalidValue;
+    }
+    if (value < aeron_term_min_length) {
+        return ConfigError.BufferSizeTooSmall;
+    }
+}
+
+fn validateAeronMtuLength(value: u32) ConfigError!void {
+    if (value < 32 or value > 65_504) {
+        return ConfigError.InvalidValue;
+    }
+    if (value % 32 != 0) {
+        return ConfigError.InvalidValue;
+    }
 }
 
 fn alignToPowerOfTwo(value: u32) u32 {
@@ -509,24 +544,28 @@ test "default values are applied for omitted properties" {
     try std.testing.expectEqual(@as(u32, 65_536), config.control_buffer_size);
     try std.testing.expectEqual(@as(u32, 1_048_576), config.messages_buffer_size);
     try std.testing.expectEqual(@as(u32, 65_536), config.max_frame_length);
-    try std.testing.expect(!config.io_uring_sender_enabled);
-    try std.testing.expectEqual(@as(u32, 64), config.sender_writev_batch_size);
-    try std.testing.expectEqual(@as(u32, 256), config.sender_write_budget_per_peer);
-    try std.testing.expectEqual(@as(u32, 64), config.io_uring_sender_cqe_batch_size);
-    try std.testing.expectEqual(@as(u32, 256), config.io_uring_receiver_cqe_batch_size);
     try std.testing.expect(config.single_node_cluster);
 }
 
-test "io_uring phase 3 tuning properties are parsed" {
+test "aeron properties are parsed" {
     const content =
         \\broker.node.id=1
         \\broker.local.host.port=127.0.0.1:9000
-        \\broker.io.uring.sender.enabled=true
-        \\broker.io.uring.sender.cqe.batch.size=128
-        \\broker.io.uring.receiver.enabled=true
-        \\broker.io.uring.receiver.cqe.batch.size=128
-        \\broker.sender.writev.batch.size=256
-        \\broker.sender.write.budget.per.peer=512
+        \\broker.aeron.directory=/tmp/ringloom-aeron-custom
+        \\broker.aeron.ipc.term.length=1048576
+        \\broker.aeron.udp.term.length=16777216
+        \\broker.aeron.ipc.mtu.length=8192
+        \\broker.aeron.mtu.length=8192
+        \\broker.aeron.sparse.files=false
+        \\broker.aeron.delete.directory.on.start=false
+        \\broker.aeron.delete.directory.on.shutdown=true
+        \\broker.aeron.publication.linger.timeout.ns=1000000
+        \\broker.aeron.client.liveness.timeout.ns=2000000
+        \\broker.aeron.network.publication.max.messages.per.send=16
+        \\broker.aeron.ingress.stream.base=11000
+        \\broker.aeron.admin.stream.base=12000
+        \\broker.aeron.data.stream.base=13000
+        \\broker.aeron.threading.mode=shared_network
     ;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -535,12 +574,93 @@ test "io_uring phase 3 tuning properties are parsed" {
 
     const config = try loader.parseAndBuild(content);
 
-    try std.testing.expect(config.io_uring_sender_enabled);
-    try std.testing.expect(config.io_uring_receiver_enabled);
-    try std.testing.expectEqual(@as(u32, 128), config.io_uring_sender_cqe_batch_size);
-    try std.testing.expectEqual(@as(u32, 128), config.io_uring_receiver_cqe_batch_size);
-    try std.testing.expectEqual(@as(u32, 256), config.sender_writev_batch_size);
-    try std.testing.expectEqual(@as(u32, 512), config.sender_write_budget_per_peer);
+    try std.testing.expectEqualStrings("/tmp/ringloom-aeron-custom", config.aeron_directory);
+    try std.testing.expectEqual(@as(u32, 1_048_576), config.aeron_ipc_term_length);
+    try std.testing.expectEqual(@as(u32, 16_777_216), config.aeron_udp_term_length);
+    try std.testing.expectEqual(@as(u32, 8192), config.aeron_ipc_mtu_length);
+    try std.testing.expectEqual(@as(u32, 8192), config.aeron_mtu_length);
+    try std.testing.expect(!config.aeron_sparse_files);
+    try std.testing.expect(!config.aeron_delete_directory_on_start);
+    try std.testing.expect(config.aeron_delete_directory_on_shutdown);
+    try std.testing.expectEqual(@as(u64, 1_000_000), config.aeron_publication_linger_timeout_ns);
+    try std.testing.expectEqual(@as(u64, 2_000_000), config.aeron_client_liveness_timeout_ns);
+    try std.testing.expectEqual(@as(u32, 16), config.aeron_network_publication_max_messages_per_send);
+    try std.testing.expectEqual(@as(i32, 11_000), config.aeron_ingress_stream_base);
+    try std.testing.expectEqual(@as(i32, 12_000), config.aeron_admin_stream_base);
+    try std.testing.expectEqual(@as(i32, 13_000), config.aeron_data_stream_base);
+    try std.testing.expectEqual(ThreadingMode.shared_network, config.aeron_threading_mode);
+}
+
+test "aeron directory builder includes group and node id" {
+    const config = BrokerConfig{
+        .node_id = 7,
+        .local_host = "127.0.0.1",
+        .local_port = 9000,
+        .peer_endpoints = &.{},
+        .group_name = "orders",
+        .storage_path = "/tmp/ringloom",
+    };
+
+    var buffer: [128]u8 = undefined;
+    const dir = try config.buildAeronDirectory(&buffer);
+
+    try std.testing.expectEqualStrings("/tmp/ringloom/ringloom-aeron-orders-node-7", dir);
+}
+
+test "aeron term lengths must be powers of two" {
+    const content =
+        \\broker.node.id=1
+        \\broker.local.host.port=127.0.0.1:9000
+        \\broker.aeron.ipc.term.length=1000000
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const loader = ConfigLoader.initForTesting(arena.allocator());
+
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(content));
+}
+
+test "aeron term lengths must meet Aeron minimum" {
+    const content =
+        \\broker.node.id=1
+        \\broker.local.host.port=127.0.0.1:9000
+        \\broker.aeron.udp.term.length=32768
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const loader = ConfigLoader.initForTesting(arena.allocator());
+
+    try std.testing.expectError(ConfigError.BufferSizeTooSmall, loader.parseAndBuild(content));
+}
+
+test "aeron mtu lengths must be 32-byte aligned" {
+    const content =
+        \\broker.node.id=1
+        \\broker.local.host.port=127.0.0.1:9000
+        \\broker.aeron.mtu.length=4097
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const loader = ConfigLoader.initForTesting(arena.allocator());
+
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(content));
+}
+
+test "aeron network publication send budget must not exceed Aeron maximum" {
+    const content =
+        \\broker.node.id=1
+        \\broker.local.host.port=127.0.0.1:9000
+        \\broker.aeron.network.publication.max.messages.per.send=17
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const loader = ConfigLoader.initForTesting(arena.allocator());
+
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(content));
 }
 
 test "windows-style line endings are handled" {

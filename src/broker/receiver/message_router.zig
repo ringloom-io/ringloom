@@ -1,11 +1,6 @@
-//! Message routing for the RingLoom broker TCP receive path.
+//! Message routing for the RingLoom broker receive path.
 //!
-//! Routes application payloads to target service ring buffers. The TCP transport
-//! frame is stripped before delivery, while the logical template ID is preserved
-//! as the service-visible ring-buffer message type.
-//!
-//! TCP provides reliable ordered delivery, so there is no receive log buffer,
-//! no consumption position tracking, and no frame consumed marking.
+//! Routes decoded v2 data frames to target service message ring buffers.
 
 const std = @import("std");
 const ringloom_common = @import("ringloom_common");
@@ -13,8 +8,8 @@ const constants = ringloom_common.platform.constants;
 const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const message_header = ringloom_common.message.message_header;
 const MessageHeader = ringloom_common.message.MessageHeader;
-const frame_parser = ringloom_common.protocol.frame_parser;
-const TcpFrameHeader = frame_parser.TcpFrameHeader;
+const data_header = ringloom_common.message.data_header;
+const RingLoomDataHeader = data_header.RingLoomDataHeader;
 
 /// Result of a route attempt.
 pub const RouteResult = enum {
@@ -26,40 +21,24 @@ pub const RouteResult = enum {
     service_full,
 };
 
-/// Route an application payload to the target service's messages ring buffer.
-///
-/// The caller is responsible for stripping the 24-byte TcpFrameHeader before
-/// calling this function. The service receives only the application-layer
-/// payload, while `template_id` is mapped to the ring-buffer `msg_type_id` so
-/// remote `ServiceClient.tryClaim(template_id, ...)` matches the local path.
-///
-/// If the target service is unknown, the payload is dropped.
-/// If the service's ring buffer is full, the payload is dropped (always-read model).
-pub fn routeToService(
+pub fn routeDataToService(
     registry: *const ServiceRegistry,
-    header: TcpFrameHeader,
+    header: RingLoomDataHeader,
     payload: []const u8,
 ) RouteResult {
-    const target_service_id = header.target_service_id;
-    const service = registry.lookup(target_service_id) orelse {
+    const service = registry.lookup(header.target_service_id) orelse {
         return .unknown_service;
     };
 
     if (payload.len > std.math.maxInt(i32)) return .unknown_service;
+    if (payload.len != @as(usize, @intCast(header.payload_length))) return .unknown_service;
+
     const total_len = MessageHeader.encoded_length + payload.len;
     var claim = service.messages_ring_buffer.tryClaim(constants.message_envelope_msg_type_id, total_len) orelse {
         return .service_full;
     };
-    MessageHeader.encode(claim.buffer[0..MessageHeader.encoded_length], .{
-        .source_node_id = @intCast(header.source_node_id),
-        .source_service_id = @intCast(header.source_service_id),
-        .target_node_id = @intCast(header.target_node_id),
-        .target_service_id = @intCast(header.target_service_id),
-        .template_id = header.template_id,
-        .correlation_id = header.correlation_id,
-        .flags = header.flags,
-        .payload_length = @intCast(payload.len),
-    });
+    const envelope = data_header.dataHeaderToEnvelope(header);
+    @memcpy(claim.buffer[0..MessageHeader.encoded_length], std.mem.asBytes(&envelope));
     if (payload.len > 0) {
         @memcpy(claim.buffer[MessageHeader.encoded_length..][0..payload.len], payload);
     }
@@ -255,15 +234,15 @@ test "routeToService wraps remote frame metadata in envelope" {
     });
 
     const payload = "response";
-    const result = routeToService(&registry, .{
-        .frame_length = TcpFrameHeader.size + payload.len,
-        .flags = constants.flag_unfragmented,
+    const result = routeDataToService(&registry, .{
         .source_node_id = 7,
         .target_node_id = 1,
         .source_service_id = 11,
         .target_service_id = 5,
         .template_id = 42,
         .correlation_id = 1234,
+        .flags = constants.flag_unfragmented,
+        .payload_length = payload.len,
     }, payload);
     try testing.expect(result == .success);
 

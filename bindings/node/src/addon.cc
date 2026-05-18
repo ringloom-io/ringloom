@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <napi.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -20,6 +21,12 @@ struct TargetInfo {
 
 std::string StatusName(int status) {
   const char* value = ringloom_status_string(static_cast<ringloom_status_t>(status));
+  return value == nullptr ? "unknown" : value;
+}
+
+std::string AeronPublicationStatusName(int status) {
+  const char* value =
+      ringloom_aeron_publication_status_string(static_cast<ringloom_aeron_publication_status_t>(status));
   return value == nullptr ? "unknown" : value;
 }
 
@@ -281,10 +288,12 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
     Napi::Function func = DefineClass(env, "RingloomClient", {
       InstanceMethod("newClaim", &ClientWrap::NewClaim),
       InstanceMethod("tryClaim", &ClientWrap::TryClaim),
+      InstanceMethod("tryClaimTo", &ClientWrap::TryClaimTo),
       InstanceMethod("send", &ClientWrap::Send),
       InstanceMethod("sendTo", &ClientWrap::SendTo),
       InstanceMethod("sendToLeader", &ClientWrap::SendToLeader),
       InstanceMethod("targetServices", &ClientWrap::TargetServices),
+      InstanceMethod("lastAeronSendStatus", &ClientWrap::LastAeronSendStatus),
       InstanceMethod("onLifecycle", &ClientWrap::OnLifecycle),
       InstanceMethod("clearLifecycleHandler", &ClientWrap::ClearLifecycleHandler),
       InstanceMethod("close", &ClientWrap::Close),
@@ -334,9 +343,13 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
     if (self == nullptr || self->closed_) {
       return;
     }
-    self->RefreshTargets();
 
-    if (self->lifecycle_handler_.IsEmpty() || event == nullptr) {
+    if (event == nullptr) {
+      return;
+    }
+    self->UpdateTargetCache(*event);
+
+    if (self->lifecycle_handler_.IsEmpty()) {
       return;
     }
 
@@ -357,6 +370,23 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
       js_event.Set("serviceName", Napi::String::New(env, ""));
     }
     self->lifecycle_handler_.Call({js_event});
+  }
+
+  void UpdateTargetCache(const ringloom_service_lifecycle_event_t& event) {
+    auto matches = [&](const TargetInfo& target) {
+      return target.node_id == event.node_id && target.service_id == event.service_id;
+    };
+    auto it = std::find_if(targets_.begin(), targets_.end(), matches);
+    if (event.event_type == RINGLOOM_SERVICE_AVAILABLE) {
+      const TargetInfo target{event.service_id, event.node_id, event.is_leader};
+      if (it == targets_.end()) {
+        targets_.push_back(target);
+      } else {
+        *it = target;
+      }
+    } else if (it != targets_.end()) {
+      targets_.erase(it);
+    }
   }
 
   ringloom_status_t RefreshTargets() {
@@ -442,6 +472,33 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
     return Napi::Number::New(env, static_cast<int>(status));
   }
 
+  Napi::Value TryClaimTo(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "RingloomClient")) {
+      return env.Undefined();
+    }
+    if (info.Length() < 5 || !info[0].IsNumber() || !info[1].IsNumber() ||
+        !info[2].IsNumber() || !info[3].IsNumber() || !info[4].IsObject()) {
+      Napi::TypeError::New(env, "tryClaimTo(targetNodeId, targetServiceId, templateId, payloadLength, claim) is required")
+          .ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+
+    auto* claim = Napi::ObjectWrap<BufferClaimWrap>::Unwrap(info[4].As<Napi::Object>());
+    if (claim == nullptr || claim->IsClosed()) {
+      Napi::TypeError::New(env, "claim must be an open BufferClaim").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+
+    const int16_t target_node_id = static_cast<int16_t>(info[0].As<Napi::Number>().Int32Value());
+    const int32_t target_service_id = info[1].As<Napi::Number>().Int32Value();
+    const uint16_t template_id = static_cast<uint16_t>(info[2].As<Napi::Number>().Uint32Value());
+    const size_t payload_length = static_cast<size_t>(info[3].As<Napi::Number>().DoubleValue());
+    const ringloom_status_t status = ringloom_client_try_claim_to(
+        client_, target_node_id, target_service_id, template_id, payload_length, claim->MutableClaim());
+    return Napi::Number::New(env, static_cast<int>(status));
+  }
+
   Napi::Value Send(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     if (!RequireOpen(env, closed_, "RingloomClient")) {
@@ -508,6 +565,20 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
       result.Set(i, target);
     }
     return result;
+  }
+
+  Napi::Value LastAeronSendStatus(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "RingloomClient")) {
+      return env.Undefined();
+    }
+
+    ringloom_aeron_publication_status_t status = RINGLOOM_AERON_PUBLICATION_UNKNOWN;
+    const ringloom_status_t call_status = ringloom_client_last_aeron_send_status(client_, &status);
+    if (ThrowIfNonOk(env, "ringloom_client_last_aeron_send_status", call_status)) {
+      return env.Undefined();
+    }
+    return Napi::Number::New(env, static_cast<int>(status));
   }
 
   Napi::Value OnLifecycle(const Napi::CallbackInfo& info) {
@@ -664,6 +735,9 @@ class ServiceWrap final : public Napi::ObjectWrap<ServiceWrap> {
       InstanceMethod("pollControl", &ServiceWrap::PollControl),
       InstanceMethod("createClient", &ServiceWrap::CreateClient),
       InstanceMethod("messageConsumer", &ServiceWrap::MessageConsumer),
+      InstanceMethod("aeronDirectory", &ServiceWrap::AeronDirectory),
+      InstanceMethod("aeronInboundStreamId", &ServiceWrap::AeronInboundStreamId),
+      InstanceMethod("publicationConnected", &ServiceWrap::PublicationConnected),
       InstanceMethod("stop", &ServiceWrap::Stop),
       InstanceMethod("close", &ServiceWrap::Close),
     });
@@ -831,6 +905,51 @@ class ServiceWrap final : public Napi::ObjectWrap<ServiceWrap> {
     return MessageConsumerWrap::constructor.New({Napi::External<ringloom_message_consumer_t>::New(env, consumer)});
   }
 
+  Napi::Value AeronDirectory(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "RingloomService")) {
+      return env.Undefined();
+    }
+
+    const char* directory = nullptr;
+    size_t directory_len = 0;
+    const ringloom_status_t status = ringloom_service_aeron_directory(service_, &directory, &directory_len);
+    if (ThrowIfNonOk(env, "ringloom_service_aeron_directory", status)) {
+      return env.Undefined();
+    }
+    return directory == nullptr || directory_len == 0
+        ? Napi::String::New(env, "")
+        : Napi::String::New(env, directory, directory_len);
+  }
+
+  Napi::Value AeronInboundStreamId(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "RingloomService")) {
+      return env.Undefined();
+    }
+
+    int32_t stream_id = 0;
+    const ringloom_status_t status = ringloom_service_aeron_inbound_stream_id(service_, &stream_id);
+    if (ThrowIfNonOk(env, "ringloom_service_aeron_inbound_stream_id", status)) {
+      return env.Undefined();
+    }
+    return Napi::Number::New(env, stream_id);
+  }
+
+  Napi::Value PublicationConnected(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "RingloomService")) {
+      return env.Undefined();
+    }
+
+    bool connected = false;
+    const ringloom_status_t status = ringloom_service_publication_connected(service_, &connected);
+    if (ThrowIfNonOk(env, "ringloom_service_publication_connected", status)) {
+      return env.Undefined();
+    }
+    return Napi::Boolean::New(env, connected);
+  }
+
   Napi::Value Stop(const Napi::CallbackInfo& info) {
     if (!RequireOpen(info.Env(), closed_, "RingloomService")) {
       return info.Env().Undefined();
@@ -864,6 +983,16 @@ Napi::Value LastErrorMessageValue(const Napi::CallbackInfo& info) {
   return Napi::String::New(info.Env(), LastErrorMessage());
 }
 
+Napi::Value AeronPublicationStatusNameValue(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "aeronPublicationStatusName(status) requires a numeric status")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  return Napi::String::New(env, AeronPublicationStatusName(info[0].As<Napi::Number>().Int32Value()));
+}
+
 Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
   BufferClaimWrap::Init(env, exports);
   ClientWrap::Init(env, exports);
@@ -871,6 +1000,7 @@ Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
   ServiceWrap::Init(env, exports);
   exports.Set("abiVersion", Napi::Function::New(env, AbiVersion));
   exports.Set("statusName", Napi::Function::New(env, StatusNameValue));
+  exports.Set("aeronPublicationStatusName", Napi::Function::New(env, AeronPublicationStatusNameValue));
   exports.Set("lastErrorMessage", Napi::Function::New(env, LastErrorMessageValue));
   return exports;
 }

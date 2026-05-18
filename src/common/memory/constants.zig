@@ -18,6 +18,9 @@ pub const cache_line_pad: usize = platform_constants.cache_line_pad;
 /// Metadata header occupies the first 512 bytes of every metadata file.
 pub const metadata_header_length: usize = platform_constants.metadata_header_length;
 
+/// Current metadata layout version.
+pub const metadata_version: i32 = platform_constants.metadata_version;
+
 /// Heartbeat timestamp starts at offset 256 within the header (cache-line aligned).
 pub const heartbeat_offset_within_header: usize = platform_constants.heartbeat_offset_within_header;
 
@@ -27,8 +30,8 @@ pub const next_service_id_offset_within_header: usize = platform_constants.next_
 /// Flow control buffer length field offset within the header (broker only).
 pub const fc_buffer_length_offset: usize = platform_constants.fc_buffer_length_offset;
 
-/// Per-peer send counters length field offset within the header (broker only).
-pub const peer_send_counters_length_offset: usize = platform_constants.peer_send_counters_length_offset;
+/// Reserved broker metadata header slot retained for v2 layout stability.
+pub const broker_reserved_length_offset: usize = platform_constants.broker_reserved_length_offset;
 
 /// Generic monitoring tail fields shared by broker and service metadata files.
 pub const metadata_monitoring_version: i32 = platform_constants.metadata_monitoring_version;
@@ -38,6 +41,8 @@ pub const error_log_length_offset: usize = platform_constants.error_log_length_o
 pub const monitoring_tail_offset_offset: usize = platform_constants.monitoring_tail_offset_offset;
 pub const monitoring_tail_length_offset: usize = platform_constants.monitoring_tail_length_offset;
 pub const metadata_monitoring_version_offset: usize = platform_constants.metadata_monitoring_version_offset;
+pub const aeron_discovery_region_offset_offset: usize = platform_constants.aeron_discovery_region_offset_offset;
+pub const aeron_discovery_region_length_offset: usize = platform_constants.aeron_discovery_region_length_offset;
 
 /// When blocking mode is enabled, three 128-byte cache-line-padded slots are
 /// inserted between the header and the ring buffers.
@@ -54,10 +59,12 @@ pub const ring_buffer_record_header_length: usize = platform_constants.ring_buff
 
 /// Default buffer sizes.
 pub const default_control_buffer_length: usize = platform_constants.default_control_buffer_length;
-pub const default_send_buffer_length: usize = platform_constants.default_send_buffer_length;
 pub const default_messages_buffer_length: usize = platform_constants.default_messages_buffer_length;
 pub const default_counter_values_buffer_length: usize = platform_constants.default_counter_values_buffer_length;
 pub const default_error_log_buffer_length: usize = platform_constants.default_error_log_buffer_length;
+pub const max_aeron_directory_length: usize = platform_constants.max_aeron_directory_length;
+pub const max_aeron_channel_length: usize = platform_constants.max_aeron_channel_length;
+pub const default_max_peers: usize = platform_constants.default_max_peers;
 
 /// Broker is always service ID 0.
 pub const broker_service_id: i32 = platform_constants.broker_service_id;

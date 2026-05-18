@@ -92,6 +92,48 @@ public final class RingloomService implements AutoCloseable {
         }
     }
 
+    public String aeronDirectory() {
+        ensureOpen();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outDirectory = arena.allocate(RingloomNative.ADDRESS);
+            MemorySegment outDirectoryLen = arena.allocate(ValueLayout.JAVA_LONG);
+            int status = RingloomNative.serviceAeronDirectory(nativeHandle, outDirectory, outDirectoryLen);
+            RingloomNative.throwForStatus("ringloom_service_aeron_directory", status);
+
+            MemorySegment directory = outDirectory.get(RingloomNative.ADDRESS, 0);
+            long length = outDirectoryLen.get(ValueLayout.JAVA_LONG, 0);
+            if (directory.address() == 0 || length == 0) {
+                return "";
+            }
+            if (length > Integer.MAX_VALUE) {
+                throw new IllegalStateException("Aeron directory length is out of range: " + length);
+            }
+            byte[] bytes = new byte[(int) length];
+            MemorySegment.copy(directory.reinterpret(length), ValueLayout.JAVA_BYTE, 0, bytes, 0, bytes.length);
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
+    }
+
+    public int aeronInboundStreamId() {
+        ensureOpen();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outValue = arena.allocate(ValueLayout.JAVA_INT);
+            int status = RingloomNative.serviceAeronInboundStreamId(nativeHandle, outValue);
+            RingloomNative.throwForStatus("ringloom_service_aeron_inbound_stream_id", status);
+            return outValue.get(ValueLayout.JAVA_INT, 0);
+        }
+    }
+
+    public boolean publicationConnected() {
+        ensureOpen();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outValue = arena.allocate(ValueLayout.JAVA_BOOLEAN);
+            int status = RingloomNative.servicePublicationConnected(nativeHandle, outValue);
+            RingloomNative.throwForStatus("ringloom_service_publication_connected", status);
+            return outValue.get(ValueLayout.JAVA_BOOLEAN, 0);
+        }
+    }
+
     /**
      * Creates a client for a logical target service name.
      *

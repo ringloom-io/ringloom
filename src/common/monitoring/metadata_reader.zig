@@ -38,6 +38,40 @@ pub const ErrorEntry = struct {
     description: []const u8,
 };
 
+pub const BrokerAeronSample = struct {
+    broker_ingress_stream_id: i32,
+    admin_stream_base: i32,
+    data_stream_base: i32,
+    aeron_directory: []const u8,
+    local_data_channel: []const u8,
+    local_admin_channel: []const u8,
+};
+
+pub const ServiceAeronSample = struct {
+    broker_ingress_stream_id: i32,
+    broker_start_timestamp_ms: i64,
+    aeron_directory: []const u8,
+};
+
+pub fn readBrokerAeron(discovery: *const memory.BrokerAeronDiscovery) BrokerAeronSample {
+    return .{
+        .broker_ingress_stream_id = discovery.broker_ingress_stream_id,
+        .admin_stream_base = discovery.admin_stream_base,
+        .data_stream_base = discovery.data_stream_base,
+        .aeron_directory = discovery.directory(),
+        .local_data_channel = discovery.dataChannel(),
+        .local_admin_channel = discovery.adminChannel(),
+    };
+}
+
+pub fn readServiceAeron(discovery: *const memory.ServiceAeronDiscovery) ServiceAeronSample {
+    return .{
+        .broker_ingress_stream_id = discovery.broker_ingress_stream_id,
+        .broker_start_timestamp_ms = discovery.broker_start_timestamp_ms,
+        .aeron_directory = discovery.directory(),
+    };
+}
+
 pub fn deriveRingStats(buffer: []u8, capacity: usize) RingStats {
     const trailer_offset = capacity;
     const producer = loadAt(i64, buffer, trailer_offset + ring_buffer.tail_position_offset);

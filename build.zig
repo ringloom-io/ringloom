@@ -1,8 +1,11 @@
 const std = @import("std");
+const aeron_build = @import("build_support/aeron.zig");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const requested_target = b.standardTargetOptions(.{});
+    const target = requested_target;
     const optimize = b.standardOptimizeOption(.{});
+    const use_llvm = b.option(bool, "use-llvm", "Build Zig artifacts with the LLVM backend") orelse true;
 
     // ── Library modules ──────────────────────────────────────────────
 
@@ -11,12 +14,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    const ringloom_tcp = b.addModule("ringloom_tcp", .{
-        .root_source_file = b.path("src/tcp/tcp.zig"),
-        .target = target,
-        .imports = &.{
-            .{ .name = "ringloom_common", .module = ringloom_common },
-        },
+    const ringloom_aeron = aeron_build.buildRingLoomAeron(b, target, optimize, .{
+        .module_name = "ringloom_aeron",
+        .library_name = "aeron_driver",
+        .use_llvm = use_llvm,
+    });
+
+    const ringloom_aeron_perf = aeron_build.buildRingLoomAeron(b, target, .ReleaseFast, .{
+        .module_name = null,
+        .library_name = "aeron_driver_perf",
+        .use_llvm = use_llvm,
     });
 
     const ringloom_service = b.addModule("ringloom_service", .{
@@ -24,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "ringloom_common", .module = ringloom_common },
+            .{ .name = "ringloom_aeron", .module = ringloom_aeron.module },
         },
     });
 
@@ -33,6 +41,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "ringloom_common", .module = ringloom_common },
+            .{ .name = "ringloom_aeron", .module = ringloom_aeron.module },
         },
     });
 
@@ -42,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "ringloom_common", .module = ringloom_common },
+            .{ .name = "ringloom_aeron", .module = ringloom_aeron.module },
         },
     });
 
@@ -49,6 +59,7 @@ pub fn build(b: *std.Build) void {
         .name = "ringloom_service",
         .linkage = .dynamic,
         .root_module = service_c_abi_shared_mod,
+        .use_llvm = use_llvm,
     });
     b.installArtifact(service_shared_lib);
 
@@ -56,6 +67,7 @@ pub fn build(b: *std.Build) void {
         .name = "ringloom_service",
         .linkage = .static,
         .root_module = service_c_abi_static_mod,
+        .use_llvm = use_llvm,
     });
     b.installArtifact(service_static_lib);
 
@@ -70,7 +82,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "ringloom_common", .module = ringloom_common },
-            .{ .name = "ringloom_tcp", .module = ringloom_tcp },
+            .{ .name = "ringloom_aeron", .module = ringloom_aeron.module },
         },
     });
 
@@ -93,10 +105,10 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
                 .{ .name = "ringloom_broker", .module = ringloom_broker },
-                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
                 .{ .name = "ringloom_service", .module = ringloom_service },
             },
         }),
+        .use_llvm = use_llvm,
     });
     b.installArtifact(broker_exe);
 
@@ -144,6 +156,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "ringloom_testing", .module = ringloom_testing },
                 },
             }),
+            .use_llvm = use_llvm,
         });
         b.installArtifact(test_exe);
         test_bins_step.dependOn(&test_exe.step);
@@ -151,58 +164,81 @@ pub fn build(b: *std.Build) void {
 
     // ── Unit & integration tests ─────────────────────────────────────
 
+    const c_link_test_target = target;
+
+    const common_for_c_link_tests = b.createModule(.{
+        .root_source_file = b.path("src/common/root.zig"),
+        .target = c_link_test_target,
+    });
+    const aeron_for_c_link_tests = aeron_build.buildRingLoomAeron(b, c_link_test_target, optimize, .{
+        .module_name = null,
+        .library_name = "aeron_driver_c_link_test",
+        .use_llvm = use_llvm,
+    });
+    const broker_for_c_link_tests = b.createModule(.{
+        .root_source_file = b.path("src/broker/root.zig"),
+        .target = c_link_test_target,
+        .imports = &.{
+            .{ .name = "ringloom_common", .module = common_for_c_link_tests },
+            .{ .name = "ringloom_aeron", .module = aeron_for_c_link_tests.module },
+        },
+    });
+    const service_for_c_link_tests = b.createModule(.{
+        .root_source_file = b.path("src/service/root.zig"),
+        .target = c_link_test_target,
+        .imports = &.{
+            .{ .name = "ringloom_common", .module = common_for_c_link_tests },
+            .{ .name = "ringloom_aeron", .module = aeron_for_c_link_tests.module },
+        },
+    });
+
     const common_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/common/root.zig"),
             .target = target,
         }),
+        .use_llvm = use_llvm,
     });
     const run_common_tests = b.addRunArtifact(common_tests);
 
     const broker_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/broker/root.zig"),
-            .target = target,
-            .imports = &.{
-                .{ .name = "ringloom_common", .module = ringloom_common },
-                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
-            },
-        }),
+        .root_module = broker_for_c_link_tests,
+        .use_llvm = use_llvm,
     });
     const run_broker_tests = b.addRunArtifact(broker_tests);
 
-    const tcp_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tcp/tcp.zig"),
-            .target = target,
-            .imports = &.{
-                .{ .name = "ringloom_common", .module = ringloom_common },
-            },
-        }),
-    });
-    const run_tcp_tests = b.addRunArtifact(tcp_tests);
+    var run_aeron_tests: ?*std.Build.Step.Run = null;
+    if (target.result.os.tag == .linux) {
+        const aeron_test_target = target;
+        const ringloom_aeron_for_tests = aeron_build.buildRingLoomAeron(b, aeron_test_target, optimize, .{
+            .module_name = null,
+            .library_name = "aeron_driver_test",
+            .use_llvm = use_llvm,
+        });
+        const aeron_tests = b.addTest(.{
+            .root_module = ringloom_aeron_for_tests.module,
+            .use_llvm = use_llvm,
+        });
+        run_aeron_tests = b.addRunArtifact(aeron_tests);
+    }
 
     const service_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/service/root.zig"),
-            .target = target,
-            .imports = &.{
-                .{ .name = "ringloom_common", .module = ringloom_common },
-            },
-        }),
+        .root_module = service_for_c_link_tests,
+        .use_llvm = use_llvm,
     });
     const run_service_tests = b.addRunArtifact(service_tests);
 
     const exe_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/bin/ringloom_broker_main.zig"),
-            .target = target,
+            .target = c_link_test_target,
             .imports = &.{
-                .{ .name = "ringloom_common", .module = ringloom_common },
-                .{ .name = "ringloom_broker", .module = ringloom_broker },
-                .{ .name = "ringloom_service", .module = ringloom_service },
+                .{ .name = "ringloom_common", .module = common_for_c_link_tests },
+                .{ .name = "ringloom_broker", .module = broker_for_c_link_tests },
+                .{ .name = "ringloom_service", .module = service_for_c_link_tests },
             },
         }),
+        .use_llvm = use_llvm,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
@@ -214,13 +250,16 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ringloom_common", .module = ringloom_common },
             },
         }),
+        .use_llvm = use_llvm,
     });
     const run_testing_tests = b.addRunArtifact(testing_tests);
 
     const test_step = b.step("test", "Run all unit and integration tests");
     test_step.dependOn(&run_common_tests.step);
     test_step.dependOn(&run_broker_tests.step);
-    test_step.dependOn(&run_tcp_tests.step);
+    if (run_aeron_tests) |run| {
+        test_step.dependOn(&run.step);
+    }
     test_step.dependOn(&run_service_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_testing_tests.step);
@@ -228,8 +267,18 @@ pub fn build(b: *std.Build) void {
     const test_testing_step = b.step("test-testing", "Run testing harness tests only");
     test_testing_step.dependOn(&run_testing_tests.step);
 
+    const test_aeron_step = b.step("test-aeron", "Run Aeron wrapper tests only");
+    if (run_aeron_tests) |run| {
+        test_aeron_step.dependOn(&run.step);
+    } else {
+        const fail = b.addFail("ringloom_aeron tests are currently supported only on Linux");
+        test_aeron_step.dependOn(&fail.step);
+    }
+
     const service_c_step = b.step("service-c", "Build the service C ABI library and header");
-    service_c_step.dependOn(b.getInstallStep());
+    service_c_step.dependOn(&service_shared_lib.step);
+    service_c_step.dependOn(&service_static_lib.step);
+    service_c_step.dependOn(&install_service_header.step);
     service_c_step.dependOn(&run_service_tests.step);
 
     // ── End-to-end correctness tests ─────────────────────────────────
@@ -245,9 +294,9 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
                 .{ .name = "ringloom_testing", .module = ringloom_testing },
-                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
             },
         }),
+        .use_llvm = use_llvm,
     });
     const run_e2e_tests = b.addRunArtifact(e2e_tests);
 
@@ -273,6 +322,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ringloom_testing", .module = ringloom_testing },
             },
         }),
+        .use_llvm = use_llvm,
     });
     const run_perf_tests = b.addRunArtifact(perf_tests);
 
@@ -282,6 +332,24 @@ pub fn build(b: *std.Build) void {
 
     const perf_step = b.step("perf", "Run performance benchmarks (ReleaseFast)");
     perf_step.dependOn(&run_perf_tests.step);
+
+    const plain_aeron_perf_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/perf/plain_aeron_remote_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "ringloom_common", .module = ringloom_common },
+                .{ .name = "ringloom_aeron", .module = ringloom_aeron_perf.module },
+                .{ .name = "ringloom_testing", .module = ringloom_testing },
+            },
+        }),
+        .use_llvm = use_llvm,
+    });
+    const run_plain_aeron_perf_tests = b.addRunArtifact(plain_aeron_perf_tests);
+
+    const perf_aeron_step = b.step("perf-aeron", "Run plain Aeron remote transit benchmarks (ReleaseFast)");
+    perf_aeron_step.dependOn(&run_plain_aeron_perf_tests.step);
 
     const java_bindings_cmd = b.addSystemCommand(&.{
         "sh",
@@ -373,6 +441,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ringloom_common", .module = ringloom_common },
             },
         }),
+        .use_llvm = use_llvm,
     });
     b.installArtifact(stat_exe);
 
@@ -395,9 +464,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
-                .{ .name = "ringloom_tcp", .module = ringloom_tcp },
             },
         }),
+        .use_llvm = use_llvm,
     });
     b.installArtifact(observability_exe);
 
@@ -455,6 +524,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "order_management_sample_common", .module = order_sample_common },
                 },
             }),
+            .use_llvm = use_llvm,
         });
         b.installArtifact(sample_exe);
         sample_build_step.dependOn(&sample_exe.step);
@@ -469,6 +539,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ringloom_service", .module = ringloom_service },
             },
         }),
+        .use_llvm = use_llvm,
     });
     const run_sample_common_tests = b.addRunArtifact(sample_common_tests);
     sample_build_step.dependOn(&run_sample_common_tests.step);

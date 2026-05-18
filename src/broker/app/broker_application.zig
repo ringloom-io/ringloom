@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = @import("ringloom_tcp").socket;
+const ringloom_aeron = @import("ringloom_aeron");
 
 const ringloom_common = @import("ringloom_common");
 const config_mod = @import("ringloom_common").config.broker_config;
@@ -9,9 +9,9 @@ const memory = ringloom_common.memory;
 const concurrent = ringloom_common.concurrent;
 const control = @import("../control.zig");
 const cluster = @import("../cluster.zig");
-const sender = @import("../sender.zig");
 const receiver = @import("../receiver.zig");
 const threading = @import("../threading.zig");
+const broker_aeron = @import("../aeron.zig");
 
 const BrokerConfig = config_mod.BrokerConfig;
 const ConfigLoader = config_loader_mod.ConfigLoader;
@@ -23,14 +23,17 @@ const RingBuffer = concurrent.ring_buffer.RingBuffer;
 const CountersManager = concurrent.counters.CountersManager;
 const ControlLoop = control.ControlLoop;
 const ClusterManager = cluster.ClusterManager;
-const SenderEventLoop = sender.SenderEventLoop;
+const SenderEventLoop = @import("../sender.zig").SenderEventLoop;
 const ReceiverEventLoop = receiver.ReceiverEventLoop;
 const BrokerThreads = threading.BrokerThreads;
+const CompositeEventLoop = threading.CompositeEventLoop;
 const RoutingRegistry = receiver.ServiceRegistry;
 const CommandQueue = ringloom_common.concurrent.command_queue.CommandQueue;
 const Command = ringloom_common.concurrent.command_queue.Command;
 const admin_dispatch = cluster.admin_dispatch;
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
+const BrokerAeronClient = broker_aeron.BrokerAeronClient;
+const BrokerUdpTransport = broker_aeron.BrokerUdpTransport;
 
 pub const ExitCode = enum(u8) {
     success = 0,
@@ -51,7 +54,6 @@ pub const BrokerApplication = struct {
     broker_metadata: ?BrokerMetadataFile = null,
 
     control_ring_buffer: ?RingBuffer = null,
-    send_ring_buffer: ?RingBuffer = null,
 
     counters: ?CountersManager = null,
 
@@ -68,6 +70,14 @@ pub const BrokerApplication = struct {
     receiver_loop: ?ReceiverEventLoop = null,
 
     broker_threads: ?BrokerThreads = null,
+    network_composite_loop: ?CompositeEventLoop = null,
+    shared_composite_loop: ?CompositeEventLoop = null,
+
+    aeron_directory_buf: [config_mod.max_aeron_directory_length]u8 = undefined,
+    aeron_driver: ?ringloom_aeron.Driver = null,
+    aeron_driver_agents: ?ringloom_aeron.DriverAgents = null,
+    aeron_client: ?BrokerAeronClient = null,
+    aeron_udp_transport: ?BrokerUdpTransport = null,
 
     started: bool = false,
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -115,18 +125,22 @@ pub const BrokerApplication = struct {
         // We only clean up shared resources here — never re-call onClose/deinit
         // on event loops that threads already finalized.
 
+        if (self.receiver_loop) |*loop| {
+            loop.deinit();
+            self.receiver_loop = null;
+        }
         if (self.sender_loop) |*loop| {
             loop.deinit();
             self.sender_loop = null;
         }
 
-        if (self.receiver_loop) |*loop| {
-            loop.deinit();
-            self.receiver_loop = null;
-        }
-
         self.control_loop = null;
+        self.network_composite_loop = null;
+        self.shared_composite_loop = null;
         self.broker_threads = null;
+        self.stopAeronUdpTransport();
+        self.stopAeronClient();
+        self.stopAeronDriver();
 
         self.cluster_manager = null;
         self.routing_registry = null;
@@ -183,6 +197,21 @@ pub const BrokerApplication = struct {
     pub fn start(self: *Self) !void {
         if (self.started) return;
 
+        try self.startAeronDriver();
+        errdefer self.stopAeronDriver();
+        try self.startAeronClient();
+        errdefer self.stopAeronClient();
+        try self.startAeronUdpTransport();
+        errdefer self.stopAeronUdpTransport();
+
+        const aeron_assignment = broker_aeron.assignAgents(&self.aeron_driver_agents.?);
+        var local_host_port_buf: [64]u8 = undefined;
+        const local_host_port = cluster.admin_messages.padHostPort(try std.fmt.bufPrint(
+            &local_host_port_buf,
+            "{s}:{}",
+            .{ self.config.local_host, self.config.local_port },
+        ));
+
         self.control_loop = ControlLoop.init(.{
             .control_rb = &self.control_ring_buffer.?,
             .cmd_queue = &self.control_command_queue.?,
@@ -193,8 +222,9 @@ pub const BrokerApplication = struct {
             .group = self.config.group_name,
             .allocator = self.allocator,
             .admin_cmd_queue = &self.admin_cmd_queue.?,
-            .send_ring_buffer = &self.send_ring_buffer.?,
+            .broker_udp_transport = if (self.aeron_udp_transport) |*transport_ref| transport_ref else null,
             .peer_node_ids = self.peer_node_ids orelse &.{},
+            .local_host_and_port = local_host_port,
             .routing_registry = &self.routing_registry.?,
             .fc_region = self.broker_metadata.?.getFlowControlRegion(),
             .fc_enabled = self.config.fc_enabled,
@@ -203,92 +233,31 @@ pub const BrokerApplication = struct {
             .fc_check_interval_ms = self.config.fc_check_interval_ms,
             .fc_refresh_interval_ms = self.config.fc_refresh_interval_ms,
             .fc_normal_refresh_interval_ms = self.config.fc_normal_refresh_interval_ms,
+            .aeron_agent = aeron_assignment.control,
         });
 
-        self.sender_loop = try SenderEventLoop.initWithGroupAndOptions(
-            &self.send_ring_buffer.?,
-            &self.counters.?,
-            self.config.node_id,
-            self.allocator,
-            self.config.group_name,
-            self.config.benchmark_latency_tracing_enabled,
-            .{
-                .io_uring_enabled = self.config.io_uring_sender_enabled,
-                .io_uring_queue_depth = @intCast(self.config.io_uring_queue_depth),
-                .io_uring_cq_depth = self.config.io_uring_cq_depth,
-                .io_uring_sqpoll = self.config.io_uring_sqpoll,
-                .io_uring_single_issuer = self.config.io_uring_single_issuer,
-                .io_uring_coop_taskrun = self.config.io_uring_coop_taskrun,
-                .io_uring_cqe_batch_size = self.config.io_uring_sender_cqe_batch_size,
-                .writev_batch_size = self.config.sender_writev_batch_size,
-                .write_budget_per_peer = self.config.sender_write_budget_per_peer,
-            },
-        );
-        if (self.config.fc_peer_send_counters_enabled) {
-            self.sender_loop.?.setPeerSendCountersRegion(
-                self.broker_metadata.?.getPeerSendCountersRegion(),
-            );
-        }
-        errdefer {
-            self.sender_loop.?.deinit();
-            self.sender_loop = null;
-        }
+        self.sender_loop = SenderEventLoop.init();
+        self.sender_loop.?.setAeronAgent(aeron_assignment.sender);
 
-        self.receiver_loop = ReceiverEventLoop.initWithGroupAndIoUring(
+        self.receiver_loop = ReceiverEventLoop.initWithAeron(
             &self.routing_registry.?,
             &self.counters.?,
             self.config.node_id,
-            self.allocator,
-            self.config.group_name,
             &self.admin_cmd_queue.?,
             self.config.benchmark_latency_tracing_enabled,
             .{
-                .enabled = self.config.io_uring_receiver_enabled,
-                .queue_depth = @intCast(self.config.io_uring_queue_depth),
-                .cq_depth = self.config.io_uring_cq_depth,
-                .sqpoll = self.config.io_uring_sqpoll,
-                .single_issuer = self.config.io_uring_single_issuer,
-                .coop_taskrun = self.config.io_uring_coop_taskrun,
-                .cqe_batch_size = self.config.io_uring_receiver_cqe_batch_size,
-                .recv_buffer_size = self.config.io_uring_recv_buffer_size,
-                .recv_buffer_count = @intCast(self.config.io_uring_recv_buffer_count),
+                .broker_udp_transport = if (self.aeron_udp_transport) |*transport_ref| transport_ref else null,
+                .max_data_payload_length = self.config.max_frame_length,
+                .peer_node_ids = self.peer_node_ids orelse &.{},
             },
         );
+        self.receiver_loop.?.setAeronAgent(aeron_assignment.receiver);
 
-        // Wire up TCP: add peer endpoints to the sender, init listener on receiver.
-        for (self.config.peer_endpoints) |ep| {
-            const addr = net.Address.parseIp4(ep.host, ep.port) catch continue;
-            self.sender_loop.?.addPeer(ep.node_id, addr) catch continue;
-        }
-        if (self.config.peer_endpoints.len > 0) {
-            self.receiver_loop.?.initListener(self.config.local_host, self.config.local_port) catch |err| {
-                std.log.warn("Failed to init TCP listener: {}", .{err});
-            };
-        }
-
-        self.broker_threads = BrokerThreads.init(
-            EventLoop{
-                .context = @ptrCast(&self.control_loop.?),
-                .doWorkFn = &ControlLoop.doWorkFn,
-                .onCloseFn = &ControlLoop.onCloseFn,
-            },
-            EventLoop{
-                .context = @ptrCast(&self.sender_loop.?),
-                .doWorkFn = &senderDoWorkFn,
-                .onCloseFn = &senderOnCloseFn,
-            },
-            EventLoop{
-                .context = @ptrCast(&self.receiver_loop.?),
-                .doWorkFn = &receiverDoWorkFn,
-                .onCloseFn = &receiverOnCloseFn,
-            },
-            toIdleStrategy(self.config.idle_strategy_name),
-            toIdleStrategy(self.config.idle_strategy_name),
-            toIdleStrategy(self.config.idle_strategy_name),
+        try self.initBrokerThreads();
+        self.broker_threads.?.setCpuAffinities(
+            self.config.sender_cpu_affinity,
+            self.config.receiver_cpu_affinity,
         );
-
-        self.broker_threads.?.sender_runner.cpu_affinity = self.config.sender_cpu_affinity;
-        self.broker_threads.?.receiver_runner.cpu_affinity = self.config.receiver_cpu_affinity;
 
         try self.broker_threads.?.start();
         self.started = true;
@@ -305,6 +274,132 @@ pub const BrokerApplication = struct {
         self.started = false;
     }
 
+    fn startAeronDriver(self: *Self) !void {
+        if (self.aeron_driver != null) return;
+
+        const directory = try self.config.buildAeronDirectory(&self.aeron_directory_buf);
+        const mode = toAeronThreadingMode(self.config.aeron_threading_mode);
+
+        self.aeron_driver = try ringloom_aeron.Driver.initEmbedded(.{
+            .directory = directory,
+            .delete_dir_on_start = self.config.aeron_delete_directory_on_start,
+            .delete_dir_on_shutdown = self.config.aeron_delete_directory_on_shutdown,
+            .term_buffer_length = @intCast(self.config.aeron_udp_term_length),
+            .ipc_term_buffer_length = @intCast(self.config.aeron_ipc_term_length),
+            .mtu_length = @intCast(self.config.aeron_mtu_length),
+            .ipc_mtu_length = @intCast(self.config.aeron_ipc_mtu_length),
+            .term_buffer_sparse_file = self.config.aeron_sparse_files,
+            .publication_linger_timeout_ns = self.config.aeron_publication_linger_timeout_ns,
+            .client_liveness_timeout_ns = self.config.aeron_client_liveness_timeout_ns,
+            .network_publication_max_messages_per_send = self.config.aeron_network_publication_max_messages_per_send,
+        }, mode);
+        errdefer {
+            self.aeron_driver.?.deinit();
+            self.aeron_driver = null;
+        }
+
+        self.aeron_driver_agents = try self.aeron_driver.?.agents(mode);
+    }
+
+    fn stopAeronDriver(self: *Self) void {
+        self.aeron_driver_agents = null;
+        if (self.aeron_driver) |*driver| {
+            driver.deinit();
+        }
+        self.aeron_driver = null;
+    }
+
+    fn startAeronClient(self: *Self) !void {
+        if (self.aeron_client != null) return;
+
+        const directory = try self.config.buildAeronDirectory(&self.aeron_directory_buf);
+        self.aeron_client = try BrokerAeronClient.open(directory);
+    }
+
+    fn stopAeronClient(self: *Self) void {
+        if (self.aeron_client) |*client| {
+            client.deinit();
+        }
+        self.aeron_client = null;
+    }
+
+    fn startAeronUdpTransport(self: *Self) !void {
+        if (self.aeron_udp_transport != null) return;
+        if (self.config.peer_endpoints.len == 0) return;
+
+        self.aeron_udp_transport = try BrokerUdpTransport.open(
+            self.allocator,
+            &self.config,
+            &self.aeron_client.?.client,
+            &self.aeron_driver_agents.?,
+        );
+    }
+
+    fn stopAeronUdpTransport(self: *Self) void {
+        if (self.aeron_udp_transport) |*transport_ref| {
+            transport_ref.deinit();
+        }
+        self.aeron_udp_transport = null;
+    }
+
+    fn initBrokerThreads(self: *Self) !void {
+        const control_event = EventLoop{
+            .context = @ptrCast(&self.control_loop.?),
+            .doWorkFn = &ControlLoop.doWorkFn,
+            .onCloseFn = &ControlLoop.onCloseFn,
+        };
+        const receiver_event = EventLoop{
+            .context = @ptrCast(&self.receiver_loop.?),
+            .doWorkFn = &receiverDoWorkFn,
+            .onCloseFn = &receiverOnCloseFn,
+        };
+        const sender_event = EventLoop{
+            .context = @ptrCast(&self.sender_loop.?),
+            .doWorkFn = &senderDoWorkFn,
+            .onCloseFn = &senderOnCloseFn,
+        };
+        const idle = toIdleStrategy(self.config.idle_strategy_name);
+
+        switch (toBrokerThreadingMode(self.config.threading_mode)) {
+            .dedicated => {
+                self.broker_threads = BrokerThreads.initDedicated(
+                    control_event,
+                    sender_event,
+                    receiver_event,
+                    idle,
+                    toIdleStrategy(self.config.idle_strategy_name),
+                    toIdleStrategy(self.config.idle_strategy_name),
+                );
+            },
+            .shared_network => {
+                self.network_composite_loop = .{
+                    .first = sender_event,
+                    .second = receiver_event,
+                };
+                self.broker_threads = BrokerThreads.initSharedNetwork(
+                    control_event,
+                    self.network_composite_loop.?.eventLoop(),
+                    idle,
+                    toIdleStrategy(self.config.idle_strategy_name),
+                );
+            },
+            .shared => {
+                self.network_composite_loop = .{
+                    .first = sender_event,
+                    .second = receiver_event,
+                };
+                self.shared_composite_loop = .{
+                    .first = self.network_composite_loop.?.eventLoop(),
+                    .second = control_event,
+                };
+                self.broker_threads = BrokerThreads.initShared(
+                    self.shared_composite_loop.?.eventLoop(),
+                    idle,
+                );
+            },
+        }
+    }
+
     pub fn requestShutdown(self: *Self) void {
         self.shutdown_requested.store(true, .release);
     }
@@ -318,6 +413,14 @@ pub const BrokerApplication = struct {
     /// deferred to `start()` so that `self` is at its final address and
     /// internal pointers (e.g. `&self.control_ring_buffer.?`) remain valid.
     fn bootstrap(self: *Self) !void {
+        var peer_discovery_buf: [memory.constants.default_max_peers]memory.BrokerAeronPeerConfig = undefined;
+        var peer_channel_bufs: [memory.constants.default_max_peers][memory.constants.max_aeron_channel_length]u8 = undefined;
+        const peer_discovery = try broker_aeron.buildPeerDiscovery(
+            &peer_discovery_buf,
+            &peer_channel_bufs,
+            &self.config,
+        );
+
         var broker_metadata = try BrokerMetadataFile.createWithFlowControl(
             self.config.storage_path,
             self.config.group_name,
@@ -326,26 +429,20 @@ pub const BrokerApplication = struct {
             self.config.messages_buffer_size,
             .{
                 .fc_max_entries = if (self.config.fc_enabled) self.config.fc_max_entries else 0,
-                .peer_send_max_peers = if (self.config.fc_peer_send_counters_enabled)
-                    self.config.fc_peer_send_counters_max_peers
-                else
-                    0,
                 .counter_values_buffer_length = self.config.counter_values_buffer_size,
                 .counter_metadata_buffer_length = self.config.counter_metadata_buffer_size,
                 .error_log_buffer_length = self.config.error_log_buffer_size,
+                .aeron_directory = try self.config.buildAeronDirectory(&self.aeron_directory_buf),
+                .broker_ingress_stream_id = 0,
+                .admin_stream_base = self.config.aeron_admin_stream_base,
+                .data_stream_base = self.config.aeron_data_stream_base,
+                .peer_data_channels = peer_discovery,
             },
         );
         errdefer broker_metadata.close();
 
         self.control_ring_buffer = try RingBuffer.init(
             @alignCast(broker_metadata.getControlBuffer()),
-            false,
-            null,
-            null,
-        );
-
-        self.send_ring_buffer = try RingBuffer.init(
-            @alignCast(broker_metadata.getSendBuffer()),
             false,
             null,
             null,
@@ -430,19 +527,27 @@ pub const BrokerApplication = struct {
             .blocking => .sleeping,
         };
     }
+
+    fn toAeronThreadingMode(mode: config_mod.ThreadingMode) ringloom_aeron.ThreadingMode {
+        return switch (mode) {
+            .dedicated => .dedicated,
+            .shared_network => .shared_network,
+            .shared => .shared,
+        };
+    }
+
+    fn toBrokerThreadingMode(mode: config_mod.ThreadingMode) threading.ThreadingMode {
+        return switch (mode) {
+            .dedicated => .dedicated,
+            .shared_network => .shared_network,
+            .shared => .shared,
+        };
+    }
 };
 
 fn sigterm_handler(_: std.posix.SIG) callconv(.c) void {
     g_shutdown_signal.store(true, .release);
 }
-
-fn senderDoWorkFn(ctx: *anyopaque) u32 {
-    const loop: *SenderEventLoop = @ptrCast(@alignCast(ctx));
-    return loop.doWork();
-}
-
-// No-op: sender cleanup is handled by BrokerApplication.deinit()
-fn senderOnCloseFn(_: *anyopaque) void {}
 
 fn receiverDoWorkFn(ctx: *anyopaque) u32 {
     const loop: *ReceiverEventLoop = @ptrCast(@alignCast(ctx));
@@ -450,6 +555,13 @@ fn receiverDoWorkFn(ctx: *anyopaque) u32 {
 }
 
 fn receiverOnCloseFn(_: *anyopaque) void {}
+
+fn senderDoWorkFn(ctx: *anyopaque) u32 {
+    const loop: *SenderEventLoop = @ptrCast(@alignCast(ctx));
+    return loop.doWork();
+}
+
+fn senderOnCloseFn(_: *anyopaque) void {}
 
 fn commandQueueCapacity() usize {
     return 128;
@@ -475,4 +587,26 @@ test "BrokerApplication initializes and can request shutdown" {
     app.requestShutdown();
 
     try std.testing.expect(app.shutdown_requested.load(.acquire));
+}
+
+test "BrokerApplication starts embedded Aeron driver without worker threads" {
+    const allocator = std.testing.allocator;
+
+    const config = BrokerConfig{
+        .node_id = 2,
+        .local_host = "127.0.0.1",
+        .local_port = 19002,
+        .peer_endpoints = &.{},
+        .group_name = "ringloom-test-app-aeron",
+        .storage_path = "/tmp",
+        .aeron_threading_mode = .shared,
+        .threading_mode = .shared,
+    };
+
+    var app = try BrokerApplication.init(allocator, config, std.testing.io);
+    defer app.deinit();
+
+    try app.startAeronDriver();
+    try std.testing.expect(app.aeron_driver != null);
+    try std.testing.expect(app.aeron_driver_agents != null);
 }
