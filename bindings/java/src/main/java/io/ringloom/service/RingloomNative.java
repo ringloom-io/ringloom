@@ -83,6 +83,9 @@ final class RingloomNative {
     private static final MethodHandle SERVICE_DESTROY_HANDLE;
     private static final MethodHandle SERVICE_ID_HANDLE;
     private static final MethodHandle SERVICE_NODE_ID_HANDLE;
+    private static final MethodHandle SERVICE_AERON_DIRECTORY_HANDLE;
+    private static final MethodHandle SERVICE_AERON_INBOUND_STREAM_ID_HANDLE;
+    private static final MethodHandle SERVICE_PUBLICATION_CONNECTED_HANDLE;
     private static final MethodHandle SERVICE_POLL_CONTROL_HANDLE;
     private static final MethodHandle CREATE_CONSUMER_HANDLE;
     private static final MethodHandle DESTROY_CONSUMER_HANDLE;
@@ -116,9 +119,11 @@ final class RingloomNative {
     private static final MethodHandle CLIENT_TRY_CLAIM_TO_REQUEST_HANDLE;
     private static final MethodHandle CLIENT_TRY_CLAIM_TO_LEADER_HANDLE;
     private static final MethodHandle CLIENT_TRY_CLAIM_TO_LEADER_REQUEST_HANDLE;
+    private static final MethodHandle CLIENT_LAST_AERON_SEND_STATUS_HANDLE;
     private static final MethodHandle CLAIM_COMMIT_HANDLE;
     private static final MethodHandle CLAIM_ABORT_HANDLE;
     private static final MethodHandle STATUS_STRING_HANDLE;
+    private static final MethodHandle AERON_PUBLICATION_STATUS_STRING_HANDLE;
     private static final MethodHandle LAST_ERROR_MESSAGE_HANDLE;
 
     static {
@@ -133,6 +138,9 @@ final class RingloomNative {
             SERVICE_DESTROY_HANDLE = downcall("ringloom_service_destroy", FunctionDescriptor.ofVoid(ADDRESS));
             SERVICE_ID_HANDLE = downcall("ringloom_service_id", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
             SERVICE_NODE_ID_HANDLE = downcall("ringloom_service_node_id", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
+            SERVICE_AERON_DIRECTORY_HANDLE = downcall("ringloom_service_aeron_directory", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
+            SERVICE_AERON_INBOUND_STREAM_ID_HANDLE = downcall("ringloom_service_aeron_inbound_stream_id", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
+            SERVICE_PUBLICATION_CONNECTED_HANDLE = downcall("ringloom_service_publication_connected", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
             SERVICE_POLL_CONTROL_HANDLE = downcall("ringloom_service_poll_control", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_INT, ADDRESS));
             CREATE_CONSUMER_HANDLE = downcall("ringloom_service_create_message_consumer", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
             DESTROY_CONSUMER_HANDLE = downcall("ringloom_message_consumer_destroy", FunctionDescriptor.ofVoid(ADDRESS));
@@ -166,9 +174,11 @@ final class RingloomNative {
             CLIENT_TRY_CLAIM_TO_REQUEST_HANDLE = downcall("ringloom_client_try_claim_to_request", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_INT, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ADDRESS));
             CLIENT_TRY_CLAIM_TO_LEADER_HANDLE = downcall("ringloom_client_try_claim_to_leader", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ADDRESS));
             CLIENT_TRY_CLAIM_TO_LEADER_REQUEST_HANDLE = downcall("ringloom_client_try_claim_to_leader_request", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ADDRESS));
+            CLIENT_LAST_AERON_SEND_STATUS_HANDLE = downcall("ringloom_client_last_aeron_send_status", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
             CLAIM_COMMIT_HANDLE = downcall("ringloom_buffer_claim_commit", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS));
             CLAIM_ABORT_HANDLE = downcall("ringloom_buffer_claim_abort", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS));
             STATUS_STRING_HANDLE = downcall("ringloom_status_string", FunctionDescriptor.of(ADDRESS, ValueLayout.JAVA_INT));
+            AERON_PUBLICATION_STATUS_STRING_HANDLE = downcall("ringloom_aeron_publication_status_string", FunctionDescriptor.of(ADDRESS, ValueLayout.JAVA_INT));
             LAST_ERROR_MESSAGE_HANDLE = downcall("ringloom_last_error_message", FunctionDescriptor.of(ADDRESS));
 
             int abiVersion = abiVersion();
@@ -307,6 +317,30 @@ final class RingloomNative {
             return (int) SERVICE_NODE_ID_HANDLE.invokeExact(service, outNodeId);
         } catch (Throwable throwable) {
             throw propagate("ringloom_service_node_id", throwable);
+        }
+    }
+
+    static int serviceAeronDirectory(MemorySegment service, MemorySegment outDirectory, MemorySegment outDirectoryLen) {
+        try {
+            return (int) SERVICE_AERON_DIRECTORY_HANDLE.invokeExact(service, outDirectory, outDirectoryLen);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_service_aeron_directory", throwable);
+        }
+    }
+
+    static int serviceAeronInboundStreamId(MemorySegment service, MemorySegment outStreamId) {
+        try {
+            return (int) SERVICE_AERON_INBOUND_STREAM_ID_HANDLE.invokeExact(service, outStreamId);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_service_aeron_inbound_stream_id", throwable);
+        }
+    }
+
+    static int servicePublicationConnected(MemorySegment service, MemorySegment outConnected) {
+        try {
+            return (int) SERVICE_PUBLICATION_CONNECTED_HANDLE.invokeExact(service, outConnected);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_service_publication_connected", throwable);
         }
     }
 
@@ -640,6 +674,14 @@ final class RingloomNative {
         }
     }
 
+    static int clientLastAeronSendStatus(MemorySegment client, MemorySegment outStatus) {
+        try {
+            return (int) CLIENT_LAST_AERON_SEND_STATUS_HANDLE.invokeExact(client, outStatus);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_client_last_aeron_send_status", throwable);
+        }
+    }
+
     static int claimCommit(MemorySegment claim) {
         try {
             return (int) CLAIM_COMMIT_HANDLE.invokeExact(claim);
@@ -661,6 +703,14 @@ final class RingloomNative {
             return readCString((MemorySegment) STATUS_STRING_HANDLE.invokeExact(status), 128);
         } catch (Throwable throwable) {
             throw propagate("ringloom_status_string", throwable);
+        }
+    }
+
+    static String aeronPublicationStatusName(int status) {
+        try {
+            return readCString((MemorySegment) AERON_PUBLICATION_STATUS_STRING_HANDLE.invokeExact(status), 128);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_aeron_publication_status_string", throwable);
         }
     }
 

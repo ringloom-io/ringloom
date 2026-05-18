@@ -7,8 +7,8 @@ test "service restart reuses metadata after cleanup" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "restart");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -56,8 +56,8 @@ test "service restart without prior cleanup still succeeds" {
     // file's stored PID belongs to a dead process
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "restart-fast");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);

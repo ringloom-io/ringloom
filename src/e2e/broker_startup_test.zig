@@ -6,8 +6,8 @@ test "broker starts and shuts down cleanly" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "broker-startup");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     // When — start broker with default spec
     const broker = try harness.startBroker(.{});
@@ -28,8 +28,8 @@ test "broker rejects invalid node id zero" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "broker-invalid-node-id");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     // When — start broker with node_id = 0 (invalid)
     const broker = try harness.startBroker(.{
@@ -45,8 +45,8 @@ test "broker creates metadata directory on startup" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "broker-metadata-dir");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     // When — start broker
     const broker = try harness.startBroker(.{
@@ -69,8 +69,8 @@ test "broker handles SIGTERM gracefully" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "broker-sigterm");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);

@@ -107,6 +107,17 @@ typedef struct ringloom_ring_stats {
     uint64_t consumer_position;
 } ringloom_ring_stats_t;
 
+typedef enum ringloom_aeron_publication_status {
+    RINGLOOM_AERON_PUBLICATION_UNKNOWN = 0,
+    RINGLOOM_AERON_PUBLICATION_CLAIMED = 1,
+    RINGLOOM_AERON_PUBLICATION_NOT_CONNECTED = 2,
+    RINGLOOM_AERON_PUBLICATION_BACK_PRESSURED = 3,
+    RINGLOOM_AERON_PUBLICATION_ADMIN_ACTION = 4,
+    RINGLOOM_AERON_PUBLICATION_CLOSED = 5,
+    RINGLOOM_AERON_PUBLICATION_MAX_POSITION_EXCEEDED = 6,
+    RINGLOOM_AERON_PUBLICATION_FAILED = 7
+} ringloom_aeron_publication_status_t;
+
 typedef void (*ringloom_message_handler_t)(
     void *user_data,
     const ringloom_message_t *message
@@ -135,6 +146,22 @@ ringloom_status_t ringloom_service_id(
 ringloom_status_t ringloom_service_node_id(
     const ringloom_service_t *service,
     int16_t *out_node_id
+);
+
+ringloom_status_t ringloom_service_aeron_directory(
+    const ringloom_service_t *service,
+    const char **out_directory,
+    size_t *out_directory_len
+);
+
+ringloom_status_t ringloom_service_aeron_inbound_stream_id(
+    const ringloom_service_t *service,
+    int32_t *out_stream_id
+);
+
+ringloom_status_t ringloom_service_publication_connected(
+    const ringloom_service_t *service,
+    bool *out_connected
 );
 
 ringloom_status_t ringloom_service_poll_control(
@@ -363,7 +390,13 @@ ringloom_status_t ringloom_client_list_targets(
     size_t *out_count
 );
 
+ringloom_status_t ringloom_client_last_aeron_send_status(
+    ringloom_client_t *client,
+    ringloom_aeron_publication_status_t *out_status
+);
+
 const char *ringloom_status_string(ringloom_status_t status);
+const char *ringloom_aeron_publication_status_string(ringloom_aeron_publication_status_t status);
 const char *ringloom_last_error_message(void);
 
 #ifdef __cplusplus

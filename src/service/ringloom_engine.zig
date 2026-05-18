@@ -16,6 +16,7 @@ const constants = ringloom_common.memory.constants;
 const MessageConsumer = @import("message_consumer.zig").MessageConsumer;
 const control_agent_mod = @import("control_agent.zig");
 const ControlAgent = control_agent_mod.ControlAgent;
+const ServiceAeronRuntime = @import("aeron_runtime.zig").ServiceAeronRuntime;
 const ServiceClient = @import("service_client.zig").ServiceClient;
 const ServiceClientRegistry = @import("service_client_registry.zig").ServiceClientRegistry;
 
@@ -76,6 +77,7 @@ pub const RingLoomEngine = struct {
     control_agent: *ControlAgent,
     control_agent_runner: ?ThreadRunner,
     message_consumer_mode: MessageConsumerMode,
+    aeron_runtime: *ServiceAeronRuntime,
 
     // ── Observability ─────────────────────────────────────────────────
     counters: CountersManager,
@@ -141,10 +143,20 @@ pub const RingLoomEngine = struct {
         // Write initial heartbeat.
         meta.service_meta.storeHeartbeat(Clock.epochMillis());
 
+        const aeron_runtime = try allocator.create(ServiceAeronRuntime);
+        errdefer allocator.destroy(aeron_runtime);
+        aeron_runtime.* = try ServiceAeronRuntime.connect(
+            allocator,
+            meta.broker_meta.getAeronDiscovery(),
+        );
+        errdefer aeron_runtime.deinit();
+        engine.aeron_runtime = aeron_runtime;
+
         // ── Step 5: Initialize service registry ───────────────────────
         engine.service_registry = ServiceClientRegistry.init(
             allocator,
             meta.broker_meta,
+            engine.aeron_runtime,
             meta.node_id,
             meta.service_id,
             config.storage_path,
@@ -225,12 +237,16 @@ pub const RingLoomEngine = struct {
         control_agent_mod.unregisterFromBroker(self.broker_meta, self.service_id) catch {};
         self.service_counters.increment(.unregisters_sent);
 
-        // 4. Close metadata files and cached BuffersProviders.
+        // 4. Close Aeron client resources before unmapping metadata.
+        self.aeron_runtime.deinit();
+        self.allocator.destroy(self.aeron_runtime);
+
+        // 5. Close metadata files and cached BuffersProviders.
         self.service_meta.close();
         self.broker_meta.close();
         BuffersProvider.closeAll(self.allocator);
 
-        // 5. Clean up.
+        // 6. Clean up.
         self.service_registry.deinit();
         if (self.message_consumer) |message_consumer| {
             self.allocator.destroy(message_consumer);
@@ -302,6 +318,7 @@ fn createServiceMetadata(allocator: std.mem.Allocator, config: ServiceConfig) !s
     const node_id = broker_meta.header.node_id;
 
     // 4. Create the service's metadata file.
+    const discovery = broker_meta.getAeronDiscovery();
     const service_meta = try allocator.create(ServiceMetadataFile);
     errdefer allocator.destroy(service_meta);
     service_meta.* = try ServiceMetadataFile.create(.{
@@ -314,6 +331,9 @@ fn createServiceMetadata(allocator: std.mem.Allocator, config: ServiceConfig) !s
         .heartbeat_timeout_ms = config.heartbeat_timeout_ms,
         .control_buffer_length = config.control_buffer_length,
         .messages_buffer_length = config.messages_buffer_length,
+        .aeron_directory = discovery.directory(),
+        .broker_ingress_stream_id = discovery.broker_ingress_stream_id,
+        .broker_start_timestamp_ms = broker_meta.header.start_timestamp_ms,
     });
 
     return .{

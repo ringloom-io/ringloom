@@ -11,6 +11,7 @@ test "round-robin load balancer cycles through instances" {
         testing.allocator,
         "test-service",
         null, // broker_meta not needed for this test
+        null,
         1,
         100,
         null,
@@ -43,6 +44,7 @@ test "round-robin returns null for empty instance list" {
         testing.allocator,
         "empty-service",
         null,
+        null,
         1,
         100,
         null,
@@ -59,6 +61,7 @@ test "ServiceClient updateLeader sets correct instance" {
     var client = ServiceClient.init(
         testing.allocator,
         "leader-test",
+        null,
         null,
         1,
         100,
@@ -85,6 +88,7 @@ test "ServiceClient removeInstance removes correct instance" {
         testing.allocator,
         "remove-test",
         null,
+        null,
         1,
         100,
         null,
@@ -108,6 +112,7 @@ test "ServiceClient copyTargetInstances returns node and service ids with leader
     var client = ServiceClient.init(
         testing.allocator,
         "target-list-test",
+        null,
         null,
         1,
         100,
@@ -152,6 +157,7 @@ test "ServiceClient tracks duplicate service ids on different nodes" {
     var client = ServiceClient.init(
         testing.allocator,
         "duplicate-id-test",
+        null,
         null,
         1,
         100,

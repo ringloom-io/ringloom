@@ -43,6 +43,41 @@ comptime {
     std.debug.assert(@sizeOf(AdminMessageHeader) == 8);
 }
 
+/// Aeron UDP envelope for broker-to-broker admin traffic.
+///
+/// The envelope carries the peer routing metadata that previously lived in the
+/// TCP frame header. The payload remains the existing SBE-style admin message
+/// (`AdminMessageHeader` followed by its body) so existing dispatch code can be
+/// reused during the transport migration.
+pub const AeronAdminHeader = extern struct {
+    frame_length: u32,
+    source_node_id: u8,
+    target_node_id: u8,
+    template_id: u16 align(1),
+    epoch: i64 align(1),
+    payload_length: u32 align(1),
+    reserved: u32 align(1) = 0,
+
+    pub const size: usize = @sizeOf(AeronAdminHeader);
+};
+
+comptime {
+    std.debug.assert(@sizeOf(AeronAdminHeader) == 24);
+}
+
+pub const AeronAdminFrame = struct {
+    header: AeronAdminHeader,
+    payload: []const u8,
+};
+
+pub const AeronAdminError = error{
+    BufferTooSmall,
+    PayloadTooLarge,
+    FrameLengthMismatch,
+    TargetNodeMismatch,
+    TemplateMismatch,
+};
+
 // ── Message Body Layouts ──────────────────────────────────────────────
 
 /// templateId = 1: BrokerHeartbeat
@@ -162,6 +197,64 @@ pub fn bodySlice(payload: []const u8) []const u8 {
     const header_len = @sizeOf(AdminMessageHeader);
     if (payload.len <= header_len) return payload[0..0];
     return payload[header_len..];
+}
+
+/// Wrap an existing admin payload in an Aeron admin envelope.
+pub fn encodeAeronAdminFrame(
+    buf: []u8,
+    source_node_id: u8,
+    target_node_id: u8,
+    epoch: i64,
+    payload: []const u8,
+) AeronAdminError!usize {
+    const admin_header = decodeHeader(payload) orelse return error.BufferTooSmall;
+    if (payload.len > std.math.maxInt(u32)) return error.PayloadTooLarge;
+
+    const frame_len = AeronAdminHeader.size + payload.len;
+    if (buf.len < frame_len) return error.BufferTooSmall;
+
+    const header = AeronAdminHeader{
+        .frame_length = @intCast(frame_len),
+        .source_node_id = source_node_id,
+        .target_node_id = target_node_id,
+        .template_id = admin_header.template_id,
+        .epoch = epoch,
+        .payload_length = @intCast(payload.len),
+    };
+    const header_bytes: *const [AeronAdminHeader.size]u8 = @ptrCast(&header);
+    @memcpy(buf[0..AeronAdminHeader.size], header_bytes);
+    const payload_dst = buf[AeronAdminHeader.size..][0..payload.len];
+    if (payload_dst.ptr != payload.ptr) {
+        @memcpy(payload_dst, payload);
+    }
+    return frame_len;
+}
+
+/// Decode and validate an Aeron admin frame addressed to `local_node_id`.
+pub fn decodeAeronAdminFrame(
+    bytes: []const u8,
+    local_node_id: u8,
+) AeronAdminError!AeronAdminFrame {
+    if (bytes.len < AeronAdminHeader.size) return error.BufferTooSmall;
+
+    var header: AeronAdminHeader = undefined;
+    const header_bytes: *[AeronAdminHeader.size]u8 = @ptrCast(&header);
+    @memcpy(header_bytes, bytes[0..AeronAdminHeader.size]);
+
+    if (header.frame_length != bytes.len) return error.FrameLengthMismatch;
+    if (header.target_node_id != local_node_id) return error.TargetNodeMismatch;
+
+    const payload_len: usize = @intCast(header.payload_length);
+    if (AeronAdminHeader.size + payload_len != bytes.len) return error.FrameLengthMismatch;
+    const payload = bytes[AeronAdminHeader.size..];
+
+    const admin_header = decodeHeader(payload) orelse return error.BufferTooSmall;
+    if (admin_header.template_id != header.template_id) return error.TemplateMismatch;
+
+    return .{
+        .header = header,
+        .payload = payload,
+    };
 }
 
 // ── Service Name Utilities ────────────────────────────────────────────
@@ -295,4 +388,53 @@ test "bodySlice returns empty for header-only buffer" {
 
     // When / Then
     try testing.expectEqual(@as(usize, 0), bodySlice(&buf).len);
+}
+
+test "Aeron admin frame wraps existing admin payload" {
+    var payload_buf: [64]u8 = undefined;
+    const payload_len = encodeAdminMessage(
+        &payload_buf,
+        ServiceAddedBody,
+        TEMPLATE_SERVICE_ADDED,
+        ServiceAddedBody{
+            .node_id = 1,
+            .service_id = 42,
+            .service_name = padServiceName("pricing"),
+            .leader_election_enabled = 1,
+        },
+    );
+
+    var frame_buf: [128]u8 = undefined;
+    const frame_len = try encodeAeronAdminFrame(frame_buf[0..], 1, 2, 99, payload_buf[0..payload_len]);
+    const frame = try decodeAeronAdminFrame(frame_buf[0..frame_len], 2);
+
+    try testing.expectEqual(@as(u8, 1), frame.header.source_node_id);
+    try testing.expectEqual(@as(u8, 2), frame.header.target_node_id);
+    try testing.expectEqual(@as(i64, 99), frame.header.epoch);
+    try testing.expectEqual(TEMPLATE_SERVICE_ADDED, frame.header.template_id);
+    try testing.expectEqualSlices(u8, payload_buf[0..payload_len], frame.payload);
+}
+
+test "Aeron admin frame rejects malformed target and template mismatch" {
+    var payload_buf: [64]u8 = undefined;
+    const payload_len = encodeAdminMessage(
+        &payload_buf,
+        ServiceRemovedBody,
+        TEMPLATE_SERVICE_REMOVED,
+        ServiceRemovedBody{
+            .node_id = 1,
+            .service_id = 7,
+            .service_name = padServiceName("orders"),
+        },
+    );
+
+    var frame_buf: [128]u8 = undefined;
+    const frame_len = try encodeAeronAdminFrame(frame_buf[0..], 1, 2, 1, payload_buf[0..payload_len]);
+    try testing.expectError(error.TargetNodeMismatch, decodeAeronAdminFrame(frame_buf[0..frame_len], 3));
+
+    var header: AeronAdminHeader = undefined;
+    @memcpy(@as(*[AeronAdminHeader.size]u8, @ptrCast(&header)), frame_buf[0..AeronAdminHeader.size]);
+    header.template_id = TEMPLATE_SERVICE_ADDED;
+    @memcpy(frame_buf[0..AeronAdminHeader.size], @as(*const [AeronAdminHeader.size]u8, @ptrCast(&header)));
+    try testing.expectError(error.TemplateMismatch, decodeAeronAdminFrame(frame_buf[0..frame_len], 2));
 }

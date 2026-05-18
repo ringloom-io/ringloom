@@ -21,6 +21,20 @@ const RingloomStatus = Object.freeze({
   },
 });
 
+const AeronPublicationStatus = Object.freeze({
+  UNKNOWN: 0,
+  CLAIMED: 1,
+  NOT_CONNECTED: 2,
+  BACK_PRESSURED: 3,
+  ADMIN_ACTION: 4,
+  CLOSED: 5,
+  MAX_POSITION_EXCEEDED: 6,
+  FAILED: 7,
+  name(status) {
+    return native.aeronPublicationStatusName(status);
+  },
+});
+
 class RingloomError extends Error {
   constructor(action, statusCode, statusName = native.statusName(statusCode), nativeMessage = native.lastErrorMessage()) {
     super(`${action} failed with ${statusName} (${statusCode}): ${nativeMessage}`);
@@ -40,6 +54,7 @@ function throwForStatus(action, status) {
 
 module.exports = {
   RingloomStatus,
+  AeronPublicationStatus,
   RingloomError,
   throwForStatus,
   RingloomService: native.RingloomService,

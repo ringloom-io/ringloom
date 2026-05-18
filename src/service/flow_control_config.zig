@@ -1,11 +1,11 @@
 //! Flow control configuration for ServiceClient instances.
 //!
 //! Determines how a ServiceClient reacts when flow control signals indicate
-//! that a target service or peer is under pressure.
+//! that a target service is under pressure.
 
 /// Strategy for handling backpressure when flow control detects congestion.
 pub const BackpressureStrategy = enum(u8) {
-    /// Return an error immediately (BackPressure / PeerCongested / PeerDisconnected).
+    /// Return an error immediately.
     drop = 0,
 
     /// Busy-wait (with spin-loop hint) until capacity is available or
@@ -26,16 +26,6 @@ pub const FlowControlConfig = struct {
     /// remaining bytes below this value, backpressure is triggered.
     /// 0 = disabled (only react to PRESSURED state).
     min_remaining_bytes: u32 = 0,
-
-    /// Per-peer congestion threshold in bytes. If a peer's
-    /// ring_bytes_pending + queue_bytes_pending exceeds this value,
-    /// the send is rejected with PeerCongested.
-    /// 0 = disabled.
-    per_peer_pending_threshold: u64 = 0,
-
-    /// Whether to check peer connectivity before sending to remote instances.
-    /// When enabled, sends to disconnected peers return PeerDisconnected.
-    check_peer_connectivity: bool = true,
 
     /// Whether flow control is enabled at all. When false, all FC checks
     /// are skipped and sends proceed as before.

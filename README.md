@@ -3,7 +3,7 @@
 ![RingLoom logo](assets/RingLoom.png)
 
 **RingLoom** is a high-performance message broker and service runtime for low-latency systems.
-It combines zero-copy same-host IPC over shared-memory ring buffers with TCP-based cross-host
+It combines zero-copy same-host IPC over shared-memory ring buffers with cross-host Aeron UDP
 routing, giving services one messaging model for both local and remote communication.
 
 RingLoom is aimed at workloads where predictable latency, explicit memory layout, and
@@ -12,7 +12,7 @@ allocation-free hot paths matter more than general-purpose middleware features.
 ## Why RingLoom
 
 - **Fast local communication** with memory-mapped metadata files and lock-free ring buffers.
-- **Cross-host routing** through broker-to-broker TCP transport with platform-optimized I/O.
+- **Cross-host routing** through broker-to-broker Aeron UDP transport.
 - **Predictable execution** from pre-allocated buffers, explicit wire formats, and tight event loops.
 - **Operational visibility** through test harnesses, `ringloom-stat`, and a Prometheus exporter.
 - **Service integration options** through Zig modules plus C/C++, Java, and Node.js bindings.
@@ -20,7 +20,7 @@ allocation-free hot paths matter more than general-purpose middleware features.
 ## Highlights
 
 - Shared-memory IPC between services and the local broker
-- Broker-to-broker TCP transport with `io_uring` on Linux and `kqueue` on macOS
+- Broker-to-broker Aeron UDP transport driven by RingLoom event loops
 - Dedicated control, sender, and receiver event loops
 - Service registration, discovery, heartbeat tracking, and leader election
 - Cluster membership and state synchronization
@@ -31,7 +31,7 @@ allocation-free hot paths matter more than general-purpose middleware features.
 
 ```text
 same host                                              remote host
-┌──────────────┐   shared memory   ┌────────────────┐   TCP   ┌────────────────┐   shared memory   ┌──────────────┐
+┌──────────────┐   shared memory   ┌────────────────┐  Aeron  ┌────────────────┐   shared memory   ┌──────────────┐
 │ Service      │ ────────────────▶│ RingLoom       │ ──────▶│ RingLoom       │ ────────────────▶│ Service      │
 │ producer     │                   │ broker node A  │         │ broker node B  │                   │ consumer     │
 └──────────────┘                   └────────────────┘         └────────────────┘                   └──────────────┘
@@ -42,7 +42,6 @@ Core modules:
 | Module | Purpose |
 |---|---|
 | `ringloom_common` | Shared foundations: ring buffers, protocol codecs, config, monitoring, platform helpers |
-| `ringloom_tcp` | TCP transport library and platform-specific I/O engines |
 | `ringloom_service` | Service-side runtime and client APIs |
 | `ringloom_broker` | Broker runtime, routing, cluster management, and event loops |
 | `ringloom_testing` | Multi-process test harness for end-to-end and perf scenarios |
@@ -95,9 +94,15 @@ Core modules:
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) - broker architecture and data flow
+- [`docs/architecture.md`](docs/architecture.md) - active architecture and component map
+- [`docs/components/broker.md`](docs/components/broker.md) - broker runtime, Aeron data/admin loops, and routing
+- [`docs/components/service-client.md`](docs/components/service-client.md) - service runtime, client API, local IPC, and remote UDP
+- [`docs/components/metadata-and-protocol.md`](docs/components/metadata-and-protocol.md) - metadata files and message headers
+- [`docs/components/clustering.md`](docs/components/clustering.md) - peer membership and leader election
+- [`docs/components/flow-control.md`](docs/components/flow-control.md) - back-pressure and pressure diagnostics
+- [`docs/components/bindings.md`](docs/components/bindings.md) - C ABI plus C++, Java, and Node.js bindings
+- [`docs/observability.md`](docs/observability.md) - observability operator guide
 - [`docs/testing.md`](docs/testing.md) - testing strategy and harness details
-- [`docs/observability.md`](docs/observability.md) - Prometheus exporter design
 - [`docs/samples_order_management.md`](docs/samples_order_management.md) - sample topology and behavior
 
 ## Project status

@@ -16,6 +16,7 @@ const ServiceMetadataFile = memory.ServiceMetadataFile;
 const ServiceScanner = memory.ServiceScanner;
 const constants = memory.constants;
 const metadata_reader = ringloom_common.monitoring.metadata_reader;
+const aeron_cnc_reader = ringloom_common.monitoring.aeron_cnc_reader;
 
 const Args = struct {
     storage_path: []const u8 = constants.default_storage_path,
@@ -171,9 +172,8 @@ fn printBrokerFromStorage(
         broker.loadHeartbeat(),
         broker.loadNextServiceId(),
         broker.header.control_buffer_length,
-        broker.header.messages_buffer_length,
+        broker.getAeronDiscovery().broker_ingress_stream_id,
         broker.loadFcBufferLength(),
-        broker.loadPeerSendCountersLength(),
         now_ms,
     );
     try printBrokerDetails(stdout, &broker, now_ms);
@@ -216,9 +216,8 @@ fn printBrokerPath(io: std.Io, stdout: *std.Io.Writer, path: []const u8) !void {
         loadAt(i64, mapped, constants.heartbeat_offset_within_header),
         loadAt(i32, mapped, constants.next_service_id_offset_within_header),
         header.control_buffer_length,
-        header.messages_buffer_length,
+        0,
         loadAt(i32, mapped, constants.fc_buffer_length_offset),
-        loadAt(i32, mapped, constants.peer_send_counters_length_offset),
         platform.Clock.epochMillis(),
     );
 }
@@ -232,16 +231,15 @@ fn printBrokerSummary(
     heartbeat_ms: i64,
     next_service_id: i32,
     control_buffer_length: i32,
-    send_buffer_length: i32,
+    broker_ingress_stream_id: i32,
     fc_buffer_length: i32,
-    peer_send_counters_length: i32,
     now_ms: i64,
 ) !void {
     const alive = platform.isProcessAlive(@intCast(pid));
     const age_ms = ageMillis(now_ms, heartbeat_ms);
     try stdout.print(
         "  node={d} status={s} pid={d} heartbeat_age_ms={d} service_id={d} next_service_id={d}\n" ++
-            "    started_ms={d} control_buffer={d} send_buffer={d} flow_control_bytes={d} peer_send_counter_bytes={d}\n",
+            "    started_ms={d} control_buffer={d} aeron_ingress_stream={d} flow_control_bytes={d}\n",
         .{
             node_id,
             if (alive) "alive" else "dead",
@@ -251,9 +249,8 @@ fn printBrokerSummary(
             next_service_id,
             start_timestamp_ms,
             control_buffer_length,
-            send_buffer_length,
+            broker_ingress_stream_id,
             fc_buffer_length,
-            peer_send_counters_length,
         },
     );
 }
@@ -307,6 +304,24 @@ fn printServiceFromStorage(
 }
 
 fn printBrokerDetails(stdout: *std.Io.Writer, broker: *BrokerMetadataFile, now_ms: i64) !void {
+    const aeron = metadata_reader.readBrokerAeron(broker.getAeronDiscovery());
+    try stdout.print(
+        "    aeron_directory={s} ingress_stream={d} admin_stream_base={d} data_stream_base={d}\n",
+        .{ aeron.aeron_directory, aeron.broker_ingress_stream_id, aeron.admin_stream_base, aeron.data_stream_base },
+    );
+    if (aeron.local_data_channel.len > 0 or aeron.local_admin_channel.len > 0) {
+        try stdout.print("    data_channel={s} admin_channel={s}\n", .{
+            aeron.local_data_channel,
+            aeron.local_admin_channel,
+        });
+    }
+    try printAeronCncDetails(
+        stdout,
+        aeron.aeron_directory,
+        aeron.broker_ingress_stream_id,
+        aeron.admin_stream_base,
+        aeron.data_stream_base,
+    );
     try stdout.print(
         "    monitoring_version={d} counter_values_bytes={d} counter_metadata_bytes={d} error_log_bytes={d} tail_offset={d} tail_bytes={d}\n",
         .{
@@ -319,13 +334,17 @@ fn printBrokerDetails(stdout: *std.Io.Writer, broker: *BrokerMetadataFile, now_m
         },
     );
     try printRing(stdout, "control", broker.getControlBuffer(), @intCast(broker.header.control_buffer_length), now_ms);
-    try printRing(stdout, "send", broker.getSendBuffer(), @intCast(broker.header.messages_buffer_length), now_ms);
     try printCounters(stdout, broker.getCounterValuesBuffer(), broker.getCounterMetadataBuffer());
     try printErrors(stdout, broker.getErrorLogBuffer());
 }
 
 fn printServiceDetails(stdout: *std.Io.Writer, service: *ServiceMetadataFile, service_name: []const u8, now_ms: i64) !void {
     _ = service_name;
+    const aeron = metadata_reader.readServiceAeron(service.getAeronDiscovery());
+    try stdout.print(
+        "    aeron_directory={s} broker_ingress_stream={d} broker_started_ms={d}\n",
+        .{ aeron.aeron_directory, aeron.broker_ingress_stream_id, aeron.broker_start_timestamp_ms },
+    );
     try stdout.print(
         "    monitoring_version={d} counter_values_bytes={d} counter_metadata_bytes={d} error_log_bytes={d} tail_offset={d} tail_bytes={d}\n",
         .{
@@ -341,6 +360,60 @@ fn printServiceDetails(stdout: *std.Io.Writer, service: *ServiceMetadataFile, se
     try printRing(stdout, "messages", service.getMessagesBuffer(), @intCast(service.header.messages_buffer_length), now_ms);
     try printCounters(stdout, service.getCounterValuesBuffer(), service.getCounterMetadataBuffer());
     try printErrors(stdout, service.getErrorLogBuffer());
+}
+
+fn printAeronCncDetails(
+    stdout: *std.Io.Writer,
+    directory: []const u8,
+    broker_ingress_stream_id: i32,
+    admin_stream_base: i32,
+    data_stream_base: i32,
+) !void {
+    var cnc = aeron_cnc_reader.CncFile.open(platform.defaultIo(), directory) catch |err| {
+        try stdout.print("    aeron_driver_status=unavailable cnc_error={s}\n", .{@errorName(err)});
+        return;
+    };
+    defer cnc.close(platform.defaultIo());
+
+    const metadata = cnc.metadata;
+    try stdout.print(
+        "    aeron_driver_status={s} pid={d} started_ms={d} cnc_version={d} client_liveness_timeout_ns={d}\n",
+        .{
+            if (metadata.driverAlive()) "alive" else "dead",
+            metadata.pid,
+            metadata.start_timestamp_ms,
+            metadata.cnc_version,
+            metadata.client_liveness_timeout_ns,
+        },
+    );
+
+    var printed = false;
+    var counter_count: usize = 0;
+    for (0..cnc.counterCapacity()) |id| {
+        const sample = cnc.readCounter(id) orelse continue;
+        counter_count += 1;
+        if (!printed) {
+            try stdout.print("    aeron_counters:\n", .{});
+            printed = true;
+        }
+        try stdout.print("      [{d}] type={d} {s}={d}", .{ sample.id, sample.type_id, sample.label, sample.value });
+        if (sample.systemCounter()) |system_counter| {
+            try stdout.print(" system_id={d}", .{@intFromEnum(system_counter)});
+        }
+        if (sample.streamKey()) |stream_key| {
+            const kind = aeron_cnc_reader.channelKind(stream_key, broker_ingress_stream_id, admin_stream_base, data_stream_base);
+            try stdout.print(
+                " channel_kind={s} stream_id={d} session_id={d}",
+                .{ kind.label(), stream_key.stream_id, stream_key.session_id },
+            );
+        }
+        try stdout.writeByte('\n');
+    }
+    if (!printed) {
+        try stdout.print("    aeron_counters: (none allocated)\n", .{});
+    } else {
+        try stdout.print("    aeron_counter_count={d}\n", .{counter_count});
+    }
 }
 
 fn printRing(stdout: *std.Io.Writer, name: []const u8, buffer: []u8, capacity: usize, now_ms: i64) !void {

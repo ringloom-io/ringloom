@@ -14,9 +14,12 @@ pub const thread = @import("platform/thread.zig");
 pub const ThreadRunner = thread.ThreadRunner;
 pub const EventLoop = thread.EventLoop;
 pub const IdleStrategy = thread.IdleStrategy;
+pub const composite_event_loop = @import("platform/composite_event_loop.zig");
+pub const CompositeEventLoop = composite_event_loop.CompositeEventLoop;
 pub const process_sync = @import("platform/process_sync.zig");
 pub const ProcessSynchronizer = process_sync.ProcessSynchronizer;
 pub const WaitResult = process_sync.WaitResult;
+pub const socket = @import("platform/socket.zig");
 
 // Re-export commonly used atomic types for convenience.
 pub const AtomicI32 = atomic.AtomicI32;
@@ -137,5 +140,7 @@ comptime {
     _ = @import("platform/mapped_file.zig");
     _ = @import("platform/clock.zig");
     _ = @import("platform/thread.zig");
+    _ = @import("platform/composite_event_loop.zig");
     _ = @import("platform/process_sync.zig");
+    _ = @import("platform/socket.zig");
 }

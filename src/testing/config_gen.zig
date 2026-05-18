@@ -16,6 +16,10 @@
 //! broker.storage.path=/tmp/ringloom-e2e-…/storage
 //! broker.control.buffer.size=65536
 //! broker.messages.buffer.size=1048576
+//! broker.aeron.directory=/tmp/ringloom-e2e-…/aeron/node-1
+//! broker.aeron.ingress.stream.base=10000
+//! broker.aeron.admin.stream.base=20000
+//! broker.aeron.data.stream.base=30000
 //! broker.threading.mode=dedicated
 //! broker.idle.strategy=backoff
 //! ```
@@ -125,6 +129,20 @@ pub const ConfigGen = struct {
         try writer.writer.print("broker.storage.path={s}\n", .{storage_path});
         try writer.writer.print("broker.control.buffer.size={d}\n", .{spec.control_buffer_size});
         try writer.writer.print("broker.messages.buffer.size={d}\n", .{spec.messages_buffer_size});
+        if (spec.aeron_directory) |directory| {
+            try writer.writer.print("broker.aeron.directory={s}\n", .{directory});
+        }
+        try writer.writer.print("broker.aeron.ipc.term.length={d}\n", .{spec.aeron_ipc_term_length});
+        try writer.writer.print("broker.aeron.udp.term.length={d}\n", .{spec.aeron_udp_term_length});
+        try writer.writer.print("broker.aeron.sparse.files={s}\n", .{boolString(spec.aeron_sparse_files)});
+        try writer.writer.print("broker.aeron.delete.directory.on.start={s}\n", .{boolString(spec.aeron_delete_directory_on_start)});
+        try writer.writer.print("broker.aeron.delete.directory.on.shutdown={s}\n", .{boolString(spec.aeron_delete_directory_on_shutdown)});
+        try writer.writer.print("broker.aeron.publication.linger.timeout.ns={d}\n", .{spec.aeron_publication_linger_timeout_ns});
+        try writer.writer.print("broker.aeron.client.liveness.timeout.ns={d}\n", .{spec.aeron_client_liveness_timeout_ns});
+        try writer.writer.print("broker.aeron.ingress.stream.base={d}\n", .{spec.aeron_ingress_stream_base});
+        try writer.writer.print("broker.aeron.admin.stream.base={d}\n", .{spec.aeron_admin_stream_base});
+        try writer.writer.print("broker.aeron.data.stream.base={d}\n", .{spec.aeron_data_stream_base});
+        try writer.writer.print("broker.aeron.threading.mode={s}\n", .{spec.aeron_threading_mode});
         try writer.writer.print("broker.threading.mode={s}\n", .{spec.threading_mode});
         try writer.writer.print("broker.idle.strategy={s}\n", .{spec.idle_strategy});
 
@@ -134,16 +152,6 @@ pub const ConfigGen = struct {
         if (spec.receiver_cpu_affinity) |core| {
             try writer.writer.print("broker.receiver.cpu.affinity={d}\n", .{core});
         }
-        if (spec.io_uring_sqpoll) {
-            try writer.writer.writeAll("broker.io.uring.sqpoll=true\n");
-        }
-        if (spec.io_uring_receiver_enabled) {
-            try writer.writer.writeAll("broker.io.uring.receiver.enabled=true\n");
-        }
-        try writer.writer.print("broker.io.uring.queue.depth={d}\n", .{spec.io_uring_queue_depth});
-        try writer.writer.print("broker.io.uring.cq.depth={d}\n", .{spec.io_uring_cq_depth});
-        try writer.writer.print("broker.io.uring.recv.buffer.size={d}\n", .{spec.io_uring_recv_buffer_size});
-        try writer.writer.print("broker.io.uring.recv.buffer.count={d}\n", .{spec.io_uring_recv_buffer_count});
         if (spec.benchmark_latency_tracing_enabled) {
             try writer.writer.writeAll("broker.benchmark.latency.tracing.enabled=true\n");
         }
@@ -194,6 +202,10 @@ pub const ConfigGen = struct {
     }
 };
 
+fn boolString(value: bool) []const u8 {
+    return if (value) "true" else "false";
+}
+
 // ── Test helpers ─────────────────────────────────────────────────────
 
 fn readFileContent(allocator: Allocator, path: []const u8) ![]const u8 {
@@ -227,6 +239,15 @@ test "writeBrokerConfig generates valid properties file" {
     try std.testing.expect(mem.indexOf(u8, content, "broker.storage.path=/tmp/storage") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.control.buffer.size=65536") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.messages.buffer.size=1048576") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.ipc.term.length=1048576") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.udp.term.length=16777216") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.sparse.files=true") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.delete.directory.on.start=true") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.delete.directory.on.shutdown=false") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.ingress.stream.base=10000") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.admin.stream.base=20000") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.data.stream.base=30000") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.threading.mode=dedicated") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.threading.mode=dedicated") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.idle.strategy=backoff") != null);
 }
@@ -316,6 +337,8 @@ test "writeBrokerConfig respects custom spec values" {
         .port = 25000,
         .group_name = "custom-group",
         .threading_mode = "shared",
+        .aeron_directory = "/tmp/custom-aeron-dir",
+        .aeron_threading_mode = "shared_network",
         .idle_strategy = "sleeping",
         .control_buffer_size = 131_072,
         .messages_buffer_size = 2_097_152,
@@ -335,6 +358,8 @@ test "writeBrokerConfig respects custom spec values" {
     try std.testing.expect(mem.indexOf(u8, content, "broker.storage.path=/mnt/fast") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.control.buffer.size=131072") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.messages.buffer.size=2097152") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.directory=/tmp/custom-aeron-dir") != null);
+    try std.testing.expect(mem.indexOf(u8, content, "broker.aeron.threading.mode=shared_network") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.threading.mode=shared") != null);
     try std.testing.expect(mem.indexOf(u8, content, "broker.idle.strategy=sleeping") != null);
 }

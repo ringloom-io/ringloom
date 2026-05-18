@@ -23,6 +23,7 @@ pub const ringloom_metrics_reader = opaque {};
 
 pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 3;
 const max_error_message_length = error_state_mod.max_error_message_length;
+const claim_handle_record_length = std.math.minInt(i32);
 
 pub const ringloom_status_t = enum(c_int) {
     RINGLOOM_OK = 0,
@@ -115,6 +116,17 @@ pub const ringloom_ring_stats_t = extern struct {
     free_bytes: u64,
     producer_position: u64,
     consumer_position: u64,
+};
+
+pub const ringloom_aeron_publication_status_t = enum(c_int) {
+    RINGLOOM_AERON_PUBLICATION_UNKNOWN = 0,
+    RINGLOOM_AERON_PUBLICATION_CLAIMED = 1,
+    RINGLOOM_AERON_PUBLICATION_NOT_CONNECTED = 2,
+    RINGLOOM_AERON_PUBLICATION_BACK_PRESSURED = 3,
+    RINGLOOM_AERON_PUBLICATION_ADMIN_ACTION = 4,
+    RINGLOOM_AERON_PUBLICATION_CLOSED = 5,
+    RINGLOOM_AERON_PUBLICATION_MAX_POSITION_EXCEEDED = 6,
+    RINGLOOM_AERON_PUBLICATION_FAILED = 7,
 };
 
 const ServiceHandle = struct {
@@ -213,6 +225,18 @@ const MessageConsumerHandle = struct {
             .service = service,
             .ring_buffer = ring_buffer,
             .closed = std.atomic.Value(bool).init(false),
+        };
+    }
+};
+
+const ClaimHandle = struct {
+    allocator: std.mem.Allocator,
+    send_claim: ServiceClient.SendClaim,
+
+    fn init(allocator: std.mem.Allocator, send_claim: ServiceClient.SendClaim) ClaimHandle {
+        return .{
+            .allocator = allocator,
+            .send_claim = send_claim,
         };
     }
 };
@@ -449,9 +473,7 @@ fn mapRuntimeError(err: anyerror, context: []const u8) Status {
         => setLastError(.RINGLOOM_ERR_NO_AVAILABLE_INSTANCE, context),
         error.BackPressure,
         error.BackPressureTimeout,
-        error.PeerCongested,
         => setLastError(.RINGLOOM_ERR_BACKPRESSURE, context),
-        error.PeerDisconnected => setLastError(.RINGLOOM_ERR_PEER_DISCONNECTED, context),
         error.MessageTooLong => setLastError(.RINGLOOM_ERR_MESSAGE_TOO_LONG, context),
         else => setLastErrorFmt(.RINGLOOM_ERR_INTERNAL, "{s}: {}", .{ context, err }),
     };
@@ -685,6 +707,58 @@ export fn ringloom_service_node_id(
         return .RINGLOOM_ERR_INVALID_ARGUMENT;
 
     out.* = handle.engine.?.node_id;
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_service_aeron_directory(
+    service: ?*const ringloom_service,
+    out_directory: ?*?[*]const u8,
+    out_directory_len: ?*usize,
+) Status {
+    clearLastError();
+    const out_ptr = out_directory orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_directory must not be NULL");
+    const out_len = out_directory_len orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_directory_len must not be NULL");
+    out_ptr.* = null;
+    out_len.* = 0;
+
+    const handle = requireActiveService(@constCast(service)) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    const directory = handle.engine.?.aeron_runtime.directory;
+    out_ptr.* = if (directory.len == 0) null else directory.ptr;
+    out_len.* = directory.len;
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_service_aeron_inbound_stream_id(
+    service: ?*const ringloom_service,
+    out_stream_id: ?*i32,
+) Status {
+    clearLastError();
+    const out = out_stream_id orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_stream_id must not be NULL");
+    out.* = 0;
+
+    _ = requireActiveService(@constCast(service)) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    // Direct-UDP remote sends do not use a service -> broker IPC ingress stream.
+    out.* = 0;
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_service_publication_connected(
+    service: ?*const ringloom_service,
+    out_connected: ?*bool,
+) Status {
+    clearLastError();
+    const out = out_connected orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_connected must not be NULL");
+    out.* = false;
+
+    const handle = requireActiveService(@constCast(service)) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    out.* = handle.engine.?.aeron_runtime.publicationConnected();
     return .RINGLOOM_OK;
 }
 
@@ -1327,6 +1401,34 @@ export fn ringloom_client_list_targets(
     return .RINGLOOM_OK;
 }
 
+export fn ringloom_client_last_aeron_send_status(
+    client: ?*ringloom_client,
+    out_status: ?*ringloom_aeron_publication_status_t,
+) Status {
+    clearLastError();
+    const out = out_status orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_status must not be NULL");
+    out.* = .RINGLOOM_AERON_PUBLICATION_UNKNOWN;
+
+    const handle = requireActiveClient(client) orelse
+        return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    out.* = nativePublicationStatus(handle.client.remotePublicationHealth().last_status);
+    return .RINGLOOM_OK;
+}
+
+fn nativePublicationStatus(status: ServiceClient.RemotePublicationStatus) ringloom_aeron_publication_status_t {
+    return switch (status) {
+        .unknown => .RINGLOOM_AERON_PUBLICATION_UNKNOWN,
+        .claimed => .RINGLOOM_AERON_PUBLICATION_CLAIMED,
+        .not_connected => .RINGLOOM_AERON_PUBLICATION_NOT_CONNECTED,
+        .back_pressured => .RINGLOOM_AERON_PUBLICATION_BACK_PRESSURED,
+        .admin_action => .RINGLOOM_AERON_PUBLICATION_ADMIN_ACTION,
+        .closed => .RINGLOOM_AERON_PUBLICATION_CLOSED,
+        .max_position_exceeded => .RINGLOOM_AERON_PUBLICATION_MAX_POSITION_EXCEEDED,
+        .failed => .RINGLOOM_AERON_PUBLICATION_FAILED,
+    };
+}
+
 export fn ringloom_client_try_claim(
     client: ?*ringloom_client,
     template_id: u16,
@@ -1345,8 +1447,7 @@ export fn ringloom_client_try_claim(
     const claim = handle.client.tryClaim(template_id, payload_len) catch |err|
         return mapRuntimeError(err, "failed to claim writable send buffer");
 
-    writeClaimOut(out, claim);
-    return .RINGLOOM_OK;
+    return writeClaimOut(handle.service.allocator, out, claim);
 }
 
 export fn ringloom_client_try_claim_request(
@@ -1368,8 +1469,7 @@ export fn ringloom_client_try_claim_request(
     const claim = handle.client.tryClaimRequest(template_id, correlation_id, payload_len) catch |err|
         return mapRuntimeError(err, "failed to claim writable request send buffer");
 
-    writeClaimOut(out, claim);
-    return .RINGLOOM_OK;
+    return writeClaimOut(handle.service.allocator, out, claim);
 }
 
 export fn ringloom_client_try_claim_to(
@@ -1392,8 +1492,7 @@ export fn ringloom_client_try_claim_to(
     const claim = handle.client.tryClaimTo(target_node_id, target_service_id, template_id, payload_len) catch |err|
         return mapRuntimeError(err, "failed to claim writable target send buffer");
 
-    writeClaimOut(out, claim);
-    return .RINGLOOM_OK;
+    return writeClaimOut(handle.service.allocator, out, claim);
 }
 
 export fn ringloom_client_try_claim_to_request(
@@ -1422,8 +1521,7 @@ export fn ringloom_client_try_claim_to_request(
         payload_len,
     ) catch |err| return mapRuntimeError(err, "failed to claim writable target request send buffer");
 
-    writeClaimOut(out, claim);
-    return .RINGLOOM_OK;
+    return writeClaimOut(handle.service.allocator, out, claim);
 }
 
 export fn ringloom_client_try_claim_to_leader(
@@ -1444,8 +1542,7 @@ export fn ringloom_client_try_claim_to_leader(
     const claim = handle.client.tryClaimToLeader(template_id, payload_len) catch |err|
         return mapRuntimeError(err, "failed to claim writable leader send buffer");
 
-    writeClaimOut(out, claim);
-    return .RINGLOOM_OK;
+    return writeClaimOut(handle.service.allocator, out, claim);
 }
 
 export fn ringloom_client_try_claim_to_leader_request(
@@ -1467,8 +1564,7 @@ export fn ringloom_client_try_claim_to_leader_request(
     const claim = handle.client.tryClaimToLeaderRequest(template_id, correlation_id, payload_len) catch |err|
         return mapRuntimeError(err, "failed to claim writable leader request send buffer");
 
-    writeClaimOut(out, claim);
-    return .RINGLOOM_OK;
+    return writeClaimOut(handle.service.allocator, out, claim);
 }
 
 fn prepareClaimOut(out_claim: ?*ringloom_buffer_claim_t) ?*ringloom_buffer_claim_t {
@@ -1487,15 +1583,26 @@ fn prepareClaimOut(out_claim: ?*ringloom_buffer_claim_t) ?*ringloom_buffer_claim
     return out;
 }
 
-fn writeClaimOut(out: *ringloom_buffer_claim_t, claim: ServiceClient.SendClaim) void {
+fn writeClaimOut(
+    allocator: std.mem.Allocator,
+    out: *ringloom_buffer_claim_t,
+    claim: ServiceClient.SendClaim,
+) Status {
+    const handle = allocator.create(ClaimHandle) catch {
+        var mutable = claim;
+        mutable.abort();
+        return setLastError(.RINGLOOM_ERR_OUT_OF_MEMORY, "native allocation failed");
+    };
+    handle.* = ClaimHandle.init(allocator, claim);
     out.* = .{
         .payload = if (claim.payload.len == 0) null else claim.payload.ptr,
         .payload_len = claim.payload.len,
-        ._ring_buffer = @intFromPtr(claim.claim.ring_buffer),
-        ._header_index = claim.claim.header_index,
-        ._record_length = claim.claim.record_length,
+        ._ring_buffer = @intFromPtr(handle),
+        ._header_index = 0,
+        ._record_length = claim_handle_record_length,
         ._active = 1,
     };
+    return .RINGLOOM_OK;
 }
 
 fn clearClaim(claim: *ringloom_buffer_claim_t) void {
@@ -1513,6 +1620,15 @@ export fn ringloom_buffer_claim_commit(claim: ?*ringloom_buffer_claim_t) Status 
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "claim must not be NULL");
     if (claim_ptr._active == 0 or claim_ptr._ring_buffer == 0) {
         return setLastError(.RINGLOOM_ERR_CLAIM_NOT_ACTIVE, "claim is not active");
+    }
+
+    if (claim_ptr._record_length == claim_handle_record_length) {
+        const handle: *ClaimHandle = @ptrFromInt(claim_ptr._ring_buffer);
+        handle.send_claim.commit();
+        const allocator = handle.allocator;
+        allocator.destroy(handle);
+        clearClaim(claim_ptr);
+        return .RINGLOOM_OK;
     }
 
     const ring_buffer: *RingBuffer = @ptrFromInt(claim_ptr._ring_buffer);
@@ -1533,6 +1649,15 @@ export fn ringloom_buffer_claim_abort(claim: ?*ringloom_buffer_claim_t) Status {
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "claim must not be NULL");
     if (claim_ptr._active == 0 or claim_ptr._ring_buffer == 0) {
         return setLastError(.RINGLOOM_ERR_CLAIM_NOT_ACTIVE, "claim is not active");
+    }
+
+    if (claim_ptr._record_length == claim_handle_record_length) {
+        const handle: *ClaimHandle = @ptrFromInt(claim_ptr._ring_buffer);
+        handle.send_claim.abort();
+        const allocator = handle.allocator;
+        allocator.destroy(handle);
+        clearClaim(claim_ptr);
+        return .RINGLOOM_OK;
     }
 
     const ring_buffer: *RingBuffer = @ptrFromInt(claim_ptr._ring_buffer);
@@ -1564,6 +1689,19 @@ export fn ringloom_status_string(status: Status) [*:0]const u8 {
     };
 }
 
+export fn ringloom_aeron_publication_status_string(status: ringloom_aeron_publication_status_t) [*:0]const u8 {
+    return switch (status) {
+        .RINGLOOM_AERON_PUBLICATION_UNKNOWN => "unknown",
+        .RINGLOOM_AERON_PUBLICATION_CLAIMED => "claimed",
+        .RINGLOOM_AERON_PUBLICATION_NOT_CONNECTED => "not_connected",
+        .RINGLOOM_AERON_PUBLICATION_BACK_PRESSURED => "back_pressured",
+        .RINGLOOM_AERON_PUBLICATION_ADMIN_ACTION => "admin_action",
+        .RINGLOOM_AERON_PUBLICATION_CLOSED => "closed",
+        .RINGLOOM_AERON_PUBLICATION_MAX_POSITION_EXCEEDED => "max_position_exceeded",
+        .RINGLOOM_AERON_PUBLICATION_FAILED => "failed",
+    };
+}
+
 export fn ringloom_last_error_message() [*:0]const u8 {
     return @ptrCast(&last_error_message_buffer);
 }
@@ -1591,6 +1729,7 @@ comptime {
     std.debug.assert(@offsetOf(ringloom_metric_descriptor_t, "value") == 24);
     std.debug.assert(@sizeOf(ringloom_metric_descriptor_t) == 32);
     std.debug.assert(@sizeOf(ringloom_ring_stats_t) == 40);
+    std.debug.assert(@intFromEnum(ringloom_aeron_publication_status_t.RINGLOOM_AERON_PUBLICATION_FAILED) == 7);
 }
 
 test "abi version matches header constant" {
@@ -1607,6 +1746,9 @@ test "invalid start arguments return invalid argument status" {
 test "status strings are non-empty" {
     try std.testing.expect(std.mem.span(ringloom_status_string(.RINGLOOM_OK)).len > 0);
     try std.testing.expect(std.mem.span(ringloom_status_string(.RINGLOOM_ERR_INTERNAL)).len > 0);
+    try std.testing.expect(std.mem.span(ringloom_aeron_publication_status_string(
+        .RINGLOOM_AERON_PUBLICATION_NOT_CONNECTED,
+    )).len > 0);
 }
 
 test "last error message never returns null" {

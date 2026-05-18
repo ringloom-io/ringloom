@@ -68,15 +68,21 @@ pub const BrokerSpec = struct {
     idle_strategy: []const u8 = "backoff",
     control_buffer_size: u32 = 65_536,
     messages_buffer_size: u32 = 1_048_576,
+    aeron_directory: ?[]const u8 = null,
+    aeron_ipc_term_length: u32 = 1_048_576,
+    aeron_udp_term_length: u32 = 16_777_216,
+    aeron_sparse_files: bool = true,
+    aeron_delete_directory_on_start: bool = true,
+    aeron_delete_directory_on_shutdown: bool = false,
+    aeron_publication_linger_timeout_ns: u64 = 5 * std.time.ns_per_s,
+    aeron_client_liveness_timeout_ns: u64 = 10 * std.time.ns_per_s,
+    aeron_ingress_stream_base: i32 = 10_000,
+    aeron_admin_stream_base: i32 = 20_000,
+    aeron_data_stream_base: i32 = 30_000,
+    aeron_threading_mode: []const u8 = "dedicated",
     sender_cpu_affinity: ?u32 = null,
     receiver_cpu_affinity: ?u32 = null,
     benchmark_latency_tracing_enabled: bool = false,
-    io_uring_sqpoll: bool = false,
-    io_uring_receiver_enabled: bool = false,
-    io_uring_queue_depth: u32 = 256,
-    io_uring_cq_depth: u32 = 1024,
-    io_uring_recv_buffer_size: u32 = 16 * 1024,
-    io_uring_recv_buffer_count: u32 = 256,
 };
 
 /// Describes the configuration for a service process to be started by
@@ -151,10 +157,44 @@ pub const TestHarness = struct {
     /// Returns a handle that can be passed to `waitForBrokerReady`,
     /// `stopProcess`, etc.
     pub fn startBroker(self: *TestHarness, spec: BrokerSpec) !*ProcessHandle {
+        var effective_spec = spec;
+
+        const generated_aeron_directory = if (spec.aeron_directory == null)
+            try self.env.aeronDirectoryPath(spec.node_id)
+        else
+            null;
+        defer if (generated_aeron_directory) |path| self.allocator.free(path);
+
+        const aeron_directory = spec.aeron_directory orelse generated_aeron_directory.?;
+        effective_spec.aeron_directory = aeron_directory;
+
+        const aeron_dir_exists = if (test_io.access(aeron_directory)) |_| true else |err| switch (err) {
+            error.FileNotFound => false,
+            else => return err,
+        };
+        if (aeron_dir_exists) {
+            try test_io.deleteTree(aeron_directory);
+        }
+
+        effective_spec.port = self.env.mapUdpPort(spec.port);
+        var mapped_peers: std.ArrayList(PeerSpec) = .empty;
+        defer mapped_peers.deinit(self.allocator);
+        if (spec.peers.len > 0) {
+            try mapped_peers.ensureTotalCapacity(self.allocator, spec.peers.len);
+            for (spec.peers) |peer| {
+                mapped_peers.appendAssumeCapacity(.{
+                    .node_id = peer.node_id,
+                    .host = peer.host,
+                    .port = self.env.mapUdpPort(peer.port),
+                });
+            }
+            effective_spec.peers = mapped_peers.items;
+        }
+
         // 1. Generate the config file.
         const config_path = try self.config_gen_inst.writeBrokerConfig(
             self.env.config_path,
-            spec,
+            effective_spec,
             self.env.storage_path,
         );
         errdefer self.allocator.free(config_path);
@@ -180,6 +220,7 @@ pub const TestHarness = struct {
         );
 
         try handle.setConfigPath(config_path);
+        try handle.setAeronDirectory(aeron_directory);
         self.allocator.free(config_path);
 
         try self.processes.append(self.allocator, handle);
@@ -371,6 +412,16 @@ test "BrokerSpec has sensible defaults" {
     try std.testing.expectEqualStrings("backoff", spec.idle_strategy);
     try std.testing.expectEqual(@as(u32, 65_536), spec.control_buffer_size);
     try std.testing.expectEqual(@as(u32, 1_048_576), spec.messages_buffer_size);
+    try std.testing.expectEqual(@as(?[]const u8, null), spec.aeron_directory);
+    try std.testing.expectEqual(@as(u32, 1_048_576), spec.aeron_ipc_term_length);
+    try std.testing.expectEqual(@as(u32, 16_777_216), spec.aeron_udp_term_length);
+    try std.testing.expect(spec.aeron_sparse_files);
+    try std.testing.expect(spec.aeron_delete_directory_on_start);
+    try std.testing.expect(!spec.aeron_delete_directory_on_shutdown);
+    try std.testing.expectEqual(@as(i32, 10_000), spec.aeron_ingress_stream_base);
+    try std.testing.expectEqual(@as(i32, 20_000), spec.aeron_admin_stream_base);
+    try std.testing.expectEqual(@as(i32, 30_000), spec.aeron_data_stream_base);
+    try std.testing.expectEqualStrings("dedicated", spec.aeron_threading_mode);
 }
 
 test "ServiceSpec has sensible defaults" {

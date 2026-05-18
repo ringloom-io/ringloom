@@ -31,8 +31,8 @@ const admin = @import("../cluster/admin_messages.zig");
 const admin_dispatch = @import("../cluster/admin_dispatch.zig");
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
 const AdminCommand = admin_dispatch.AdminCommand;
-const TcpFrameHeader = ringloom_common.protocol.frame_parser.TcpFrameHeader;
 const RoutingRegistry = @import("../receiver/message_router.zig").ServiceRegistry;
+const broker_aeron = @import("../aeron.zig");
 const FlowControlRegion = memory.FlowControlRegion;
 const PressureState = memory.PressureState;
 const log = std.log.scoped(.control_loop);
@@ -44,6 +44,30 @@ const log = std.log.scoped(.control_loop);
 // following the same pattern as control_agent.zig. This is safe because
 // the control loop runs on a single dedicated thread.
 threadlocal var tls_control_loop: ?*ControlLoop = null;
+
+const AdminUdpCounters = struct {
+    forwarded: usize = 0,
+    unknown_peer: usize = 0,
+    not_connected: usize = 0,
+    back_pressured: usize = 0,
+    admin_action: usize = 0,
+    closed: usize = 0,
+    max_position_exceeded: usize = 0,
+    failed: usize = 0,
+
+    fn allocate(counters: *CountersManager) AdminUdpCounters {
+        return .{
+            .forwarded = counters.allocate(1, "control_admin_udp_forwarded") orelse 0,
+            .unknown_peer = counters.allocate(1, "control_admin_udp_unknown_peer") orelse 0,
+            .not_connected = counters.allocate(1, "control_admin_udp_not_connected") orelse 0,
+            .back_pressured = counters.allocate(1, "control_admin_udp_back_pressured") orelse 0,
+            .admin_action = counters.allocate(1, "control_admin_udp_admin_action") orelse 0,
+            .closed = counters.allocate(1, "control_admin_udp_closed") orelse 0,
+            .max_position_exceeded = counters.allocate(1, "control_admin_udp_max_position_exceeded") orelse 0,
+            .failed = counters.allocate(1, "control_admin_udp_failed") orelse 0,
+        };
+    }
+};
 
 pub const ControlLoop = struct {
     // ── Core dependencies ────────────────────────────────────────
@@ -93,6 +117,9 @@ pub const ControlLoop = struct {
     /// Next time (monotonic ns) to re-broadcast local service discovery.
     next_service_rebroadcast_ns: i64,
 
+    /// Next time (monotonic ns) to send broker heartbeat on admin UDP.
+    next_broker_heartbeat_ns: i64,
+
     // ── Scratch buffer for message encoding ──────────────────────
     /// Pre-allocated buffer for encoding outbound control messages.
     /// 4096 bytes is more than enough for any single control message
@@ -106,11 +133,14 @@ pub const ControlLoop = struct {
     /// Admin command queue — receiver posts admin messages here.
     admin_cmd_queue: ?*AdminCommandQueue(64),
 
-    /// Send ring buffer — used for broadcasting admin messages to peers.
-    send_ring_buffer: ?*RingBuffer,
+    /// Aeron UDP transport used for v2 broker-to-broker admin broadcasts.
+    broker_udp_transport: ?*broker_aeron.BrokerUdpTransport,
 
     /// Peer node IDs — used to iterate peers for broadcasting.
     peer_node_ids: []const u8,
+
+    /// Null-padded "host:port" identity included in broker heartbeats.
+    local_host_and_port: [22]u8,
 
     /// Receiver's routing registry — maps service IDs to message ring buffers.
     /// Updated on service register/deregister so incoming TCP messages can be
@@ -134,6 +164,11 @@ pub const ControlLoop = struct {
     fc_check_interval_ns: i64,
     fc_refresh_interval_ns: i64,
     fc_normal_refresh_interval_ns: i64,
+    aeron_agent: ?broker_aeron.AgentInvoker,
+    admin_epoch: i64,
+    admin_peer_seen: [256]bool,
+    admin_peer_last_heartbeat_ns: [256]i64,
+    admin_udp_counters: AdminUdpCounters,
 
     const Self = @This();
 
@@ -144,6 +179,8 @@ pub const ControlLoop = struct {
     const HEARTBEAT_CHECK_INTERVAL_NS: i64 = constants.service_heartbeat_check_interval_ms * std.time.ns_per_ms;
     const CONTROL_MSG_TYPE: i32 = 1; // ring buffer msg_type_id for control messages
     const SERVICE_REBROADCAST_INTERVAL_NS: i64 = 1 * std.time.ns_per_s;
+    const BROKER_HEARTBEAT_INTERVAL_NS: i64 = 1 * std.time.ns_per_s;
+    const BROKER_HEARTBEAT_TIMEOUT_NS: i64 = 3 * std.time.ns_per_s;
 
     // ─────────────────────────────────────────────────────────────
     // Construction
@@ -159,8 +196,9 @@ pub const ControlLoop = struct {
         group: []const u8,
         allocator: std.mem.Allocator,
         admin_cmd_queue: ?*AdminCommandQueue(64) = null,
-        send_ring_buffer: ?*RingBuffer = null,
+        broker_udp_transport: ?*broker_aeron.BrokerUdpTransport = null,
         peer_node_ids: []const u8 = &.{},
+        local_host_and_port: [22]u8 = [_]u8{0} ** 22,
         routing_registry: ?*RoutingRegistry = null,
         fc_region: ?FlowControlRegion = null,
         fc_enabled: bool = false,
@@ -169,6 +207,7 @@ pub const ControlLoop = struct {
         fc_check_interval_ms: u32 = 1,
         fc_refresh_interval_ms: u32 = 200,
         fc_normal_refresh_interval_ms: u32 = 2000,
+        aeron_agent: ?broker_aeron.AgentInvoker = null,
     };
 
     pub fn init(opts: InitOptions) Self {
@@ -187,10 +226,12 @@ pub const ControlLoop = struct {
             .next_heartbeat_check_ns = 0,
             .next_fc_check_ns = 0,
             .next_service_rebroadcast_ns = 0,
+            .next_broker_heartbeat_ns = 0,
             .allocator = opts.allocator,
             .admin_cmd_queue = opts.admin_cmd_queue,
-            .send_ring_buffer = opts.send_ring_buffer,
+            .broker_udp_transport = opts.broker_udp_transport,
             .peer_node_ids = opts.peer_node_ids,
+            .local_host_and_port = opts.local_host_and_port,
             .routing_registry = opts.routing_registry,
             .allocated_routing_rbs = std.AutoHashMap(u16, *RingBuffer).init(opts.allocator),
             .fc_region = opts.fc_region,
@@ -200,6 +241,11 @@ pub const ControlLoop = struct {
             .fc_check_interval_ns = @as(i64, @intCast(opts.fc_check_interval_ms)) * std.time.ns_per_ms,
             .fc_refresh_interval_ns = @as(i64, @intCast(opts.fc_refresh_interval_ms)) * std.time.ns_per_ms,
             .fc_normal_refresh_interval_ns = @as(i64, @intCast(opts.fc_normal_refresh_interval_ms)) * std.time.ns_per_ms,
+            .aeron_agent = opts.aeron_agent,
+            .admin_epoch = 0,
+            .admin_peer_seen = [_]bool{false} ** 256,
+            .admin_peer_last_heartbeat_ns = [_]i64{0} ** 256,
+            .admin_udp_counters = AdminUdpCounters.allocate(opts.counters),
         };
     }
 
@@ -213,6 +259,8 @@ pub const ControlLoop = struct {
     pub fn doWork(self: *Self) u32 {
         var work_count: u32 = 0;
         const now_ns = platform.Clock.monotonicNanos();
+
+        work_count += self.invokeAeronAgent();
 
         // 1. Drain inter-event-loop commands (max 1 per cycle to limit jitter)
         work_count += self.cmd_queue.drain(@ptrCast(self), dispatchCommandThunk, COMMAND_DRAIN_LIMIT);
@@ -238,9 +286,13 @@ pub const ControlLoop = struct {
             // 3b. Cluster protocol tasks (leader election, state sync, broker heartbeats)
             self.cluster_manager.doWork(now_ns);
 
-            // 3c. Reconcile service discovery. ServiceAdded admin messages are
+            // 3c. Broker admin heartbeat over Aeron UDP.
+            work_count += self.broadcastBrokerHeartbeatIfDue(now_ns);
+            work_count += self.checkBrokerHeartbeatTimeouts(now_ns);
+
+            // 3d. Reconcile service discovery. ServiceAdded admin messages are
             // idempotent, so periodic broadcasts repair announcements dropped
-            // during TCP setup or broker startup races.
+            // during Aeron publication setup or broker startup races.
             if (self.peer_node_ids.len > 0 and now_ns > self.next_service_rebroadcast_ns) {
                 self.broadcastAllLocalServices();
                 self.broadcastAllLocalCapacities();
@@ -259,6 +311,16 @@ pub const ControlLoop = struct {
         }
 
         return work_count;
+    }
+
+    fn invokeAeronAgent(self: *Self) u32 {
+        if (self.aeron_agent) |*agent| {
+            return agent.invoke() catch |err| {
+                log.err("aeron conductor invocation failed: {}", .{err});
+                return 0;
+            };
+        }
+        return 0;
     }
 
     /// EventLoop-compatible function pointer.
@@ -413,12 +475,7 @@ pub const ControlLoop = struct {
         var is_leader = false;
         if (data.leader_election_enabled) {
             if (self.cluster_manager.isClusterLeader()) {
-                is_leader = self.leader_election.evaluate(
-                    &self.service_registry,
-                    service_name,
-                    self.local_node_id,
-                    data.service_id,
-                );
+                is_leader = self.evaluateAndBroadcastServiceLeader(service_name, data.service_id);
             }
         }
 
@@ -535,12 +592,7 @@ pub const ControlLoop = struct {
         // 5. Re-evaluate service leader if this service had leader election enabled.
         if (removed.leader_election_enabled) {
             if (self.cluster_manager.isClusterLeader()) {
-                _ = self.leader_election.evaluate(
-                    &self.service_registry,
-                    removed.service_name,
-                    self.local_node_id,
-                    -1, // no specific local candidate — re-evaluate globally
-                );
+                _ = self.evaluateAndBroadcastServiceLeader(removed.service_name, -1);
             }
         }
     }
@@ -554,8 +606,14 @@ pub const ControlLoop = struct {
         var count: u32 = 0;
         while (queue.dequeue()) |cmd| {
             switch (cmd) {
+                .broker_heartbeat => |e| self.handleBrokerHeartbeat(
+                    e.node_id,
+                    e.host_and_port,
+                    e.received_ns,
+                ),
                 .service_added => |e| self.handleRemoteServiceAdded(e.data),
                 .service_removed => |e| self.handleRemoteServiceRemoved(e.data),
+                .service_leader_designated => |e| self.handleRemoteServiceLeaderDesignated(e.data),
                 .peer_connected => |e| self.handlePeerConnected(e.node_id),
                 .remaining_bytes_update => |e| self.handleRemainingBytesUpdate(
                     e.source_node_id,
@@ -568,6 +626,64 @@ pub const ControlLoop = struct {
             count += 1;
         }
         return count;
+    }
+
+    fn handleBrokerHeartbeat(
+        self: *Self,
+        node_id: u8,
+        host_and_port: [22]u8,
+        received_ns: i64,
+    ) void {
+        if (node_id == self.local_node_id) return;
+
+        const first_seen = !self.admin_peer_seen[node_id];
+        self.admin_peer_seen[node_id] = true;
+        self.admin_peer_last_heartbeat_ns[node_id] = received_ns;
+
+        if (first_seen) {
+            log.info("broker admin heartbeat discovered peer node={} at {s}", .{
+                node_id,
+                admin.trimHostPort(&host_and_port),
+            });
+            self.handlePeerConnected(node_id);
+        }
+    }
+
+    fn checkBrokerHeartbeatTimeouts(self: *Self, now_ns: i64) u32 {
+        var work_count: u32 = 0;
+        for (self.peer_node_ids) |peer_id| {
+            if (!self.admin_peer_seen[peer_id]) continue;
+            if (now_ns - self.admin_peer_last_heartbeat_ns[peer_id] <= BROKER_HEARTBEAT_TIMEOUT_NS) continue;
+
+            self.admin_peer_seen[peer_id] = false;
+            self.removeRemoteServicesByNode(peer_id);
+            log.info("broker admin heartbeat timed out: node={}", .{peer_id});
+            work_count += 1;
+        }
+        return work_count;
+    }
+
+    fn removeRemoteServicesByNode(self: *Self, node_id: u8) void {
+        var service_ids: [constants.default_max_services]i32 = undefined;
+        var count: usize = 0;
+
+        var iter = self.service_registry.instances.iterator();
+        while (iter.next()) |entry| {
+            const inst = entry.value_ptr;
+            if (inst.node_id != node_id or inst.is_local) continue;
+            if (count >= service_ids.len) break;
+            service_ids[count] = inst.service_id;
+            count += 1;
+        }
+
+        for (service_ids[0..count]) |service_id| {
+            const removed = self.service_registry.remove(service_id, node_id) orelse continue;
+            defer self.allocator.free(@constCast(removed.service_name));
+            if (removed.leader_election_enabled and self.cluster_manager.isClusterLeader()) {
+                _ = self.evaluateAndBroadcastServiceLeader(removed.service_name, -1);
+            }
+            self.notifySubscribers(removed.service_name);
+        }
     }
 
     fn handleRemoteServiceAdded(self: *Self, data: [@sizeOf(admin.ServiceAddedBody)]u8) void {
@@ -609,6 +725,10 @@ pub const ControlLoop = struct {
             );
         }
 
+        if (body.leader_election_enabled == 1 and self.cluster_manager.isClusterLeader()) {
+            _ = self.evaluateAndBroadcastServiceLeader(name, -1);
+        }
+
         self.notifySubscribers(name);
     }
 
@@ -628,7 +748,22 @@ pub const ControlLoop = struct {
             name, body.service_id, body.node_id,
         });
 
+        if (removed.leader_election_enabled and self.cluster_manager.isClusterLeader()) {
+            _ = self.evaluateAndBroadcastServiceLeader(name, -1);
+        }
+
         self.notifySubscribers(name);
+    }
+
+    fn handleRemoteServiceLeaderDesignated(self: *Self, data: [@sizeOf(admin.ServiceLeaderDesignatedBody)]u8) void {
+        var body: admin.ServiceLeaderDesignatedBody = undefined;
+        @memcpy(@as(*[@sizeOf(admin.ServiceLeaderDesignatedBody)]u8, @ptrCast(&body)), &data);
+
+        const name = admin.trimServiceName(&body.service_name);
+        const leader_id: i32 = @intCast(body.service_id);
+        self.service_registry.setLeader(name, leader_id);
+        self.notifySubscribers(name);
+        self.sendLeaderChangedToLocalSubscribers(leader_id, body.node_id, name);
     }
 
     /// When a new peer connects, re-broadcast all local services so they
@@ -646,6 +781,22 @@ pub const ControlLoop = struct {
     // ─────────────────────────────────────────────────────────────
     // Admin Broadcast (outbound to peers)
     // ─────────────────────────────────────────────────────────────
+
+    fn broadcastBrokerHeartbeatIfDue(self: *Self, now_ns: i64) u32 {
+        if (self.peer_node_ids.len == 0) return 0;
+        if (now_ns < self.next_broker_heartbeat_ns) return 0;
+
+        self.broadcastAdminMessage(
+            admin.BrokerHeartbeatBody,
+            admin.TEMPLATE_BROKER_HEARTBEAT,
+            admin.BrokerHeartbeatBody{
+                .node_id = self.local_node_id,
+                .host_and_port = self.local_host_and_port,
+            },
+        );
+        self.next_broker_heartbeat_ns = now_ns + BROKER_HEARTBEAT_INTERVAL_NS;
+        return 1;
+    }
 
     fn broadcastServiceAdded(self: *Self, service_id: i32, service_name: []const u8, leader_election_enabled: bool) void {
         self.broadcastAdminMessage(
@@ -690,49 +841,102 @@ pub const ControlLoop = struct {
         );
     }
 
+    fn broadcastServiceLeaderDesignated(
+        self: *Self,
+        service_id: i32,
+        node_id: u8,
+        service_name: []const u8,
+    ) void {
+        self.broadcastAdminMessage(
+            admin.ServiceLeaderDesignatedBody,
+            admin.TEMPLATE_SERVICE_LEADER_DESIGNATED,
+            admin.ServiceLeaderDesignatedBody{
+                .node_id = node_id,
+                .service_id = @intCast(service_id),
+                .service_name = admin.padServiceName(service_name),
+            },
+        );
+    }
+
+    fn evaluateAndBroadcastServiceLeader(
+        self: *Self,
+        service_name: []const u8,
+        local_candidate_service_id: i32,
+    ) bool {
+        const previous_leader = self.service_registry.getLeader(service_name);
+        const local_is_leader = self.leader_election.evaluate(
+            &self.service_registry,
+            service_name,
+            self.local_node_id,
+            local_candidate_service_id,
+        );
+        const leader_service_id = self.service_registry.getLeader(service_name) orelse return local_is_leader;
+        if (previous_leader != null and previous_leader.? == leader_service_id) return local_is_leader;
+
+        if (self.findServiceInstance(service_name, leader_service_id)) |leader| {
+            self.broadcastServiceLeaderDesignated(leader.service_id, leader.node_id, leader.service_name);
+            self.sendLeaderChangedToLocalSubscribers(leader.service_id, leader.node_id, leader.service_name);
+        }
+        return local_is_leader;
+    }
+
+    fn findServiceInstance(
+        self: *Self,
+        service_name: []const u8,
+        service_id: i32,
+    ) ?ServiceInstance {
+        var instances: [constants.default_max_services]ServiceInstance = undefined;
+        const count = self.service_registry.getInstancesByNameBuf(service_name, &instances);
+        for (instances[0..count]) |inst| {
+            if (inst.service_id == service_id) return inst;
+        }
+        return null;
+    }
+
     fn broadcastAdminMessage(
         self: *Self,
         comptime BodyType: type,
         template_id: u16,
         body: BodyType,
     ) void {
-        const srb = self.send_ring_buffer orelse return;
+        const transport_ref = self.broker_udp_transport orelse return;
         if (self.peer_node_ids.len == 0) return;
 
-        // Encode admin payload (AdminMessageHeader + body) into scratch buffer
+        const payload_offset = admin.AeronAdminHeader.size;
         const admin_payload_len = admin.encodeAdminMessage(
-            self.encode_buf[TcpFrameHeader.size..],
+            self.encode_buf[payload_offset..],
             BodyType,
             template_id,
             body,
         );
 
-        const frame_length: u32 = @intCast(TcpFrameHeader.size + admin_payload_len);
-
         for (self.peer_node_ids) |peer_id| {
-            const header = TcpFrameHeader{
-                .frame_length = frame_length,
-                .flags = constants.flag_admin,
-                .source_node_id = self.local_node_id,
-                .target_node_id = peer_id,
-                .source_service_id = 0,
-                .target_service_id = 0,
+            const frame_len = admin.encodeAeronAdminFrame(
+                &self.encode_buf,
+                self.local_node_id,
+                peer_id,
+                self.nextAdminEpoch(),
+                self.encode_buf[payload_offset..][0..admin_payload_len],
+            ) catch |err| {
+                log.warn("failed to encode admin UDP frame template={} to node {}: {}", .{ template_id, peer_id, err });
+                continue;
             };
-            const header_bytes: *const [TcpFrameHeader.size]u8 = @ptrCast(&header);
-            @memcpy(self.encode_buf[0..TcpFrameHeader.size], header_bytes);
-
-            srb.write(1, self.encode_buf[0..frame_length]) catch {
-                log.warn("send ring buffer full — dropping admin broadcast to node {}", .{peer_id});
-            };
+            self.forwardAdminFrame(transport_ref, peer_id, template_id, self.encode_buf[0..frame_len]);
         }
     }
 
     fn broadcastAdminPayload(self: *Self, template_id: u16, payload: []const u8) void {
-        const srb = self.send_ring_buffer orelse return;
+        const transport_ref = self.broker_udp_transport orelse return;
         if (self.peer_node_ids.len == 0) return;
 
+        const payload_offset = admin.AeronAdminHeader.size;
         const header_len = @sizeOf(admin.AdminMessageHeader);
         const admin_payload_len = header_len + payload.len;
+        if (payload_offset + admin_payload_len > self.encode_buf.len) {
+            log.warn("admin payload too large: template={}, len={}", .{ template_id, payload.len });
+            return;
+        }
+
         const header = admin.AdminMessageHeader{
             .block_length = @intCast(payload.len),
             .template_id = template_id,
@@ -740,27 +944,66 @@ pub const ControlLoop = struct {
             .version = admin.SCHEMA_VERSION,
         };
         const header_bytes: *const [header_len]u8 = @ptrCast(&header);
-        @memcpy(self.encode_buf[TcpFrameHeader.size..][0..header_len], header_bytes);
-        @memcpy(self.encode_buf[TcpFrameHeader.size + header_len ..][0..payload.len], payload);
+        @memcpy(self.encode_buf[payload_offset..][0..header_len], header_bytes);
+        @memcpy(self.encode_buf[payload_offset + header_len ..][0..payload.len], payload);
 
-        const frame_length: u32 = @intCast(TcpFrameHeader.size + admin_payload_len);
         for (self.peer_node_ids) |peer_id| {
-            const tcp_header = TcpFrameHeader{
-                .frame_length = frame_length,
-                .flags = constants.flag_admin,
-                .source_node_id = self.local_node_id,
-                .target_node_id = peer_id,
-                .source_service_id = 0,
-                .target_service_id = 0,
+            const frame_len = admin.encodeAeronAdminFrame(
+                &self.encode_buf,
+                self.local_node_id,
+                peer_id,
+                self.nextAdminEpoch(),
+                self.encode_buf[payload_offset..][0..admin_payload_len],
+            ) catch |err| {
+                log.warn("failed to encode admin UDP payload template={} to node {}: {}", .{ template_id, peer_id, err });
+                continue;
             };
-            const tcp_header_bytes: *const [TcpFrameHeader.size]u8 = @ptrCast(&tcp_header);
-            @memcpy(self.encode_buf[0..TcpFrameHeader.size], tcp_header_bytes);
-            srb.write(1, self.encode_buf[0..frame_length]) catch {
-                log.warn("send ring buffer full — dropping admin payload {} to node {}", .{
-                    template_id,
-                    peer_id,
-                });
-            };
+            self.forwardAdminFrame(transport_ref, peer_id, template_id, self.encode_buf[0..frame_len]);
+        }
+    }
+
+    fn nextAdminEpoch(self: *Self) i64 {
+        self.admin_epoch += 1;
+        return self.admin_epoch;
+    }
+
+    fn forwardAdminFrame(
+        self: *Self,
+        transport_ref: *broker_aeron.BrokerUdpTransport,
+        peer_id: u8,
+        template_id: u16,
+        frame: []const u8,
+    ) void {
+        switch (transport_ref.forwardAdminFrame(peer_id, frame)) {
+            .forwarded => self.counters.increment(self.admin_udp_counters.forwarded),
+            .unknown_peer => {
+                self.counters.increment(self.admin_udp_counters.unknown_peer);
+                log.warn("unknown peer for admin UDP template={} node={}", .{ template_id, peer_id });
+            },
+            .not_connected => {
+                self.counters.increment(self.admin_udp_counters.not_connected);
+                log.debug("admin UDP publication not connected: template={} node={}", .{ template_id, peer_id });
+            },
+            .back_pressured => {
+                self.counters.increment(self.admin_udp_counters.back_pressured);
+                log.debug("admin UDP back pressured: template={} node={}", .{ template_id, peer_id });
+            },
+            .admin_action => {
+                self.counters.increment(self.admin_udp_counters.admin_action);
+                log.debug("admin UDP admin-action retry requested: template={} node={}", .{ template_id, peer_id });
+            },
+            .closed => {
+                self.counters.increment(self.admin_udp_counters.closed);
+                log.warn("admin UDP forward failed: template={} node={} result=closed", .{ template_id, peer_id });
+            },
+            .max_position_exceeded => {
+                self.counters.increment(self.admin_udp_counters.max_position_exceeded);
+                log.warn("admin UDP forward failed: template={} node={} result=max_position_exceeded", .{ template_id, peer_id });
+            },
+            .failed => {
+                self.counters.increment(self.admin_udp_counters.failed);
+                log.warn("admin UDP forward failed: template={} node={} result=failed", .{ template_id, peer_id });
+            },
         }
     }
 
@@ -1223,8 +1466,8 @@ const testing = std.testing;
 /// The caller must `defer result.registry_cleanup()` and keep all returned
 /// pointers alive for the duration of the test.
 const TestFixture = struct {
-    values_buf: [128 * 4]u8 align(128),
-    meta_buf: [256 * 4]u8 align(4),
+    values_buf: [128 * 16]u8 align(128),
+    meta_buf: [256 * 16]u8 align(4),
     counters_mgr: CountersManager,
     cluster_mgr: ClusterManager,
     cmd_buf: [4]Command,
@@ -1290,4 +1533,29 @@ test "doWork returns zero when idle" {
 
     // Then
     try testing.expectEqual(@as(u32, 0), work);
+}
+
+test "broker admin heartbeat timeout removes remote services" {
+    var fix = TestFixture.create();
+    var control_loop = fix.makeControlLoop();
+    defer control_loop.service_registry.deinit();
+
+    const peers = [_]u8{2};
+    control_loop.peer_node_ids = peers[0..];
+    try control_loop.service_registry.register(.{
+        .service_id = 42,
+        .node_id = 2,
+        .service_name = "remote",
+        .leader_election_enabled = false,
+        .is_local = false,
+    });
+
+    control_loop.handleBrokerHeartbeat(2, admin.padHostPort("127.0.0.1:9002"), 1);
+    try testing.expect(control_loop.admin_peer_seen[2]);
+    try testing.expect(control_loop.service_registry.getInstancePtr(42, 2) != null);
+
+    const work = control_loop.checkBrokerHeartbeatTimeouts(ControlLoop.BROKER_HEARTBEAT_TIMEOUT_NS + 2);
+    try testing.expectEqual(@as(u32, 1), work);
+    try testing.expect(!control_loop.admin_peer_seen[2]);
+    try testing.expect(control_loop.service_registry.getInstancePtr(42, 2) == null);
 }

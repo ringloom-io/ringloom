@@ -33,6 +33,10 @@
     // internet connectivity.
     .dependencies = .{
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
+        .aeron = .{
+            .url = "https://github.com/aeron-io/aeron/archive/refs/tags/1.51.0.tar.gz",
+            .hash = "N-V-__8AANhHNAGQAdVQPxoIhmCoz_7Dj7ODXvMcX9_C0eJf",
+        },
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
         //    // `hash`, otherwise you are communicating that you expect to find the old hash at
@@ -71,6 +75,7 @@
     // the build root itself.
     // A directory listed here means that all files within, recursively, are included.
     .paths = .{
+        "build_support",
         "build.zig",
         "build.zig.zon",
         "src",

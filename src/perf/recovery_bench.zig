@@ -18,8 +18,73 @@ const TestHarness = testing_mod.TestHarness;
 const BrokerSpec = testing_mod.BrokerSpec;
 const ServiceSpec = testing_mod.ServiceSpec;
 const PeerSpec = testing_mod.PeerSpec;
-const result_writer = testing_mod.result_writer;
-const PerfResult = result_writer.PerfResult;
+const persistent_results = @import("persistent_results.zig");
+
+const RecoverySummary = struct {
+    scenario: []const u8,
+    build_mode: []const u8,
+    recovery_time_ms: u64,
+    iterations: u32 = 1,
+    average_recovery_time_ms: u64,
+    max_recovery_time_ms: u64,
+    total_recovery_time_ms: u64,
+};
+
+fn writeRecoverySummary(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    summary: RecoverySummary,
+) !void {
+    const file = if (std.fs.path.isAbsolute(file_path))
+        try std.Io.Dir.createFileAbsolute(std.testing.io, file_path, .{})
+    else
+        try std.Io.Dir.cwd().createFile(std.testing.io, file_path, .{});
+    defer file.close(std.testing.io);
+
+    const json = try std.fmt.allocPrint(allocator,
+        \\{{
+        \\  "scenario": "{s}",
+        \\  "build_mode": "{s}",
+        \\  "recovery_time_ms": {d},
+        \\  "iterations": {d},
+        \\  "average_recovery_time_ms": {d},
+        \\  "max_recovery_time_ms": {d},
+        \\  "total_recovery_time_ms": {d}
+        \\}}
+        \\
+    , .{
+        summary.scenario,
+        summary.build_mode,
+        summary.recovery_time_ms,
+        summary.iterations,
+        summary.average_recovery_time_ms,
+        summary.max_recovery_time_ms,
+        summary.total_recovery_time_ms,
+    });
+    defer allocator.free(json);
+
+    try file.writeStreamingAll(std.testing.io, json);
+}
+
+fn pingResultShowsFullSuccess(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    expected_sent: u64,
+) !bool {
+    const content = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        file_path,
+        allocator,
+        .limited(16 * 1024),
+    );
+    defer allocator.free(content);
+
+    const sent_field = try std.fmt.allocPrint(allocator, "\"sent\": {d}", .{expected_sent});
+    defer allocator.free(sent_field);
+
+    return std.mem.indexOf(u8, content, sent_field) != null and
+        std.mem.indexOf(u8, content, "\"failed\": 0") != null;
+}
 
 // ---------------------------------------------------------------------------
 // Service recovery
@@ -66,25 +131,20 @@ test "service recovery time after crash" {
     std.log.info("service recovery time: {}ms", .{recovery_ms});
 
     // Write a result file for CI dashboards.
-    const result = PerfResult{
-        .suite = "recovery",
+    const result_path = try persistent_results.scenarioPath(
+        allocator,
+        "recovery",
+        "service-crash-recovery.json",
+    );
+    defer allocator.free(result_path);
+    try writeRecoverySummary(allocator, result_path, .{
         .scenario = "service-crash-recovery",
         .build_mode = @tagName(@import("builtin").mode),
-        .message_size_bytes = 0,
-        .warmup_messages = 0,
-        .measured_messages = 0,
-        .throughput_msgs_per_sec = 0,
-        .throughput_bytes_per_sec = 0,
-        .latency_p50_ns = 0,
-        .latency_p95_ns = 0,
-        .latency_p99_ns = 0,
-        .latency_max_ns = @intCast(recovery_ns),
-        .messages_sent = 0,
-        .messages_received = 0,
-        .send_failures = 0,
-    };
-    const result_path = try result_writer.writePerfResult(allocator, harness.env.results_path, result);
-    allocator.free(result_path);
+        .recovery_time_ms = recovery_ms,
+        .average_recovery_time_ms = recovery_ms,
+        .max_recovery_time_ms = recovery_ms,
+        .total_recovery_time_ms = recovery_ms,
+    });
 
     // Cleanup
     try harness.stopProcess(replacement);
@@ -130,25 +190,20 @@ test "service recovery time after kill" {
     const recovery_ms: u64 = @intCast(@divFloor(recovery_ns, std.time.ns_per_ms));
     std.log.info("service kill-recovery time: {}ms", .{recovery_ms});
 
-    const result = PerfResult{
-        .suite = "recovery",
+    const result_path = try persistent_results.scenarioPath(
+        allocator,
+        "recovery",
+        "service-kill-recovery.json",
+    );
+    defer allocator.free(result_path);
+    try writeRecoverySummary(allocator, result_path, .{
         .scenario = "service-kill-recovery",
         .build_mode = @tagName(@import("builtin").mode),
-        .message_size_bytes = 0,
-        .warmup_messages = 0,
-        .measured_messages = 0,
-        .throughput_msgs_per_sec = 0,
-        .throughput_bytes_per_sec = 0,
-        .latency_p50_ns = 0,
-        .latency_p95_ns = 0,
-        .latency_p99_ns = 0,
-        .latency_max_ns = @intCast(recovery_ns),
-        .messages_sent = 0,
-        .messages_received = 0,
-        .send_failures = 0,
-    };
-    const result_path = try result_writer.writePerfResult(allocator, harness.env.results_path, result);
-    allocator.free(result_path);
+        .recovery_time_ms = recovery_ms,
+        .average_recovery_time_ms = recovery_ms,
+        .max_recovery_time_ms = recovery_ms,
+        .total_recovery_time_ms = recovery_ms,
+    });
 
     // Cleanup
     try harness.stopProcess(replacement);
@@ -192,10 +247,10 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     try harness.waitForServiceReady(echo, 5000);
 
     // Verify baseline cross-broker messaging works.
-    const baseline_result_path = try std.fmt.allocPrint(
+    const baseline_result_path = try persistent_results.scenarioPath(
         allocator,
-        "{s}/broker-recovery-baseline.json",
-        .{harness.env.results_path},
+        "recovery",
+        "broker-recovery-baseline.json",
     );
     defer allocator.free(baseline_result_path);
 
@@ -215,6 +270,7 @@ test "broker recovery - cross-broker messaging resumes after restart" {
 
     const baseline_exit = try baseline_ping.waitForExit(30000);
     try std.testing.expectEqual(@as(u32, 0), baseline_exit);
+    try std.testing.expect(try pingResultShowsFullSuccess(allocator, baseline_result_path, 1000));
 
     // When — stop broker B, wait briefly, then restart it.
     try harness.stopProcess(echo);
@@ -243,55 +299,69 @@ test "broker recovery - cross-broker messaging resumes after restart" {
     });
     try harness.waitForServiceReady(echo2, 5000);
 
-    const recovery_ns = Clock.monotonicNanosStable() - stop_ns;
-
     // Then — cross-broker messaging works again.
-    const recovered_result_path = try std.fmt.allocPrint(
+    const recovered_result_path = try persistent_results.scenarioPath(
         allocator,
-        "{s}/broker-recovery-resumed.json",
-        .{harness.env.results_path},
+        "recovery",
+        "broker-recovery-resumed.json",
     );
     defer allocator.free(recovered_result_path);
 
-    const recovery_ping = try harness.startService(.{
-        .executable_name = "ringloom-test-ping-service",
-        .service_name = "ping",
-        .broker_node_id = 1,
-        .extra_args = &.{
-            "--target-service", "echo",
-            "--message-count",  "1000",
-            "--message-size",   "128",
-            "--warmup-count",   "100",
-            "--result-file",    recovered_result_path,
-        },
-    });
-    try harness.waitForServiceReady(recovery_ping, 5000);
+    const probe_message_count = "100";
+    const recovery_deadline_ns = stop_ns + (20 * std.time.ns_per_s);
+    var messaging_resumed = false;
 
-    const recovery_exit = try recovery_ping.waitForExit(60000);
-    try std.testing.expectEqual(@as(u32, 0), recovery_exit);
+    while (Clock.monotonicNanosStable() < recovery_deadline_ns) {
+        std.Io.Dir.deleteFileAbsolute(std.testing.io, recovered_result_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
 
+        const recovery_ping = try harness.startService(.{
+            .executable_name = "ringloom-test-ping-service",
+            .service_name = "ping-probe",
+            .broker_node_id = 1,
+            .extra_args = &.{
+                "--target-service", "echo",
+                "--message-count",  probe_message_count,
+                "--message-size",   "128",
+                "--warmup-count",   "0",
+                "--result-file",    recovered_result_path,
+            },
+        });
+        try harness.waitForServiceReady(recovery_ping, 5000);
+
+        const recovery_exit = try recovery_ping.waitForExit(30000);
+        try std.testing.expectEqual(@as(u32, 0), recovery_exit);
+
+        if (try pingResultShowsFullSuccess(allocator, recovered_result_path, 100)) {
+            messaging_resumed = true;
+            break;
+        }
+
+        platform.sleepNanos(250 * std.time.ns_per_ms);
+    }
+
+    try std.testing.expect(messaging_resumed);
+
+    const recovery_ns = Clock.monotonicNanosStable() - stop_ns;
     const recovery_ms: u64 = @intCast(@divFloor(recovery_ns, std.time.ns_per_ms));
     std.log.info("broker recovery time (stop→messaging resumed): {}ms", .{recovery_ms});
 
-    const result = PerfResult{
-        .suite = "recovery",
+    const result_path = try persistent_results.scenarioPath(
+        allocator,
+        "recovery",
+        "broker-restart-recovery.json",
+    );
+    defer allocator.free(result_path);
+    try writeRecoverySummary(allocator, result_path, .{
         .scenario = "broker-restart-recovery",
         .build_mode = @tagName(@import("builtin").mode),
-        .message_size_bytes = 128,
-        .warmup_messages = 100,
-        .measured_messages = 1000,
-        .throughput_msgs_per_sec = 0,
-        .throughput_bytes_per_sec = 0,
-        .latency_p50_ns = 0,
-        .latency_p95_ns = 0,
-        .latency_p99_ns = 0,
-        .latency_max_ns = @intCast(recovery_ns),
-        .messages_sent = 1000,
-        .messages_received = 1000,
-        .send_failures = 0,
-    };
-    const result_path = try result_writer.writePerfResult(allocator, harness.env.results_path, result);
-    allocator.free(result_path);
+        .recovery_time_ms = recovery_ms,
+        .average_recovery_time_ms = recovery_ms,
+        .max_recovery_time_ms = recovery_ms,
+        .total_recovery_time_ms = recovery_ms,
+    });
 
     // Cleanup — reverse order.
     try harness.stopProcess(echo2);
@@ -335,10 +405,10 @@ test "broker recovery - local services survive remote broker restart" {
     platform.sleepNanos(2 * std.time.ns_per_s);
 
     // Then — local messaging on broker A still works.
-    const result_path = try std.fmt.allocPrint(
+    const result_path = try persistent_results.scenarioPath(
         allocator,
-        "{s}/local-survive-remote-kill.json",
-        .{harness.env.results_path},
+        "recovery",
+        "local-survive-remote-kill.json",
     );
     defer allocator.free(result_path);
 
@@ -358,6 +428,7 @@ test "broker recovery - local services survive remote broker restart" {
 
     const exit_code = try ping.waitForExit(30000);
     try std.testing.expectEqual(@as(u32, 0), exit_code);
+    try std.testing.expect(try pingResultShowsFullSuccess(allocator, result_path, 5000));
 
     std.log.info("local services survived remote broker kill — messaging intact", .{});
 
@@ -390,6 +461,7 @@ test "rapid service restart recovery" {
     //        the time from kill to successful replacement each iteration.
     const iterations: u32 = 5;
     var total_recovery_ns: i128 = 0;
+    var max_recovery_ns: u64 = 0;
 
     for (0..iterations) |i| {
         const svc = try harness.startService(.{
@@ -415,6 +487,7 @@ test "rapid service restart recovery" {
 
         const iter_recovery_ns = Clock.monotonicNanosStable() - iter_start;
         total_recovery_ns += iter_recovery_ns;
+        max_recovery_ns = @max(max_recovery_ns, @as(u64, @intCast(iter_recovery_ns)));
 
         const iter_ms: u64 = @intCast(@divFloor(iter_recovery_ns, std.time.ns_per_ms));
         std.log.info("rapid restart iteration {}: recovery {}ms", .{ i + 1, iter_ms });
@@ -427,25 +500,21 @@ test "rapid service restart recovery" {
     const avg_ms: u64 = avg_ns / std.time.ns_per_ms;
     std.log.info("rapid restart average recovery: {}ms over {} iterations", .{ avg_ms, iterations });
 
-    const result = PerfResult{
-        .suite = "recovery",
+    const result_path = try persistent_results.scenarioPath(
+        allocator,
+        "recovery",
+        "rapid-service-restart.json",
+    );
+    defer allocator.free(result_path);
+    try writeRecoverySummary(allocator, result_path, .{
         .scenario = "rapid-service-restart",
         .build_mode = @tagName(@import("builtin").mode),
-        .message_size_bytes = 0,
-        .warmup_messages = 0,
-        .measured_messages = iterations,
-        .throughput_msgs_per_sec = 0,
-        .throughput_bytes_per_sec = 0,
-        .latency_p50_ns = 0,
-        .latency_p95_ns = 0,
-        .latency_p99_ns = avg_ns,
-        .latency_max_ns = @intCast(@divFloor(total_recovery_ns, 1)),
-        .messages_sent = 0,
-        .messages_received = 0,
-        .send_failures = 0,
-    };
-    const result_path = try result_writer.writePerfResult(allocator, harness.env.results_path, result);
-    allocator.free(result_path);
+        .recovery_time_ms = avg_ms,
+        .iterations = iterations,
+        .average_recovery_time_ms = avg_ms,
+        .max_recovery_time_ms = @intCast(@divFloor(max_recovery_ns, std.time.ns_per_ms)),
+        .total_recovery_time_ms = @intCast(@divFloor(total_recovery_ns, std.time.ns_per_ms)),
+    });
 
     // Cleanup
     try harness.stopProcess(broker);

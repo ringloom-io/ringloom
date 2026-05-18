@@ -7,8 +7,8 @@ test "leader election elects one leader among two instances" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "leader-election");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -48,8 +48,8 @@ test "leader election fails over when leader stops" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "leader-failover");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -94,8 +94,8 @@ test "leader election with three instances survives two failures" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "leader-triple-failover");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);

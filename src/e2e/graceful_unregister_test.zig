@@ -8,8 +8,8 @@ test "graceful unregister is processed faster than heartbeat timeout" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "graceful-unregister");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -42,8 +42,8 @@ test "graceful unregister triggers discovery removal for subscribers" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "graceful-unregister-discovery");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -81,8 +81,8 @@ test "graceful unregister of multiple services in sequence" {
     // Given
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "graceful-unregister-multi");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);

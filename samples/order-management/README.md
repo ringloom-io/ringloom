@@ -10,7 +10,7 @@ order-simulator -> order-gateway -> risk-service -> matching-engine
 
 The default topology places simulator, gateway, risk, and portfolio on broker
 node 1, and matching plus execution on broker node 2. That means every run uses
-same-host shared-memory IPC and cross-broker TCP routing.
+same-host shared-memory IPC and cross-node Aeron UDP routing.
 
 ## Run
 

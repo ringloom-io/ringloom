@@ -52,6 +52,7 @@ pub const ProcessHandle = struct {
     stdout_path: []const u8,
     stderr_path: []const u8,
     config_path: ?[]const u8,
+    aeron_directory: ?[]const u8,
     state: ProcessState,
     exit_code: ?u32,
     allocator: Allocator,
@@ -132,6 +133,7 @@ pub const ProcessHandle = struct {
             .stdout_path = stdout_path,
             .stderr_path = stderr_path,
             .config_path = null,
+            .aeron_directory = null,
             .state = .spawned,
             .exit_code = null,
             .allocator = allocator,
@@ -304,6 +306,14 @@ pub const ProcessHandle = struct {
         self.config_path = try self.allocator.dupe(u8, path);
     }
 
+    /// Associates an Aeron directory with this handle for readiness diagnostics.
+    pub fn setAeronDirectory(self: *ProcessHandle, path: []const u8) !void {
+        if (self.aeron_directory) |old| {
+            self.allocator.free(old);
+        }
+        self.aeron_directory = try self.allocator.dupe(u8, path);
+    }
+
     // ── Cleanup ──────────────────────────────────────────────────
 
     /// Releases all resources owned by this handle.
@@ -323,6 +333,7 @@ pub const ProcessHandle = struct {
 
         self.stdout_capture.deinit();
 
+        if (self.aeron_directory) |dir| self.allocator.free(dir);
         if (self.config_path) |cp| self.allocator.free(cp);
         self.allocator.free(self.stderr_path);
         self.allocator.free(self.stdout_path);

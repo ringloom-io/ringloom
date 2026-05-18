@@ -3,8 +3,8 @@
 Instructions for running end-to-end correctness tests and performance benchmarks.
 Intended for developers working on the library and for automated agents.
 
-> **Design reference:** See `docs/impl/15-end-to-end-and-performance-testing.md`
-> for the full rationale, test harness architecture, and scenario specifications.
+> **Design reference:** See `docs/components/testing.md` and
+> `docs/architecture.md` for the active ring-buffer/Aeron architecture.
 
 ---
 
@@ -26,6 +26,7 @@ Zig build system.
 zig build test          # Unit & integration tests (fast, every change)
 zig build e2e           # End-to-end correctness tests (multi-process)
 zig build perf          # Performance benchmarks (ReleaseFast, longer-running)
+zig build perf-aeron    # Plain Aeron remote transit comparison benchmark
 zig build test-bins     # Build test service binaries only (no test run)
 ```
 
@@ -35,6 +36,7 @@ zig build test-bins     # Build test service binaries only (no test run)
 test          →  unit & integration tests (all library modules)
 e2e           →  broker exe + all test service binaries → e2e test runner
 perf          →  broker exe + all test service binaries → perf benchmark runner (ReleaseFast)
+perf-aeron    →  two embedded Aeron media drivers → plain Aeron UDP comparison
 test-bins     →  all test service binaries
 ```
 
@@ -43,7 +45,8 @@ test-bins     →  all test service binaries
 ## 1. Unit & Integration Tests
 
 **What they cover:** Individual modules — ring buffers, encoders, parsers, config
-parsing, harness utilities, IPC primitives, TCP framing, and broker internals.
+parsing, harness utilities, IPC primitives, Aeron integration, and broker
+internals.
 
 **When to run:** On every code change. These are fast and deterministic.
 
@@ -57,7 +60,7 @@ With full build summary:
 zig build test --summary all
 ```
 
-**Expected result:** All tests pass. Current baseline: **480 tests**.
+**Expected result:** All tests pass. Current baseline: **442 tests**.
 
 ---
 
@@ -74,7 +77,7 @@ provide the highest confidence for runtime correctness.
 zig build e2e
 ```
 
-### Test scenarios (31 tests in 11 files)
+### Test scenarios (33 tests in 12 files)
 
 | File | Scenarios |
 |------|-----------|
@@ -108,6 +111,7 @@ If a test fails, the harness preserves the temp directory. Look for:
 ```text
 /tmp/ringloom-e2e-<scenario>-<seq>/
 ├── config/     # Generated broker/service properties files
+├── aeron/      # Embedded Aeron CnC, loss report, and term files per broker
 ├── logs/       # stdout/stderr capture per process
 ├── results/    # JSON result files (if produced)
 └── storage/    # Shared-memory root (instead of /dev/shm)
@@ -133,9 +137,11 @@ zig build perf
 ```
 
 > Performance benchmarks are compiled with `ReleaseFast` optimization. They are
-> **never** included in the default `test` step. Note: the zig test runner
-> suppresses stdout for passing tests, so result JSON files are not easily
-> inspectable. Use the manual script (Option B) to capture results.
+> **never** included in the default `test` step. Passing `zig build perf` runs
+> now persist reusable backpressure and recovery JSON under
+> `/tmp/ringloom-perf-results/{backpressure,recovery}/`, but the manual script
+> (Option B) is still the right way to capture the full local/remote transit
+> baseline in one directory.
 
 ### Option B: Manual benchmark script (all sizes)
 
@@ -165,6 +171,12 @@ zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=Relea
 ./scripts/run-benchmarks.sh --output-dir ./my-results
 ```
 
+The benchmark scripts set `broker.aeron.mtu.length` and
+`broker.aeron.ipc.mtu.length` to 8192 by default for loopback runs so the
+largest 4 KiB benchmark message fits in one Aeron fragment. Override with
+`RINGLOOM_BENCH_AERON_MTU_LENGTH` and `RINGLOOM_BENCH_AERON_IPC_MTU_LENGTH`
+when validating a real network path with a smaller MTU.
+
 Results are written to `/tmp/ringloom-bench-results/` by default.
 
 - **Local** runs publish both ping and echo JSON, because the local throughput
@@ -188,6 +200,9 @@ By default, the single-size script now measures **transit latency**: the ping
 service paces sends (`--send-interval-ns`, default 10,000 ns) to avoid building
 an artificial steady-state queue. Use `--latency-mode saturated` to reproduce
 the older **queueing latency** behavior where the sender runs flat out.
+For local transit latency, the echo service uses `busy_spin` by default so the
+measurement reflects shared-memory handoff rather than `sched_yield` wake-up
+delay; override this with `--echo-idle-strategy` when comparing idle strategies.
 
 ```bash
 # Build ReleaseFast binaries first
@@ -211,6 +226,32 @@ a summary with throughput, end-to-end latency percentiles, and—when the payloa
 is large enough for tracing (32 B+)—a stage breakdown for broker A queueing,
 transport, and broker B local delivery.
 
+### Option D: Plain Aeron comparison benchmark
+
+Use this benchmark to compare RingLoom's remote transit latency against raw
+Aeron UDP loopback without broker routing, service discovery, or shared-memory
+service handoff.
+
+```bash
+zig build perf-aeron
+```
+
+The benchmark runs two embedded Aeron media drivers, each in
+`DEDICATED` threading mode with separate conductor, sender, and receiver agent
+threads. It sends the same message sizes as the RingLoom remote transit
+benchmarks (`32`, `128`, `512`, `1024`, and `4096` bytes), with the same
+10,000 ns pacing interval and 8192-byte MTU defaults.
+
+Results are written to `/tmp/ringloom-plain-aeron-bench-results/`:
+
+```text
+plain-aeron-remote-transit-32B.json
+plain-aeron-remote-transit-128B.json
+plain-aeron-remote-transit-512B.json
+plain-aeron-remote-transit-1024B.json
+plain-aeron-remote-transit-4096B.json
+```
+
 **Tip:** For the most reliable results, run each size independently with all
 other CPU-intensive processes stopped. Benchmark variance on a busy system can
 be extreme — throughput can fluctuate 2–3× between runs due to background load.
@@ -226,7 +267,7 @@ The script tests message sizes: 32, 128, 512, 1024, and 4096 bytes.
   approximation of unloaded broker-to-broker transit time.
 - **Queueing latency**: The saturated benchmark mode. The sender intentionally
   outruns the end-to-end path, so the measured value includes backlog depth
-  through broker A, TCP, broker B, and broker B → service handoff.
+  through broker A, Aeron UDP, broker B, and broker B → service handoff.
 - **Send latency** (ping JSON): Time to write a message into the local
   broker's ring buffer. Lower bound on end-to-end latency.
 - **Spinning backpressure**: With `--spin-timeout-ms`, the sender retries
@@ -234,7 +275,7 @@ The script tests message sizes: 32, 128, 512, 1024, and 4096 bytes.
   re-embedded on each retry so latency excludes spin-wait time.
 - **Stage breakdown** (echo JSON, 32 B+ payloads): Additional p50/p95/p99
   counters for broker A queueing, transport, and broker B delivery. Use these
-  to tell whether a latency spike came from queue buildup before TCP, the
+  to tell whether a latency spike came from queue buildup before Aeron UDP, the
   cross-broker hop itself, or delivery after ingress.
 
 ### Benchmark categories (30 tests in 6 files)
@@ -275,7 +316,19 @@ The script tests message sizes: 32, 128, 512, 1024, and 4096 bytes.
 
 ### Benchmark output format
 
-Each benchmark writes a JSON result file:
+Each benchmark writes a JSON result file. On a passing `zig build perf`, the
+stable retained artifacts live under `/tmp/ringloom-perf-results/`:
+
+```text
+/tmp/ringloom-perf-results/
+├── backpressure/   # ping-side send/backpressure result JSON
+└── recovery/       # recovery summaries + supporting ping probe JSON
+```
+
+The manual benchmark script and plain-Aeron benchmark keep using the output
+directories described above.
+
+Example JSON:
 
 ```json
 {

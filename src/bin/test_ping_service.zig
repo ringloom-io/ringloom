@@ -23,6 +23,26 @@ const platform = ringloom_common.platform;
 const latency_trace = ringloom_common.message.latency_trace;
 const Histogram = ringloom_testing.Histogram;
 
+const SendErrorStats = struct {
+    no_available_instance: u64 = 0,
+    remote_transport_unavailable: u64 = 0,
+    backpressure: u64 = 0,
+    backpressure_timeout: u64 = 0,
+    send_buffer_full: u64 = 0,
+    other: u64 = 0,
+
+    fn record(self: *SendErrorStats, err: ServiceClient.SendError) void {
+        switch (err) {
+            error.NoAvailableInstance => self.no_available_instance += 1,
+            error.RemoteTransportUnavailable => self.remote_transport_unavailable += 1,
+            error.BackPressure => self.backpressure += 1,
+            error.BackPressureTimeout => self.backpressure_timeout += 1,
+            error.SendBufferFull => self.send_buffer_full += 1,
+            else => self.other += 1,
+        }
+    }
+};
+
 // ── Mutable file-level state ─────────────────────────────────────────
 
 var shutdown_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -110,6 +130,7 @@ pub fn main(init: std.process.Init) !void {
     const result_file = parseOptionalStringArg(args, "--result-file");
     const spin_timeout_ms = parseIntArg(u64, args, "--spin-timeout-ms", 0);
     const send_interval_ns = parseIntArg(u64, args, "--send-interval-ns", 0);
+    const target_ready_timeout_ms = parseIntArg(u64, args, "--target-ready-timeout-ms", 0);
     const idle_strategy_str = parseStringArg(args, "--idle-strategy", "backoff");
 
     installSignalHandler();
@@ -148,6 +169,22 @@ pub fn main(init: std.process.Init) !void {
         try stderr.flush();
         std.process.exit(1);
     };
+    if (spin_timeout_ms > 0) {
+        client.fc_config.strategy = .spin;
+        client.fc_config.spin_timeout_ms = @intCast(@min(spin_timeout_ms, std.math.maxInt(u32)));
+    }
+
+    if (target_ready_timeout_ms > 0) {
+        waitForTargetInstance(client, target_ready_timeout_ms) catch |err| {
+            try stderr.print("ping: target '{s}' not available after {d}ms: {}\n", .{
+                target_service,
+                target_ready_timeout_ms,
+                err,
+            });
+            try stderr.flush();
+            std.process.exit(1);
+        };
+    }
 
     try stdout.print("service ready: name={s}\n", .{service_name});
     try stdout.flush();
@@ -166,13 +203,15 @@ pub fn main(init: std.process.Init) !void {
 
     var warmup_sent: u64 = 0;
     var warmup_failed: u64 = 0;
+    var warmup_errors: SendErrorStats = .{};
     var next_send_deadline_ns: u64 = 0;
 
     for (0..warmup_count) |_| {
         paceNextSend(&next_send_deadline_ns, send_interval_ns);
         latency_trace.embedSend(payload, latency_trace.warmup_phase, @intCast(Clock.monotonicNanosStable()));
-        client.send(payload) catch {
+        client.send(payload) catch |err| {
             warmup_failed += 1;
+            warmup_errors.record(err);
             continue;
         };
         warmup_sent += 1;
@@ -180,6 +219,22 @@ pub fn main(init: std.process.Init) !void {
 
     if (warmup_count > 0) {
         try stdout.print("ping: warmup complete, sent={d}, failed={d}\n", .{ warmup_sent, warmup_failed });
+        if (warmup_sent == 0 and warmup_failed > 0) {
+            const health = client.remotePublicationHealth();
+            try stdout.print(
+                "ping: warmup failures: no_instance={d}, remote_unavailable={d}, backpressure={d}, backpressure_timeout={d}, send_buffer_full={d}, other={d}, remote_status={s}, direct_peers={d}\n",
+                .{
+                    warmup_errors.no_available_instance,
+                    warmup_errors.remote_transport_unavailable,
+                    warmup_errors.backpressure,
+                    warmup_errors.backpressure_timeout,
+                    warmup_errors.send_buffer_full,
+                    warmup_errors.other,
+                    @tagName(health.last_status),
+                    health.direct_peer_count,
+                },
+            );
+        }
         try stdout.flush();
     }
 
@@ -403,6 +458,16 @@ fn paceNextSend(next_send_deadline_ns: *u64, interval_ns: u64) void {
 
     waitUntil(next_send_deadline_ns.*);
     next_send_deadline_ns.* += interval_ns;
+}
+
+fn waitForTargetInstance(client: *ServiceClient, timeout_ms: u64) !void {
+    const deadline_ns = Clock.monotonicNanos() + @as(i64, @intCast(timeout_ms * std.time.ns_per_ms));
+    while (Clock.monotonicNanos() < deadline_ns) {
+        client.pollTransport();
+        if (client.instanceCount() > 0) return;
+        platform.sleepNanos(1 * std.time.ns_per_ms);
+    }
+    return error.TargetUnavailable;
 }
 
 fn waitUntil(target_ns: u64) void {

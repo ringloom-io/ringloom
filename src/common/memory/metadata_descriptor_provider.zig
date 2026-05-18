@@ -27,7 +27,6 @@ pub const MetadataDescriptorProvider = struct {
         group: []const u8,
         node_id: i16,
         control_buffer_length: usize = constants.default_control_buffer_length,
-        messages_buffer_length: usize = constants.default_send_buffer_length,
     };
 
     /// Initialize the singleton. Must be called exactly once before any
@@ -40,7 +39,7 @@ pub const MetadataDescriptorProvider = struct {
             opts.group,
             opts.node_id,
             opts.control_buffer_length,
-            opts.messages_buffer_length,
+            0,
         );
 
         instance = MetadataDescriptorProvider{
@@ -62,9 +61,8 @@ pub const MetadataDescriptorProvider = struct {
         return self.broker_file.getControlBuffer();
     }
 
-    /// Returns the send ring buffer region (services → broker, cross-host).
-    pub fn getSendBuffer(self: *MetadataDescriptorProvider) []u8 {
-        return self.broker_file.getSendBuffer();
+    pub fn getAeronDiscovery(self: *MetadataDescriptorProvider) *const @import("broker_metadata.zig").BrokerAeronDiscovery {
+        return self.broker_file.getAeronDiscovery();
     }
 
     /// Update the broker's heartbeat timestamp.
@@ -123,7 +121,6 @@ test "MetadataDescriptorProvider singleton lifecycle" {
         .group = "test-group",
         .node_id = 1,
         .control_buffer_length = 4096,
-        .messages_buffer_length = 4096,
     });
 
     const provider = MetadataDescriptorProvider.getInstance();
@@ -131,7 +128,7 @@ test "MetadataDescriptorProvider singleton lifecycle" {
     // Verify buffer access (includes ring buffer trailer).
     const trailer = constants.ring_buffer_trailer_length;
     try testing.expectEqual(@as(usize, 4096 + trailer), provider.getControlBuffer().len);
-    try testing.expectEqual(@as(usize, 4096 + trailer), provider.getSendBuffer().len);
+    try testing.expectEqual(constants.metadata_version, provider.broker_file.header.metadata_version);
 
     // Verify heartbeat.
     provider.updateHeartbeat();

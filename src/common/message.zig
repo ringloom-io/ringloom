@@ -7,6 +7,9 @@
 pub const message_header = @import("message/message_header.zig");
 pub const MessageHeader = message_header.MessageHeader;
 
+pub const data_header = @import("message/data_header.zig");
+pub const RingLoomDataHeader = data_header.RingLoomDataHeader;
+
 pub const control_encoding = @import("message/control_encoding.zig");
 
 pub const message_fragmenting_producer = @import("message/message_fragmenting_producer.zig");
@@ -21,6 +24,7 @@ pub const latency_trace = @import("message/latency_trace.zig");
 // Ensure all message module tests are discovered by `zig build test`.
 comptime {
     _ = @import("message/message_header.zig");
+    _ = @import("message/data_header.zig");
     _ = @import("message/control_encoding.zig");
     _ = @import("message/message_fragmenting_producer.zig");
     _ = @import("message/message_assembler.zig");

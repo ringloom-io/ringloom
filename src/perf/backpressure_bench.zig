@@ -11,8 +11,7 @@ const testing_mod = @import("ringloom_testing");
 const TestHarness = testing_mod.TestHarness;
 const BrokerSpec = testing_mod.BrokerSpec;
 const ServiceSpec = testing_mod.ServiceSpec;
-const result_writer = testing_mod.result_writer;
-const PerfResult = result_writer.PerfResult;
+const persistent_results = @import("persistent_results.zig");
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -63,20 +62,22 @@ test "backpressure onset detection - 128B escalating load" {
 
         const result_path = try std.fmt.allocPrint(
             allocator,
-            "{s}/backpressure-onset-{s}.json",
-            .{ harness.env.results_path, step.label },
+            "backpressure-onset-{s}.json",
+            .{step.label},
         );
         defer allocator.free(result_path);
+        const persistent_result_path = try persistent_results.scenarioPath(allocator, "backpressure", result_path);
+        defer allocator.free(persistent_result_path);
 
         const ping = try harness.startService(.{
             .executable_name = "ringloom-test-ping-service",
             .service_name = "ping",
             .extra_args = &.{
-                "--target-service",  "slow-consumer",
-                "--message-count",   count_str,
-                "--message-size",    size_str,
-                "--warmup-count",    "0",
-                "--result-file",     result_path,
+                "--target-service", "slow-consumer",
+                "--message-count",  count_str,
+                "--message-size",   size_str,
+                "--warmup-count",   "0",
+                "--result-file",    persistent_result_path,
             },
         });
         try harness.waitForServiceReady(ping, 5000);
@@ -127,20 +128,22 @@ test "backpressure onset detection - 1024B escalating load" {
 
         const result_path = try std.fmt.allocPrint(
             allocator,
-            "{s}/backpressure-onset-{s}.json",
-            .{ harness.env.results_path, step.label },
+            "backpressure-onset-{s}.json",
+            .{step.label},
         );
         defer allocator.free(result_path);
+        const persistent_result_path = try persistent_results.scenarioPath(allocator, "backpressure", result_path);
+        defer allocator.free(persistent_result_path);
 
         const ping = try harness.startService(.{
             .executable_name = "ringloom-test-ping-service",
             .service_name = "ping",
             .extra_args = &.{
-                "--target-service",  "slow-consumer",
-                "--message-count",   count_str,
-                "--message-size",    size_str,
-                "--warmup-count",    "0",
-                "--result-file",     result_path,
+                "--target-service", "slow-consumer",
+                "--message-count",  count_str,
+                "--message-size",   size_str,
+                "--warmup-count",   "0",
+                "--result-file",    persistent_result_path,
             },
         });
         try harness.waitForServiceReady(ping, 5000);
@@ -179,20 +182,22 @@ test "backpressure varying consumer delay - 128B" {
 
         const result_path = try std.fmt.allocPrint(
             allocator,
-            "{s}/backpressure-delay-{s}ms.json",
-            .{ harness.env.results_path, delay_str },
+            "backpressure-delay-{s}ms.json",
+            .{delay_str},
         );
         defer allocator.free(result_path);
+        const persistent_result_path = try persistent_results.scenarioPath(allocator, "backpressure", result_path);
+        defer allocator.free(persistent_result_path);
 
         const ping = try harness.startService(.{
             .executable_name = "ringloom-test-ping-service",
             .service_name = "ping",
             .extra_args = &.{
-                "--target-service",  "slow-consumer",
-                "--message-count",   "10000",
-                "--message-size",    "128",
-                "--warmup-count",    "0",
-                "--result-file",     result_path,
+                "--target-service", "slow-consumer",
+                "--message-count",  "10000",
+                "--message-size",   "128",
+                "--warmup-count",   "0",
+                "--result-file",    persistent_result_path,
             },
         });
         try harness.waitForServiceReady(ping, 5000);
@@ -244,20 +249,22 @@ test "backpressure onset detection - 4096B large payload" {
 
         const result_path = try std.fmt.allocPrint(
             allocator,
-            "{s}/backpressure-onset-{s}.json",
-            .{ harness.env.results_path, step.label },
+            "backpressure-onset-{s}.json",
+            .{step.label},
         );
         defer allocator.free(result_path);
+        const persistent_result_path = try persistent_results.scenarioPath(allocator, "backpressure", result_path);
+        defer allocator.free(persistent_result_path);
 
         const ping = try harness.startService(.{
             .executable_name = "ringloom-test-ping-service",
             .service_name = "ping",
             .extra_args = &.{
-                "--target-service",  "slow-consumer",
-                "--message-count",   count_str,
-                "--message-size",    size_str,
-                "--warmup-count",    "0",
-                "--result-file",     result_path,
+                "--target-service", "slow-consumer",
+                "--message-count",  count_str,
+                "--message-size",   size_str,
+                "--warmup-count",   "0",
+                "--result-file",    persistent_result_path,
             },
         });
         try harness.waitForServiceReady(ping, 5000);
@@ -291,10 +298,10 @@ test "sustained backpressure - steady state under overload" {
     });
     try harness.waitForServiceReady(slow, 5000);
 
-    const result_path = try std.fmt.allocPrint(
+    const result_path = try persistent_results.scenarioPath(
         allocator,
-        "{s}/backpressure-sustained.json",
-        .{harness.env.results_path},
+        "backpressure",
+        "backpressure-sustained.json",
     );
     defer allocator.free(result_path);
 
@@ -303,11 +310,11 @@ test "sustained backpressure - steady state under overload" {
         .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
-            "--target-service",  "slow-consumer",
-            "--message-count",   "50000",
-            "--message-size",    "256",
-            "--warmup-count",    "0",
-            "--result-file",     result_path,
+            "--target-service", "slow-consumer",
+            "--message-count",  "50000",
+            "--message-size",   "256",
+            "--warmup-count",   "0",
+            "--result-file",    result_path,
         },
     });
     try harness.waitForServiceReady(ping, 5000);

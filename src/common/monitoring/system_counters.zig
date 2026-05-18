@@ -78,7 +78,7 @@ test "SystemCounters init allocates all well-known counters" {
     // When
     const counters = try SystemCounters.init(&manager);
 
-    // Then — all 22 counters should be allocated with value 0
+    // Then — all well-known counters should be allocated with value 0
     inline for (0..SystemCounter.count) |i| {
         const sc: SystemCounter = @enumFromInt(i);
         try testing.expectEqual(@as(i64, 0), counters.get(sc));
@@ -146,12 +146,12 @@ test "updateMax only updates when new value is larger" {
     const counters = try SystemCounters.init(&manager);
 
     // When
-    counters.updateMax(.sender_cycle_time_max, 100);
-    counters.updateMax(.sender_cycle_time_max, 50);
-    counters.updateMax(.sender_cycle_time_max, 200);
+    counters.updateMax(.receiver_cycle_time_max, 100);
+    counters.updateMax(.receiver_cycle_time_max, 50);
+    counters.updateMax(.receiver_cycle_time_max, 200);
 
     // Then
-    try testing.expectEqual(@as(i64, 200), counters.get(.sender_cycle_time_max));
+    try testing.expectEqual(@as(i64, 200), counters.get(.receiver_cycle_time_max));
 }
 
 test "SystemCounter.label returns non-empty strings for all counters" {

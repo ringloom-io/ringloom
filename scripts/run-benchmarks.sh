@@ -49,6 +49,8 @@ IOURING_RECEIVER_CQE_BATCH="${RINGLOOM_BENCH_IOURING_RECEIVER_CQE_BATCH:-256}"
 IOURING_SENDER_CQE_BATCH="${RINGLOOM_BENCH_IOURING_SENDER_CQE_BATCH:-64}"
 SENDER_WRITEV_BATCH_SIZE="${RINGLOOM_BENCH_SENDER_WRITEV_BATCH_SIZE:-64}"
 SENDER_WRITE_BUDGET="${RINGLOOM_BENCH_SENDER_WRITE_BUDGET:-256}"
+AERON_MTU_LENGTH="${RINGLOOM_BENCH_AERON_MTU_LENGTH:-8192}"
+AERON_IPC_MTU_LENGTH="${RINGLOOM_BENCH_AERON_IPC_MTU_LENGTH:-8192}"
 
 # ── Parse arguments ───────────────────────────────────────────────────
 
@@ -147,6 +149,8 @@ broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
+broker.aeron.mtu.length=$AERON_MTU_LENGTH
+broker.aeron.ipc.mtu.length=$AERON_IPC_MTU_LENGTH
 broker.threading.mode=dedicated
 broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
@@ -222,6 +226,8 @@ broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
+broker.aeron.mtu.length=$AERON_MTU_LENGTH
+broker.aeron.ipc.mtu.length=$AERON_IPC_MTU_LENGTH
 broker.threading.mode=dedicated
 broker.idle.strategy=yielding
 broker.sender.cpu.affinity=2
@@ -247,6 +253,8 @@ broker.group.name=ringloom-test
 broker.storage.path=$STORAGE
 broker.control.buffer.size=65536
 broker.messages.buffer.size=1048576
+broker.aeron.mtu.length=$AERON_MTU_LENGTH
+broker.aeron.ipc.mtu.length=$AERON_IPC_MTU_LENGTH
 broker.threading.mode=dedicated
 broker.idle.strategy=yielding
 broker.sender.cpu.affinity=4

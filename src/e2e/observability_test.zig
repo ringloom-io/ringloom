@@ -1,7 +1,7 @@
 const std = @import("std");
-const net = @import("ringloom_tcp").socket;
 const testing_mod = @import("ringloom_testing");
 const platform = @import("ringloom_common").platform;
+const net = platform.socket;
 const Clock = platform.Clock;
 
 const TestHarness = testing_mod.TestHarness;
@@ -10,8 +10,8 @@ const ProcessHandle = testing_mod.ProcessHandle;
 test "observability exporter exposes broker and service metadata metrics" {
     const allocator = std.testing.allocator;
     var harness = try TestHarness.init(allocator, "observability-scrape");
-    errdefer harness.markFailed();
     defer harness.deinit();
+    errdefer harness.markFailed();
 
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
@@ -51,10 +51,12 @@ test "observability exporter exposes broker and service metadata metrics" {
     try std.testing.expect(std.mem.indexOf(u8, metrics, "owner_type=\"broker\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, metrics, "service_name=\"echo\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_counter") != null);
-    try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_broker_bytes_sent_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_service_messages_sent_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_ring_capacity_bytes") != null);
     try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_ring_free_bytes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_aeron_driver_up") != null);
+    try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_aeron_counter") != null);
+    try std.testing.expect(std.mem.indexOf(u8, metrics, "ringloom_aeron_bytes_sent_total") != null);
 
     try exporter.stop();
     _ = exporter.waitForExit(5000) catch blk: {

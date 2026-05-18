@@ -2,8 +2,8 @@
 //!
 //! This is the root source file for the `ringloom_broker` library module.
 //! It re-exports broker-specific APIs: configuration, control loop,
-//! cluster management, sender/receiver event loops, transport,
-//! flow control, threading, and the application bootstrap layer.
+//! cluster management, Aeron sender/receiver event loops, threading, and the
+//! application bootstrap layer.
 //!
 //! Consumers should import this root rather than deep internal files.
 
@@ -23,10 +23,10 @@ pub const config = struct {
 
 pub const control = @import("control.zig");
 pub const cluster = @import("cluster.zig");
-pub const sender = @import("sender.zig");
 pub const receiver = @import("receiver.zig");
-pub const transport = @import("transport.zig");
+pub const sender = @import("sender.zig");
 pub const threading = @import("threading.zig");
+pub const aeron = @import("aeron.zig");
 
 // ── Monitoring (re-exported from common for broker convenience) ──────
 
@@ -94,30 +94,13 @@ comptime {
     _ = @import("cluster/cluster_event_handler.zig");
     _ = @import("cluster/cluster_manager.zig");
 
-    // Sender
-    _ = @import("sender/sender_event_loop.zig");
-    _ = @import("sender/peer_sender.zig");
-    _ = @import("sender/send_buffer_pool.zig");
-    _ = @import("sender/sender_command.zig");
-    _ = @import("sender/write_queue.zig");
-
     // Receiver
-    _ = @import("receiver/peer_receiver.zig");
+    _ = @import("sender.zig");
     _ = @import("receiver/message_router.zig");
     _ = @import("receiver/receiver_event_loop.zig");
 
-    // Transport
-    _ = @import("transport/buffer_pool.zig");
-    _ = @import("transport/network_io.zig");
-    _ = @import("transport/kqueue.zig");
-    if (@import("builtin").os.tag == .linux) {
-        _ = @import("transport/io_uring.zig");
-    }
-
     // Threading
-    _ = @import("threading/command.zig");
-    _ = @import("threading/command_queue.zig");
-    _ = @import("threading/composite_event_loop.zig");
+    _ = @import("aeron.zig");
     _ = @import("threading/threading_mode.zig");
     _ = @import("threading/broker_threads.zig");
 

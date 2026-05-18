@@ -9,7 +9,7 @@
 //! eliminating the need for a separate PeerConnection tracking structure.
 
 const std = @import("std");
-const net = @import("ringloom_tcp").socket;
+const net = @import("ringloom_common").platform.socket;
 
 pub const ConnectionState = enum(u8) {
     /// No connection attempt in progress.
