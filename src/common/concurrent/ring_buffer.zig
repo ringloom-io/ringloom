@@ -72,6 +72,18 @@ pub const RingBuffer = struct {
 
     pub const MessageHandler = *const fn (msg_type_id: i32, payload: []const u8) void;
     pub const ContextMessageHandler = *const fn (context: *anyopaque, msg_type_id: i32, payload: []const u8) void;
+    pub const ControlledReadAction = enum {
+        abort,
+        break_,
+        commit,
+        continue_,
+    };
+    pub const ControlledMessageHandler = *const fn (msg_type_id: i32, payload: []const u8) ControlledReadAction;
+    pub const ControlledContextMessageHandler = *const fn (
+        context: *anyopaque,
+        msg_type_id: i32,
+        payload: []const u8,
+    ) ControlledReadAction;
 
     // ── Initialization ────────────────────────────────────────────────
 
@@ -292,6 +304,23 @@ pub const RingBuffer = struct {
         return self.readInternal(true, context, handler, limit);
     }
 
+    pub fn controlledRead(
+        self: *RingBuffer,
+        handler: ControlledMessageHandler,
+        limit: u32,
+    ) u32 {
+        return self.controlledReadInternal(false, {}, handler, limit);
+    }
+
+    pub fn controlledReadWithContext(
+        self: *RingBuffer,
+        context: *anyopaque,
+        handler: ControlledContextMessageHandler,
+        limit: u32,
+    ) u32 {
+        return self.controlledReadInternal(true, context, handler, limit);
+    }
+
     fn readInternal(
         self: *RingBuffer,
         comptime with_context: bool,
@@ -302,8 +331,11 @@ pub const RingBuffer = struct {
         const head = self.loadHeadPosition(.monotonic);
         const tail = self.loadTailPosition(.acquire);
 
-        const mask: usize = @intCast(self.capacity_mask);
-        const available_bytes: usize = @intCast(tail - head);
+        const head_index: usize = @intCast(@as(i64, @intCast(self.capacity_mask)) & head);
+        const available_bytes: usize = @min(
+            @as(usize, @intCast(tail - head)),
+            self.capacity - head_index,
+        );
 
         if (available_bytes == 0) {
             return 0;
@@ -313,7 +345,7 @@ pub const RingBuffer = struct {
         var messages_read: u32 = 0;
 
         while (bytes_consumed < available_bytes and messages_read < limit) {
-            const record_offset: usize = @intCast(@as(i64, @intCast(mask)) & (head + @as(i64, @intCast(bytes_consumed))));
+            const record_offset = head_index + bytes_consumed;
 
             // Load the committed length with acquire.
             const raw_length = @atomicLoad(i32, self.recordLengthPtr(record_offset), .acquire);
@@ -350,6 +382,85 @@ pub const RingBuffer = struct {
             self.storeHeadPosition(head + @as(i64, @intCast(bytes_consumed)), .release);
 
             // Wake writer if blocking.
+            self.awakeWriter();
+        }
+
+        return messages_read;
+    }
+
+    fn controlledReadInternal(
+        self: *RingBuffer,
+        comptime with_context: bool,
+        context: if (with_context) *anyopaque else void,
+        handler: if (with_context) ControlledContextMessageHandler else ControlledMessageHandler,
+        limit: u32,
+    ) u32 {
+        var head = self.loadHeadPosition(.monotonic);
+        const tail = self.loadTailPosition(.acquire);
+
+        var head_index: usize = @intCast(@as(i64, @intCast(self.capacity_mask)) & head);
+        var remaining_bytes: usize = @min(
+            @as(usize, @intCast(tail - head)),
+            self.capacity - head_index,
+        );
+
+        if (remaining_bytes == 0) {
+            return 0;
+        }
+
+        var bytes_consumed: usize = 0;
+        var messages_read: u32 = 0;
+
+        while (bytes_consumed < remaining_bytes and messages_read < limit) {
+            const record_offset = head_index + bytes_consumed;
+            const raw_length = @atomicLoad(i32, self.recordLengthPtr(record_offset), .acquire);
+            if (raw_length <= 0) {
+                break;
+            }
+
+            const record_length: usize = @intCast(raw_length);
+            const aligned_length = alignUp(record_length);
+            const msg_type_id = @atomicLoad(i32, self.recordMsgTypeIdPtr(record_offset), .monotonic);
+
+            if (msg_type_id == constants.padding_msg_type_id) {
+                @atomicStore(i32, self.recordLengthPtr(record_offset), 0, .monotonic);
+                bytes_consumed += aligned_length;
+                continue;
+            }
+
+            const payload_offset = record_offset + record_header_length;
+            const payload_len = record_length - record_header_length;
+            const payload = self.buffer[payload_offset .. payload_offset + payload_len];
+            const action = if (with_context)
+                handler(context, msg_type_id, payload)
+            else
+                handler(msg_type_id, payload);
+
+            if (action == .abort) {
+                break;
+            }
+
+            @atomicStore(i32, self.recordLengthPtr(record_offset), 0, .monotonic);
+            bytes_consumed += aligned_length;
+            messages_read += 1;
+
+            switch (action) {
+                .abort => unreachable,
+                .break_ => break,
+                .commit => {
+                    head += @as(i64, @intCast(bytes_consumed));
+                    self.storeHeadPosition(head, .release);
+                    self.awakeWriter();
+                    head_index += bytes_consumed;
+                    remaining_bytes -= bytes_consumed;
+                    bytes_consumed = 0;
+                },
+                .continue_ => {},
+            }
+        }
+
+        if (bytes_consumed > 0) {
+            self.storeHeadPosition(head + @as(i64, @intCast(bytes_consumed)), .release);
             self.awakeWriter();
         }
 
@@ -423,18 +534,21 @@ pub const RingBuffer = struct {
             @atomicStore(i32, self.recordLengthPtr(head_index), -raw_length, .release);
             return true;
         } else if (raw_length == 0) {
-            // Zero-length record at head — insert padding spanning the gap to end of buffer.
-            // This can happen when a producer reserved space (moved tail) but
-            // hasn't written the record header yet.
             const tail_index: usize = @intCast(@as(i64, @intCast(mask)) & tail);
-            const gap: usize = if (tail_index > head_index)
-                tail_index - head_index
-            else
-                self.capacity - head_index;
+            const limit: usize = if (tail_index > head_index) tail_index else self.capacity;
+            var index = head_index + record_alignment;
 
-            @atomicStore(i32, self.recordMsgTypeIdPtr(head_index), constants.padding_msg_type_id, .monotonic);
-            @atomicStore(i32, self.recordLengthPtr(head_index), @intCast(gap), .release);
-            return true;
+            while (index < limit) : (index += record_alignment) {
+                const length = @atomicLoad(i32, self.recordLengthPtr(index), .acquire);
+                if (length != 0) {
+                    if (scanBackToConfirmStillZeroed(self, index, head_index)) {
+                        @atomicStore(i32, self.recordMsgTypeIdPtr(head_index), constants.padding_msg_type_id, .monotonic);
+                        @atomicStore(i32, self.recordLengthPtr(head_index), @intCast(index - head_index), .release);
+                        return true;
+                    }
+                    break;
+                }
+            }
         }
 
         return false;
@@ -552,6 +666,18 @@ fn alignUp(value: usize) usize {
     return (value + (record_alignment - 1)) & ~@as(usize, record_alignment - 1);
 }
 
+fn scanBackToConfirmStillZeroed(self: *RingBuffer, from: usize, limit: usize) bool {
+    var index = from;
+    while (index > limit) {
+        index -= record_alignment;
+        if (@atomicLoad(i32, self.recordLengthPtr(index), .acquire) != 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 fn allocateAlignedBuffer(allocator: std.mem.Allocator, buf_size: usize) ![]align(record_alignment) u8 {
     const buf = try allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(record_alignment)), buf_size);
     @memset(buf, 0);
@@ -660,7 +786,10 @@ test "wrap-around: write fills to end, next message wraps to start" {
 
     resetTestState();
     const read_count_2 = rb.read(&testCaptureHandler, 10);
-    try std.testing.expectEqual(@as(u32, 1), read_count_2);
+    try std.testing.expectEqual(@as(u32, 0), read_count_2);
+
+    const read_count_3 = rb.read(&testCaptureHandler, 10);
+    try std.testing.expectEqual(@as(u32, 1), read_count_3);
     try std.testing.expectEqual(@as(i32, 42), test_received_type);
     try std.testing.expectEqual(wrap_payload.len, test_received_payload_len);
     try std.testing.expectEqualSlices(u8, wrap_payload, test_received_payload_buf[0..wrap_payload.len]);
@@ -765,6 +894,70 @@ test "unblock recovers from crashed producer (negative length)" {
 
     // After unblock + read, the buffer should be empty now.
     try std.testing.expectEqual(@as(usize, 0), rb.size());
+}
+
+test "controlledReadWithContext supports commit and abort" {
+    const allocator = std.testing.allocator;
+    const buf = try allocateAlignedBuffer(allocator, 1024 + trailer_length);
+    defer allocator.free(buf);
+
+    var rb = try RingBuffer.init(buf, false, null, null);
+    try rb.write(1, "first");
+    try rb.write(2, "second");
+    try rb.write(3, "third");
+
+    const Context = struct {
+        seen: [4]i32 = [_]i32{0} ** 4,
+        len: usize = 0,
+
+        fn handler(ctx: *anyopaque, msg_type_id: i32, _: []const u8) RingBuffer.ControlledReadAction {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.seen[self.len] = msg_type_id;
+            self.len += 1;
+            return switch (msg_type_id) {
+                1 => .commit,
+                2 => .abort,
+                else => .continue_,
+            };
+        }
+    };
+
+    var context = Context{};
+    const count = rb.controlledReadWithContext(&context, Context.handler, 10);
+    try std.testing.expectEqual(@as(u32, 1), count);
+    try std.testing.expectEqual(@as(usize, 2), context.len);
+    try std.testing.expectEqual(@as(i32, 1), context.seen[0]);
+    try std.testing.expectEqual(@as(i32, 2), context.seen[1]);
+
+    resetTestState();
+    const remaining = rb.read(&testCaptureHandler, 10);
+    try std.testing.expectEqual(@as(u32, 2), remaining);
+    try std.testing.expectEqual(@as(i32, 3), test_received_type);
+}
+
+test "unblock converts confirmed zero gap to padding" {
+    const allocator = std.testing.allocator;
+    const capacity: usize = 64;
+    const buf = try allocateAlignedBuffer(allocator, capacity + trailer_length);
+    defer allocator.free(buf);
+
+    var rb = try RingBuffer.init(buf, false, null, null);
+
+    @atomicStore(i64, rb.trailerFieldPtr(tail_position_offset), 32, .release);
+    @atomicStore(i32, rb.recordMsgTypeIdPtr(16), 7, .monotonic);
+    @memcpy(rb.buffer[24..32], "payload8");
+    @atomicStore(i32, rb.recordLengthPtr(16), 16, .release);
+
+    const unblocked = rb.unblock();
+    try std.testing.expect(unblocked);
+    try std.testing.expectEqual(@as(i32, 16), @atomicLoad(i32, rb.recordLengthPtr(0), .acquire));
+    try std.testing.expectEqual(constants.padding_msg_type_id, @atomicLoad(i32, rb.recordMsgTypeIdPtr(0), .monotonic));
+
+    resetTestState();
+    const count = rb.read(&testCaptureHandler, 10);
+    try std.testing.expectEqual(@as(u32, 1), count);
+    try std.testing.expectEqual(@as(i32, 7), test_received_type);
+    try std.testing.expectEqualStrings("payload8", test_received_payload_buf[0..8]);
 }
 
 test "utility accessors return correct values" {

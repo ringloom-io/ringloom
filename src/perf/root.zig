@@ -9,6 +9,7 @@
 //! drive traffic, and emit structured JSON results.
 
 comptime {
+    _ = @import("ring_buffer_bench.zig");
     _ = @import("local_latency_bench.zig");
     _ = @import("local_throughput_bench.zig");
     _ = @import("remote_latency_bench.zig");

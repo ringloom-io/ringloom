@@ -26,6 +26,7 @@ Zig build system.
 zig build test          # Unit & integration tests (fast, every change)
 zig build e2e           # End-to-end correctness tests (multi-process)
 zig build perf          # Performance benchmarks (ReleaseFast, longer-running)
+zig build perf-ring-buffer # Raw ring-buffer microbenchmarks
 zig build perf-aeron    # Plain Aeron remote transit comparison benchmark
 zig build test-bins     # Build test service binaries only (no test run)
 ```
@@ -36,6 +37,7 @@ zig build test-bins     # Build test service binaries only (no test run)
 test          →  unit & integration tests (all library modules)
 e2e           →  broker exe + all test service binaries → e2e test runner
 perf          →  broker exe + all test service binaries → perf benchmark runner (ReleaseFast)
+perf-ring-buffer → raw shared-memory ring-buffer microbenchmarks (ReleaseFast)
 perf-aeron    →  two embedded Aeron media drivers → plain Aeron UDP comparison
 test-bins     →  all test service binaries
 ```
@@ -142,6 +144,18 @@ zig build perf
 > `/tmp/ringloom-perf-results/{backpressure,recovery}/`, but the manual script
 > (Option B) is still the right way to capture the full local/remote transit
 > baseline in one directory.
+
+For raw shared-memory baselines without broker/service orchestration, run:
+
+```bash
+zig build perf-ring-buffer
+```
+
+That focused step writes JSON results under `/tmp/ringloom-perf-results/ring-buffer/`
+for `/dev/shm` mmap-backed 64-byte payload baselines: single-threaded write
+lower bound, single-threaded read lower bound, saturated SPSC producer write
+cost, and one-message-at-a-time SPSC handoff latency without producer-side
+queue buildup.
 
 ### Option B: Manual benchmark script (all sizes)
 

@@ -333,6 +333,22 @@ pub fn build(b: *std.Build) void {
     const perf_step = b.step("perf", "Run performance benchmarks (ReleaseFast)");
     perf_step.dependOn(&run_perf_tests.step);
 
+    const ring_buffer_perf_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/perf/ring_buffer_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "ringloom_common", .module = ringloom_common },
+            },
+        }),
+        .use_llvm = use_llvm,
+    });
+    const run_ring_buffer_perf_tests = b.addRunArtifact(ring_buffer_perf_tests);
+
+    const perf_ring_buffer_step = b.step("perf-ring-buffer", "Run raw ring-buffer microbenchmarks (ReleaseFast)");
+    perf_ring_buffer_step.dependOn(&run_ring_buffer_perf_tests.step);
+
     const plain_aeron_perf_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/perf/plain_aeron_remote_bench.zig"),
