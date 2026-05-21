@@ -225,15 +225,19 @@ public final class RingloomService implements AutoCloseable {
 
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment nativeName = arena.allocateFrom(ValueLayout.JAVA_BYTE, nameBytes);
-            MemorySegment outCounterId = arena.allocate(ValueLayout.JAVA_INT);
+            MemorySegment outSlot = arena.allocate(RingloomNative.METRIC_SLOT_SIZE, 8);
             int status = RingloomNative.serviceCounterRegister(
                 nativeHandle,
                 nativeName,
                 nameBytes.length,
-                outCounterId
+                outSlot
             );
             RingloomNative.throwForStatus("ringloom_service_counter_register", status);
-            return new NativeCounter(this, outCounterId.get(ValueLayout.JAVA_INT, 0));
+            return new NativeCounter(
+                this,
+                outSlot.get(ValueLayout.JAVA_INT, RingloomNative.METRIC_SLOT_ID_OFFSET),
+                metricValueSegment(outSlot)
+            );
         }
     }
 
@@ -243,15 +247,19 @@ public final class RingloomService implements AutoCloseable {
 
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment nativeName = arena.allocateFrom(ValueLayout.JAVA_BYTE, nameBytes);
-            MemorySegment outGaugeId = arena.allocate(ValueLayout.JAVA_INT);
+            MemorySegment outSlot = arena.allocate(RingloomNative.METRIC_SLOT_SIZE, 8);
             int status = RingloomNative.serviceGaugeRegister(
                 nativeHandle,
                 nativeName,
                 nameBytes.length,
-                outGaugeId
+                outSlot
             );
             RingloomNative.throwForStatus("ringloom_service_gauge_register", status);
-            return new NativeGauge(this, outGaugeId.get(ValueLayout.JAVA_INT, 0));
+            return new NativeGauge(
+                this,
+                outSlot.get(ValueLayout.JAVA_INT, RingloomNative.METRIC_SLOT_ID_OFFSET),
+                metricValueSegment(outSlot)
+            );
         }
     }
 
@@ -297,5 +305,17 @@ public final class RingloomService implements AutoCloseable {
             throw new IllegalArgumentException("name must be at most " + MAX_METRIC_NAME_BYTES + " UTF-8 bytes");
         }
         return bytes;
+    }
+
+    private static MemorySegment metricValueSegment(MemorySegment slot) {
+        MemorySegment address = slot.get(RingloomNative.ADDRESS, RingloomNative.METRIC_SLOT_VALUE_OFFSET);
+        long length = slot.get(ValueLayout.JAVA_LONG, RingloomNative.METRIC_SLOT_VALUE_LEN_OFFSET);
+        if (address.address() == 0) {
+            throw new IllegalStateException("native metric value slot is null");
+        }
+        if (length < Long.BYTES) {
+            throw new IllegalStateException("native metric value slot is too small: " + length);
+        }
+        return MemorySegment.ofAddress(address.address()).reinterpret(Long.BYTES);
     }
 }

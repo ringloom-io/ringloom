@@ -15,7 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 final class RingloomNative {
-    static final int ABI_VERSION = 3;
+    static final int ABI_VERSION = 4;
     private static final String LIBRARY_BASE_NAME = "ringloom_service";
     private static final String CLASSPATH_LIBRARY_ROOT = "/io/ringloom/service/native";
 
@@ -28,6 +28,7 @@ final class RingloomNative {
     static final long CLIENT_TARGET_SIZE = 8L;
     static final long LIFECYCLE_EVENT_SIZE = 32L;
     static final long METRIC_DESCRIPTOR_SIZE = 32L;
+    static final long METRIC_SLOT_SIZE = 24L;
     static final long RING_STATS_SIZE = 40L;
 
     static final long CONFIG_STORAGE_PATH_OFFSET = 0L;
@@ -69,6 +70,9 @@ final class RingloomNative {
     static final long METRIC_NAME_LEN_OFFSET = 8L;
     static final long METRIC_KIND_OFFSET = 16L;
     static final long METRIC_VALUE_OFFSET = 24L;
+    static final long METRIC_SLOT_ID_OFFSET = 0L;
+    static final long METRIC_SLOT_VALUE_OFFSET = 8L;
+    static final long METRIC_SLOT_VALUE_LEN_OFFSET = 16L;
     static final long RING_STATS_CAPACITY_OFFSET = 0L;
     static final long RING_STATS_USED_OFFSET = 8L;
     static final long RING_STATS_FREE_OFFSET = 16L;
@@ -97,9 +101,6 @@ final class RingloomNative {
     private static final MethodHandle METRICS_RING_STATS_HANDLE;
     private static final MethodHandle SERVICE_COUNTER_REGISTER_HANDLE;
     private static final MethodHandle SERVICE_GAUGE_REGISTER_HANDLE;
-    private static final MethodHandle SERVICE_COUNTER_ADD_HANDLE;
-    private static final MethodHandle SERVICE_COUNTER_SET_HANDLE;
-    private static final MethodHandle SERVICE_GAUGE_SET_HANDLE;
     private static final MethodHandle CREATE_CLIENT_HANDLE;
     private static final MethodHandle DESTROY_CLIENT_HANDLE;
     private static final MethodHandle CLIENT_SET_LIFECYCLE_HANDLE;
@@ -152,9 +153,6 @@ final class RingloomNative {
             METRICS_RING_STATS_HANDLE = downcall("ringloom_metrics_reader_ring_stats", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
             SERVICE_COUNTER_REGISTER_HANDLE = downcall("ringloom_service_counter_register", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
             SERVICE_GAUGE_REGISTER_HANDLE = downcall("ringloom_service_gauge_register", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
-            SERVICE_COUNTER_ADD_HANDLE = downcall("ringloom_service_counter_add", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG));
-            SERVICE_COUNTER_SET_HANDLE = downcall("ringloom_service_counter_set", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG));
-            SERVICE_GAUGE_SET_HANDLE = downcall("ringloom_service_gauge_set", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG));
             CREATE_CLIENT_HANDLE = downcall("ringloom_service_create_client", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
             DESTROY_CLIENT_HANDLE = downcall("ringloom_client_destroy", FunctionDescriptor.ofVoid(ADDRESS));
             CLIENT_SET_LIFECYCLE_HANDLE = downcall("ringloom_client_set_lifecycle_handler", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
@@ -422,43 +420,19 @@ final class RingloomNative {
         }
     }
 
-    static int serviceCounterRegister(MemorySegment service, MemorySegment name, long nameLen, MemorySegment outCounterId) {
+    static int serviceCounterRegister(MemorySegment service, MemorySegment name, long nameLen, MemorySegment outSlot) {
         try {
-            return (int) SERVICE_COUNTER_REGISTER_HANDLE.invokeExact(service, name, nameLen, outCounterId);
+            return (int) SERVICE_COUNTER_REGISTER_HANDLE.invokeExact(service, name, nameLen, outSlot);
         } catch (Throwable throwable) {
             throw propagate("ringloom_service_counter_register", throwable);
         }
     }
 
-    static int serviceGaugeRegister(MemorySegment service, MemorySegment name, long nameLen, MemorySegment outGaugeId) {
+    static int serviceGaugeRegister(MemorySegment service, MemorySegment name, long nameLen, MemorySegment outSlot) {
         try {
-            return (int) SERVICE_GAUGE_REGISTER_HANDLE.invokeExact(service, name, nameLen, outGaugeId);
+            return (int) SERVICE_GAUGE_REGISTER_HANDLE.invokeExact(service, name, nameLen, outSlot);
         } catch (Throwable throwable) {
             throw propagate("ringloom_service_gauge_register", throwable);
-        }
-    }
-
-    static int serviceCounterAdd(MemorySegment service, int counterId, long delta) {
-        try {
-            return (int) SERVICE_COUNTER_ADD_HANDLE.invokeExact(service, counterId, delta);
-        } catch (Throwable throwable) {
-            throw propagate("ringloom_service_counter_add", throwable);
-        }
-    }
-
-    static int serviceCounterSet(MemorySegment service, int counterId, long value) {
-        try {
-            return (int) SERVICE_COUNTER_SET_HANDLE.invokeExact(service, counterId, value);
-        } catch (Throwable throwable) {
-            throw propagate("ringloom_service_counter_set", throwable);
-        }
-    }
-
-    static int serviceGaugeSet(MemorySegment service, int gaugeId, long value) {
-        try {
-            return (int) SERVICE_GAUGE_SET_HANDLE.invokeExact(service, gaugeId, value);
-        } catch (Throwable throwable) {
-            throw propagate("ringloom_service_gauge_set", throwable);
         }
     }
 

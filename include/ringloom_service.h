@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define RINGLOOM_SERVICE_ABI_VERSION 3u
+#define RINGLOOM_SERVICE_ABI_VERSION 4u
 
 typedef struct ringloom_service ringloom_service_t;
 typedef struct ringloom_client ringloom_client_t;
@@ -98,6 +98,13 @@ typedef struct ringloom_metric_descriptor {
     ringloom_metric_kind_t kind;
     int64_t value;
 } ringloom_metric_descriptor_t;
+
+typedef struct ringloom_metric_slot {
+    int32_t metric_id;
+    uint32_t reserved;
+    int64_t *value;
+    size_t value_len;
+} ringloom_metric_slot_t;
 
 typedef struct ringloom_ring_stats {
     uint64_t capacity_bytes;
@@ -214,32 +221,14 @@ ringloom_status_t ringloom_service_counter_register(
     ringloom_service_t *service,
     const char *name,
     size_t name_len,
-    int32_t *out_counter_id
+    ringloom_metric_slot_t *out_slot
 );
 
 ringloom_status_t ringloom_service_gauge_register(
     ringloom_service_t *service,
     const char *name,
     size_t name_len,
-    int32_t *out_gauge_id
-);
-
-ringloom_status_t ringloom_service_counter_add(
-    ringloom_service_t *service,
-    int32_t counter_id,
-    int64_t delta
-);
-
-ringloom_status_t ringloom_service_counter_set(
-    ringloom_service_t *service,
-    int32_t counter_id,
-    int64_t value
-);
-
-ringloom_status_t ringloom_service_gauge_set(
-    ringloom_service_t *service,
-    int32_t gauge_id,
-    int64_t value
+    ringloom_metric_slot_t *out_slot
 );
 
 ringloom_status_t ringloom_service_create_client(

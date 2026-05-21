@@ -61,7 +61,8 @@ pub fn build(b: *std.Build) void {
         .root_module = service_c_abi_shared_mod,
         .use_llvm = use_llvm,
     });
-    b.installArtifact(service_shared_lib);
+    const install_service_shared_lib = b.addInstallArtifact(service_shared_lib, .{});
+    b.getInstallStep().dependOn(&install_service_shared_lib.step);
 
     const service_static_lib = b.addLibrary(.{
         .name = "ringloom_service",
@@ -69,7 +70,8 @@ pub fn build(b: *std.Build) void {
         .root_module = service_c_abi_static_mod,
         .use_llvm = use_llvm,
     });
-    b.installArtifact(service_static_lib);
+    const install_service_static_lib = b.addInstallArtifact(service_static_lib, .{});
+    b.getInstallStep().dependOn(&install_service_static_lib.step);
 
     const install_service_header = b.addInstallHeaderFile(
         b.path("include/ringloom_service.h"),
@@ -276,8 +278,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const service_c_step = b.step("service-c", "Build the service C ABI library and header");
-    service_c_step.dependOn(&service_shared_lib.step);
-    service_c_step.dependOn(&service_static_lib.step);
+    service_c_step.dependOn(&install_service_shared_lib.step);
+    service_c_step.dependOn(&install_service_static_lib.step);
     service_c_step.dependOn(&install_service_header.step);
     service_c_step.dependOn(&run_service_tests.step);
 

@@ -21,7 +21,7 @@ pub const ringloom_client = opaque {};
 pub const ringloom_message_consumer = opaque {};
 pub const ringloom_metrics_reader = opaque {};
 
-pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 3;
+pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 4;
 const max_error_message_length = error_state_mod.max_error_message_length;
 const claim_handle_record_length = std.math.minInt(i32);
 
@@ -108,6 +108,13 @@ pub const ringloom_metric_descriptor_t = extern struct {
     name_len: usize,
     kind: ringloom_metric_kind_t,
     value: i64,
+};
+
+pub const ringloom_metric_slot_t = extern struct {
+    metric_id: i32,
+    reserved: u32,
+    value: ?*i64,
+    value_len: usize,
 };
 
 pub const ringloom_ring_stats_t = extern struct {
@@ -1009,84 +1016,18 @@ export fn ringloom_service_counter_register(
     service: ?*ringloom_service,
     name: ?[*]const u8,
     name_len: usize,
-    out_counter_id: ?*i32,
+    out_slot: ?*ringloom_metric_slot_t,
 ) Status {
-    return registerServiceMetric(service, name, name_len, .counter, out_counter_id);
+    return registerServiceMetric(service, name, name_len, .counter, out_slot);
 }
 
 export fn ringloom_service_gauge_register(
     service: ?*ringloom_service,
     name: ?[*]const u8,
     name_len: usize,
-    out_gauge_id: ?*i32,
+    out_slot: ?*ringloom_metric_slot_t,
 ) Status {
-    return registerServiceMetric(service, name, name_len, .gauge, out_gauge_id);
-}
-
-export fn ringloom_service_counter_add(
-    service: ?*ringloom_service,
-    counter_id: i32,
-    delta: i64,
-) Status {
-    clearLastError();
-    if (counter_id < 0) {
-        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "counter_id must be non-negative");
-    }
-
-    const handle = requireActiveService(service) orelse
-        return .RINGLOOM_ERR_INVALID_ARGUMENT;
-    const kind = handle.engine.?.counters.allocatedKind(@intCast(counter_id)) catch |err|
-        return mapMetricAccessError(err, "counter_id does not reference an allocated counter");
-    if (kind != .counter) {
-        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "counter_id references a gauge");
-    }
-    handle.engine.?.counters.tryAdd(@intCast(counter_id), delta) catch |err|
-        return mapMetricAccessError(err, "counter_id does not reference an allocated counter");
-    return .RINGLOOM_OK;
-}
-
-export fn ringloom_service_counter_set(
-    service: ?*ringloom_service,
-    counter_id: i32,
-    value: i64,
-) Status {
-    clearLastError();
-    if (counter_id < 0) {
-        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "counter_id must be non-negative");
-    }
-
-    const handle = requireActiveService(service) orelse
-        return .RINGLOOM_ERR_INVALID_ARGUMENT;
-    const kind = handle.engine.?.counters.allocatedKind(@intCast(counter_id)) catch |err|
-        return mapMetricAccessError(err, "counter_id does not reference an allocated counter");
-    if (kind != .counter) {
-        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "counter_id references a gauge");
-    }
-    handle.engine.?.counters.trySet(@intCast(counter_id), value) catch |err|
-        return mapMetricAccessError(err, "counter_id does not reference an allocated counter");
-    return .RINGLOOM_OK;
-}
-
-export fn ringloom_service_gauge_set(
-    service: ?*ringloom_service,
-    gauge_id: i32,
-    value: i64,
-) Status {
-    clearLastError();
-    if (gauge_id < 0) {
-        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "gauge_id must be non-negative");
-    }
-
-    const handle = requireActiveService(service) orelse
-        return .RINGLOOM_ERR_INVALID_ARGUMENT;
-    const kind = handle.engine.?.counters.allocatedKind(@intCast(gauge_id)) catch |err|
-        return mapMetricAccessError(err, "gauge_id does not reference an allocated gauge");
-    if (kind != .gauge) {
-        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "gauge_id references a counter");
-    }
-    handle.engine.?.counters.trySet(@intCast(gauge_id), value) catch |err|
-        return mapMetricAccessError(err, "gauge_id does not reference an allocated gauge");
-    return .RINGLOOM_OK;
+    return registerServiceMetric(service, name, name_len, .gauge, out_slot);
 }
 
 fn registerServiceMetric(
@@ -1094,12 +1035,17 @@ fn registerServiceMetric(
     name: ?[*]const u8,
     name_len: usize,
     kind: counters_mod.MetricKind,
-    out_metric_id: ?*i32,
+    out_metric_slot: ?*ringloom_metric_slot_t,
 ) Status {
     clearLastError();
-    const out = out_metric_id orelse
-        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_metric_id must not be NULL");
-    out.* = -1;
+    const out = out_metric_slot orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_slot must not be NULL");
+    out.* = .{
+        .metric_id = -1,
+        .reserved = 0,
+        .value = null,
+        .value_len = 0,
+    };
 
     const handle = requireActiveService(service) orelse
         return .RINGLOOM_ERR_INVALID_ARGUMENT;
@@ -1115,8 +1061,15 @@ fn registerServiceMetric(
     if (id > std.math.maxInt(i32)) {
         return setLastError(.RINGLOOM_ERR_INTERNAL, "native metric id is out of range");
     }
+    const value_ptr = handle.engine.?.counters.allocatedValuePtr(id) catch |err|
+        return mapMetricAccessError(err, "metric slot allocation failed");
 
-    out.* = @intCast(id);
+    out.* = .{
+        .metric_id = @intCast(id),
+        .reserved = 0,
+        .value = value_ptr,
+        .value_len = @sizeOf(i64),
+    };
     return .RINGLOOM_OK;
 }
 
@@ -1728,6 +1681,10 @@ comptime {
     std.debug.assert(@offsetOf(ringloom_metric_descriptor_t, "kind") == 16);
     std.debug.assert(@offsetOf(ringloom_metric_descriptor_t, "value") == 24);
     std.debug.assert(@sizeOf(ringloom_metric_descriptor_t) == 32);
+    std.debug.assert(@offsetOf(ringloom_metric_slot_t, "metric_id") == 0);
+    std.debug.assert(@offsetOf(ringloom_metric_slot_t, "value") == 8);
+    std.debug.assert(@offsetOf(ringloom_metric_slot_t, "value_len") == 16);
+    std.debug.assert(@sizeOf(ringloom_metric_slot_t) == 24);
     std.debug.assert(@sizeOf(ringloom_ring_stats_t) == 40);
     std.debug.assert(@intFromEnum(ringloom_aeron_publication_status_t.RINGLOOM_AERON_PUBLICATION_FAILED) == 7);
 }

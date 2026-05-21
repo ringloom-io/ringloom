@@ -274,7 +274,7 @@ pub const CountersManager = struct {
         return @ptrCast(@alignCast(byte_ptr));
     }
 
-    fn allocatedValuePtr(self: *Self, id: usize) CounterAccessError!*i64 {
+    pub fn allocatedValuePtr(self: *Self, id: usize) CounterAccessError!*i64 {
         if (id > self.max_counter_id) return error.InvalidCounterId;
         const state_raw = @atomicLoad(i32, self.metadataStatePtr(id), .acquire);
         const state: CounterState = @enumFromInt(state_raw);
