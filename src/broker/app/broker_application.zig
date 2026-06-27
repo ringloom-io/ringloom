@@ -34,6 +34,7 @@ const admin_dispatch = cluster.admin_dispatch;
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
 const BrokerAeronClient = broker_aeron.BrokerAeronClient;
 const BrokerUdpTransport = broker_aeron.BrokerUdpTransport;
+const topics = @import("../topics.zig");
 
 pub const ExitCode = enum(u8) {
     success = 0,
@@ -78,6 +79,12 @@ pub const BrokerApplication = struct {
     aeron_driver_agents: ?ringloom_aeron.DriverAgents = null,
     aeron_client: ?BrokerAeronClient = null,
     aeron_udp_transport: ?BrokerUdpTransport = null,
+
+    /// Persistent topics subsystem (null when topics are disabled).
+    topic_subsystem: ?*topics.TopicSubsystem = null,
+
+    /// Adapter that bridges topic replication channels to Aeron (owned, stable pointer).
+    repl_publisher_adapter: broker_aeron.ReplPublisherAdapter = .{},
 
     started: bool = false,
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -142,6 +149,11 @@ pub const BrokerApplication = struct {
         self.stopAeronClient();
         self.stopAeronDriver();
 
+        if (self.topic_subsystem) |ts| {
+            ts.deinit();
+            self.topic_subsystem = null;
+        }
+
         self.cluster_manager = null;
         self.routing_registry = null;
 
@@ -204,6 +216,37 @@ pub const BrokerApplication = struct {
         try self.startAeronUdpTransport();
         errdefer self.stopAeronUdpTransport();
 
+        // ── Persistent topics subsystem ────────────────────────────
+        // Must come after Aeron transport (for repl publications) and
+        // before control/receiver loops (so they can reference it).
+        const topics_cfg = self.config.topics;
+        if (topics_cfg.enabled) {
+            var topics_path_buf: [512]u8 = undefined;
+            const topics_path = try topics_cfg.resolvePath(self.config.storage_path, &topics_path_buf);
+
+            // Bind the repl publisher adapter to the Aeron transport.
+            // Single-node brokers may not have a UDP transport; the adapter
+            // handles the null transport gracefully (isConnected returns false).
+            if (self.aeron_udp_transport) |*transport_ref| {
+                self.repl_publisher_adapter.bind(transport_ref);
+            }
+            const repl_pub = self.repl_publisher_adapter.publisher();
+
+            self.topic_subsystem = try topics.TopicSubsystem.init(self.allocator, .{
+                .enabled = true,
+                .base_dir = topics_path,
+                .write_runway_bytes = topics_cfg.write_runway_bytes,
+                .read_runway_bytes = topics_cfg.read_runway_bytes,
+                .prefetcher_cpu_affinity = topics_cfg.prefetcher_cpu_affinity,
+                .local_node_id = self.config.node_id,
+                .io = self.io,
+            }, repl_pub, platform.Clock.monotonicNanos());
+            errdefer self.topic_subsystem.?.deinit();
+
+            try self.topic_subsystem.?.start();
+            errdefer self.topic_subsystem.?.prefetcher.stop();
+        }
+
         const aeron_assignment = broker_aeron.assignAgents(&self.aeron_driver_agents.?);
         var local_host_port_buf: [64]u8 = undefined;
         const local_host_port = cluster.admin_messages.padHostPort(try std.fmt.bufPrint(
@@ -234,6 +277,8 @@ pub const BrokerApplication = struct {
             .fc_refresh_interval_ms = self.config.fc_refresh_interval_ms,
             .fc_normal_refresh_interval_ms = self.config.fc_normal_refresh_interval_ms,
             .aeron_agent = aeron_assignment.control,
+            .topic_subsystem = self.topic_subsystem,
+            .topic_ack_feedback_interval_ns = @as(i64, @intCast(topics_cfg.ack_feedback_interval_us)) * std.time.ns_per_us,
         });
 
         self.sender_loop = SenderEventLoop.init();
@@ -252,6 +297,11 @@ pub const BrokerApplication = struct {
             },
         );
         self.receiver_loop.?.setAeronAgent(aeron_assignment.receiver);
+
+        // Wire persistent topics into the receiver loop (spec 05).
+        if (self.topic_subsystem) |ts| {
+            self.receiver_loop.?.setTopicSubsystem(ts);
+        }
 
         try self.initBrokerThreads();
         self.broker_threads.?.setCpuAffinities(

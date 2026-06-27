@@ -98,6 +98,9 @@ pub const services_directory: []const u8 = platform_constants.services_directory
 /// Admin message flag.
 pub const flag_admin: u8 = platform_constants.flag_admin;
 
+/// Topic publish frame flag (payload begins with a TopicPublishHeader).
+pub const flag_topic: u8 = platform_constants.flag_topic;
+
 /// IPC message fragmentation flags.
 pub const flag_begin: u8 = platform_constants.flag_begin;
 pub const flag_end: u8 = platform_constants.flag_end;

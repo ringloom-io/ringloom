@@ -11,7 +11,7 @@ const message_header = @import("message_header.zig");
 
 pub const magic_bytes = [_]u8{ 'R', 'L', 'M', '2' };
 pub const header_version: u8 = 2;
-pub const legal_flags: u8 = constants.flag_admin | constants.flag_begin | constants.flag_end;
+pub const legal_flags: u8 = constants.flag_admin | constants.flag_topic | constants.flag_begin | constants.flag_end;
 pub const max_node_id: u16 = 255;
 pub const max_service_id: u32 = std.math.maxInt(u16);
 

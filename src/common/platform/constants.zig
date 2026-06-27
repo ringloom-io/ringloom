@@ -103,6 +103,11 @@ pub const message_envelope_msg_type_id: i32 = 0x7fff_fffe;
 
 pub const flag_admin: u8 = 0x20;
 
+/// Marks a `RingLoomDataHeader`-framed UDP data frame as a topic publish frame
+/// (payload begins with a `TopicPublishHeader`, spec 04). Demuxed by the
+/// receiver loop ahead of service routing.
+pub const flag_topic: u8 = 0x10;
+
 // IPC message fragmentation flags (used by ring buffer message layer).
 pub const flag_begin: u8 = 0x80;
 pub const flag_end: u8 = 0x40;

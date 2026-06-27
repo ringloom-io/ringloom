@@ -37,6 +37,10 @@
             .url = "https://github.com/aeron-io/aeron/archive/refs/tags/1.51.0.tar.gz",
             .hash = "N-V-__8AANhHNAGQAdVQPxoIhmCoz_7Dj7ODXvMcX9_C0eJf",
         },
+        .ringloom_queue = .{
+            .url = "https://github.com/ringloom-io/ringloom-queue/archive/refs/tags/v0.2.1.tar.gz",
+            .hash = "ringloom_queue-0.0.0-EBSE_nKnBQCEF9mX23hHILcYSkSD202m7g4zTIy55kuK",
+        },
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
         //    // `hash`, otherwise you are communicating that you expect to find the old hash at

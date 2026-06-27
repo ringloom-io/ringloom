@@ -37,6 +37,14 @@ const FlowControlRegion = memory.FlowControlRegion;
 const PressureState = memory.PressureState;
 const log = std.log.scoped(.control_loop);
 
+const topics = @import("../topics.zig");
+const topic_messages = @import("../topics/topic_messages.zig");
+const topic_config = @import("../topics/topic_config.zig");
+const topic_admin = @import("../topics/topic_admin.zig");
+const topic_commands = @import("../topics/topic_commands.zig");
+const topic_id_mod = @import("../topics/topic_id.zig");
+const topic_leader_election = @import("../topics/topic_leader_election.zig");
+
 // ── File-level state for RingBuffer callback dispatch ─────────────────
 //
 // RingBuffer.read() takes a bare function pointer (*const fn(i32, []const u8) void)
@@ -170,6 +178,26 @@ pub const ControlLoop = struct {
     admin_peer_last_heartbeat_ns: [256]i64,
     admin_udp_counters: AdminUdpCounters,
 
+    /// Persistent topics subsystem (null when topics disabled).
+    /// Set by BrokerApplication during start().
+    topic_subsystem: ?*topics.TopicSubsystem = null,
+
+    // ── Topic failover barrier state (spec 08 §2) ───────────────────
+    /// True while the catch-up barrier is in progress after becoming leader.
+    topic_barrier_active: bool = false,
+    /// Deadline for AppliedReply collection (monotonic ns).
+    topic_barrier_deadline_ns: i64 = 0,
+    /// Per-topic highest last_applied_index reported by peers.
+    topic_barrier_max_index: std.AutoHashMap(topic_id_mod.TopicId, u64),
+    /// Number of AppliedReply messages received in the current barrier round.
+    topic_barrier_replies: u32 = 0,
+    /// Epoch under which the barrier was initiated.
+    topic_barrier_epoch: u64 = 0,
+    /// Next time to emit throttled TopicAckFeedback (per-topic).
+    topic_next_ack_feedback_ns: std.AutoHashMap(topic_id_mod.TopicId, i64),
+    /// Throttle interval for ack feedback (ns).
+    topic_ack_feedback_interval_ns: i64 = 200 * std.time.ns_per_us,
+
     const Self = @This();
 
     // ── Timing constants (imported from platform/constants.zig) ──
@@ -208,6 +236,10 @@ pub const ControlLoop = struct {
         fc_refresh_interval_ms: u32 = 200,
         fc_normal_refresh_interval_ms: u32 = 2000,
         aeron_agent: ?broker_aeron.AgentInvoker = null,
+        /// Persistent topics subsystem (null when topics disabled).
+        topic_subsystem: ?*topics.TopicSubsystem = null,
+        /// Throttle interval for replicate_once ack feedback (ns).
+        topic_ack_feedback_interval_ns: i64 = 200 * std.time.ns_per_us,
     };
 
     pub fn init(opts: InitOptions) Self {
@@ -246,6 +278,10 @@ pub const ControlLoop = struct {
             .admin_peer_seen = [_]bool{false} ** 256,
             .admin_peer_last_heartbeat_ns = [_]i64{0} ** 256,
             .admin_udp_counters = AdminUdpCounters.allocate(opts.counters),
+            .topic_subsystem = opts.topic_subsystem,
+            .topic_barrier_max_index = std.AutoHashMap(topic_id_mod.TopicId, u64).init(opts.allocator),
+            .topic_next_ack_feedback_ns = std.AutoHashMap(topic_id_mod.TopicId, i64).init(opts.allocator),
+            .topic_ack_feedback_interval_ns = opts.topic_ack_feedback_interval_ns,
         };
     }
 
@@ -299,6 +335,22 @@ pub const ControlLoop = struct {
                 self.next_service_rebroadcast_ns = now_ns + SERVICE_REBROADCAST_INTERVAL_NS;
             }
 
+            // 3e. Topic leadership — check and drive failover (spec 08).
+            if (self.topic_subsystem) |ts| {
+                work_count += self.checkTopicLeadership(ts, now_ns);
+                work_count += self.checkBarrierCollection(ts, now_ns);
+            }
+
+            // 3f. Drain topic engine status (HWMs for ack feedback, barrier completion).
+            if (self.topic_subsystem) |ts| {
+                work_count += ts.drainStatus(drainTopicStatusHandler, @as(*anyopaque, @ptrCast(self)));
+            }
+
+            // 3g. Emit throttled replicate_once ack feedback (spec 03 §6).
+            if (self.topic_subsystem) |ts| {
+                work_count += self.emitTopicAckFeedbackIfDue(ts, now_ns);
+            }
+
             self.next_timeout_check_ns = now_ns + TIMEOUT_CHECK_INTERVAL_NS;
         }
 
@@ -344,6 +396,9 @@ pub const ControlLoop = struct {
         }
         self.allocated_routing_rbs.deinit();
 
+        self.topic_barrier_max_index.deinit();
+        self.topic_next_ack_feedback_ns.deinit();
+
         self.service_registry.deinit();
     }
 
@@ -381,6 +436,11 @@ pub const ControlLoop = struct {
             1 => self.handleRegisterService(payload),
             3 => self.handleSubscribeToServiceUpdates(payload),
             5 => self.handleUnregisterService(payload),
+            // ── Topic control-plane messages (templates 7-15) ──────
+            topic_messages.TEMPLATE_REGISTER_TOPIC_PUBLICATION => self.handleRegisterTopicPublication(payload),
+            topic_messages.TEMPLATE_SUBSCRIBE_TOPIC => self.handleSubscribeTopic(payload),
+            topic_messages.TEMPLATE_UNREGISTER_TOPIC_PUBLICATION => self.handleUnregisterTopicPublication(payload),
+            topic_messages.TEMPLATE_UNSUBSCRIBE_TOPIC => self.handleUnsubscribeTopic(payload),
             else => {
                 log.warn("unknown control template_id: {}", .{template_id});
             },
@@ -610,6 +670,7 @@ pub const ControlLoop = struct {
                     e.node_id,
                     e.host_and_port,
                     e.received_ns,
+                    e.topics_enabled,
                 ),
                 .service_added => |e| self.handleRemoteServiceAdded(e.data),
                 .service_removed => |e| self.handleRemoteServiceRemoved(e.data),
@@ -621,6 +682,13 @@ pub const ControlLoop = struct {
                 ),
                 .flow_control_snapshot => |e| self.handleFlowControlSnapshot(e.data[0..e.len]),
                 .service_capacity_update => |e| self.handleServiceCapacityUpdate(e.data),
+                .topic_created => |e| self.handleTopicCreated(e.data),
+                .topic_lookup => |e| self.handleTopicLookup(e.data),
+                .topic_info => |e| self.handleTopicInfo(e.data),
+                .topic_leader_changed => |e| self.handleTopicLeaderChanged(e.data),
+                .topic_applied_query => |e| self.handleTopicAppliedQuery(e.data),
+                .topic_applied_reply => |e| self.handleTopicAppliedReply(e.data),
+                .topic_ack_feedback => |e| self.handleTopicAckFeedback(e.data),
                 else => {},
             }
             count += 1;
@@ -633,12 +701,18 @@ pub const ControlLoop = struct {
         node_id: u8,
         host_and_port: [22]u8,
         received_ns: i64,
+        topics_enabled: bool,
     ) void {
         if (node_id == self.local_node_id) return;
 
         const first_seen = !self.admin_peer_seen[node_id];
         self.admin_peer_seen[node_id] = true;
         self.admin_peer_last_heartbeat_ns[node_id] = received_ns;
+
+        // Feed topic-leader election with each peer's topics_enabled bit (spec 08).
+        if (self.topic_subsystem) |ts| {
+            ts.onTopicHeartbeat(node_id, topics_enabled, received_ns);
+        }
 
         if (first_seen) {
             log.info("broker admin heartbeat discovered peer node={} at {s}", .{
@@ -786,12 +860,14 @@ pub const ControlLoop = struct {
         if (self.peer_node_ids.len == 0) return 0;
         if (now_ns < self.next_broker_heartbeat_ns) return 0;
 
+        const local_topics_enabled: u8 = if (self.topic_subsystem) |ts| @intFromBool(ts.enabled) else 0;
         self.broadcastAdminMessage(
             admin.BrokerHeartbeatBody,
             admin.TEMPLATE_BROKER_HEARTBEAT,
             admin.BrokerHeartbeatBody{
                 .node_id = self.local_node_id,
                 .host_and_port = self.local_host_and_port,
+                .topics_enabled = local_topics_enabled,
             },
         );
         self.next_broker_heartbeat_ns = now_ns + BROKER_HEARTBEAT_INTERVAL_NS;
@@ -1437,6 +1513,358 @@ pub const ControlLoop = struct {
     }
 
     // ─────────────────────────────────────────────────────────────
+    // Persistent Topics — control-plane handlers (spec 03)
+    // ─────────────────────────────────────────────────────────────
+
+    fn handleRegisterTopicPublication(self: *Self, payload: []const u8) void {
+        const ts = self.topic_subsystem orelse return;
+        const msg = topic_messages.decode(topic_messages.RegisterTopicPublicationMsg, payload) orelse return;
+        const name = topic_messages.registerTopicName(payload);
+        if (name.len == 0) return;
+
+        const result = ts.registerPublication(name, msg.config, platform.Clock.monotonicNanos());
+
+        // Reply with TopicPublicationResponse.
+        var buf: [512]u8 = undefined;
+        const status: topic_messages.PublicationStatus = switch (result.status) {
+            .ok => .ok,
+            .config_mismatch => .config_mismatch,
+            .collision => .collision,
+            .disabled => .disabled,
+            .not_leader => .ok, // Producer retries via leader-proxy; for now reply ok.
+        };
+        const n = topic_messages.encodePublicationResponse(
+            &buf,
+            result.topic_id,
+            @intCast(result.leader_node_id),
+            result.leader_epoch,
+            status,
+            result.effective_config,
+        );
+        _ = self.writeToServiceControl(@intCast(msg.local_service_id), buf[0..n]);
+
+        // If newly created on the topic leader, broadcast TopicCreated admin.
+        if (result.newly_created and result.status == .ok) {
+            self.broadcastTopicCreated(result.topic_id, name, result.effective_config, result.leader_node_id, result.leader_epoch);
+        }
+    }
+
+    fn handleSubscribeTopic(self: *Self, payload: []const u8) void {
+        const ts = self.topic_subsystem orelse return;
+        const msg = topic_messages.decode(topic_messages.SubscribeTopicMsg, payload) orelse return;
+        const name = topic_messages.subscribeTopicName(payload);
+        if (name.len == 0) return;
+
+        const earliest = msg.start_position == @intFromEnum(topic_messages.StartPosition.earliest);
+        const result = ts.subscribe(name, earliest);
+
+        const status: topic_messages.SubscriptionStatus = switch (result.status) {
+            .ok => .ok,
+            .unknown_topic => .unknown_topic,
+            .disabled => .disabled,
+        };
+
+        const queue_dir = if (result.status == .ok)
+            ts.queueDir(self.allocator, result.topic_id) catch ""
+        else
+            "";
+        defer if (queue_dir.len > 0) self.allocator.free(queue_dir);
+
+        var buf: [512]u8 = undefined;
+        const n = topic_messages.encodeSubscriptionResponse(
+            &buf,
+            result.topic_id,
+            status,
+            result.start_index,
+            result.geometry,
+            queue_dir,
+        );
+        _ = self.writeToServiceControl(@intCast(msg.local_service_id), buf[0..n]);
+    }
+
+    fn handleUnregisterTopicPublication(self: *Self, payload: []const u8) void {
+        _ = self;
+        _ = payload;
+        // Full mesh: topic lives on; no-op for now.
+    }
+
+    fn handleUnsubscribeTopic(self: *Self, payload: []const u8) void {
+        const ts = self.topic_subsystem orelse return;
+        const msg = topic_messages.decode(topic_messages.UnsubscribeTopicMsg, payload) orelse return;
+        ts.unsubscribe(msg.topic_id);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Persistent Topics — admin-plane handlers (spec 02)
+    // ─────────────────────────────────────────────────────────────
+
+    fn handleTopicCreated(self: *Self, data: [@sizeOf(topic_admin.TopicCreatedBody)]u8) void {
+        const ts = self.topic_subsystem orelse return;
+        var body: topic_admin.TopicCreatedBody = undefined;
+        @memcpy(@as(*[@sizeOf(topic_admin.TopicCreatedBody)]u8, @ptrCast(&body)), &data);
+        const name = topic_admin.trimTopicName(&body.name);
+        ts.applyTopicCreated(body.topic_id, name, body.config, body.leader_node_id, body.leader_epoch, platform.Clock.monotonicNanos());
+    }
+
+    fn handleTopicLookup(self: *Self, data: [@sizeOf(topic_admin.TopicLookupBody)]u8) void {
+        const ts = self.topic_subsystem orelse return;
+        var body: topic_admin.TopicLookupBody = undefined;
+        @memcpy(@as(*[@sizeOf(topic_admin.TopicLookupBody)]u8, @ptrCast(&body)), &data);
+        if (ts.registry.getById(body.topic_id)) |rec| {
+            const info = topic_admin.TopicCreatedBody{
+                .topic_id = rec.topic_id,
+                .leader_epoch = rec.leader_epoch,
+                .leader_node_id = rec.leader_node_id,
+                .exists = 1,
+                .config = rec.config,
+                .name = topic_admin.padTopicName(rec.name),
+            };
+            self.broadcastAdminMessage(topic_admin.TopicCreatedBody, topic_admin.TEMPLATE_TOPIC_INFO, info);
+        }
+    }
+
+    fn handleTopicInfo(self: *Self, data: [@sizeOf(topic_admin.TopicCreatedBody)]u8) void {
+        const ts = self.topic_subsystem orelse return;
+        var body: topic_admin.TopicCreatedBody = undefined;
+        @memcpy(@as(*[@sizeOf(topic_admin.TopicCreatedBody)]u8, @ptrCast(&body)), &data);
+        if (body.exists == 0) return;
+        const name = topic_admin.trimTopicName(&body.name);
+        ts.applyTopicCreated(body.topic_id, name, body.config, body.leader_node_id, body.leader_epoch, platform.Clock.monotonicNanos());
+    }
+
+    fn handleTopicLeaderChanged(self: *Self, data: [@sizeOf(topic_admin.TopicLeaderChangedBody)]u8) void {
+        const ts = self.topic_subsystem orelse return;
+        var body: topic_admin.TopicLeaderChangedBody = undefined;
+        @memcpy(@as(*[@sizeOf(topic_admin.TopicLeaderChangedBody)]u8, @ptrCast(&body)), &data);
+        const epoch = body.leader_epoch;
+        _ = ts.election.onLeaderAnnouncement(body.new_leader, epoch, platform.Clock.monotonicNanos());
+        ts.registry.setLeaderForAll(body.new_leader, epoch);
+    }
+
+    fn handleTopicAppliedQuery(self: *Self, data: [@sizeOf(topic_admin.TopicAppliedQueryBody)]u8) void {
+        const ts = self.topic_subsystem orelse return;
+        var body: topic_admin.TopicAppliedQueryBody = undefined;
+        @memcpy(@as(*[@sizeOf(topic_admin.TopicAppliedQueryBody)]u8, @ptrCast(&body)), &data);
+        if (body.topic_id == 0) {
+            var iter = ts.registry.iterator();
+            while (iter.next()) |rec| {
+                self.sendTopicAppliedReply(ts, rec.topic_id);
+            }
+        } else {
+            self.sendTopicAppliedReply(ts, body.topic_id);
+        }
+    }
+
+    fn sendTopicAppliedReply(self: *Self, ts: *topics.TopicSubsystem, topic_id: u64) void {
+        // Get the actual last_applied_index from the local store.
+        const last_applied: u64 = if (ts.store.get(topic_id)) |tq| tq.hwm_index else 0;
+        const reply = topic_admin.TopicAppliedReplyBody{
+            .topic_id = topic_id,
+            .last_applied_index = last_applied,
+            .leader_epoch = ts.election.getEpoch(),
+            .node = self.local_node_id,
+        };
+        self.broadcastAdminMessage(topic_admin.TopicAppliedReplyBody, topic_admin.TEMPLATE_TOPIC_APPLIED_REPLY, reply);
+    }
+
+    fn handleTopicAppliedReply(self: *Self, data: [@sizeOf(topic_admin.TopicAppliedReplyBody)]u8) void {
+        if (!self.topic_barrier_active) return;
+        var body: topic_admin.TopicAppliedReplyBody = undefined;
+        @memcpy(@as(*[@sizeOf(topic_admin.TopicAppliedReplyBody)]u8, @ptrCast(&body)), &data);
+        // Ignore replies from old epochs.
+        if (body.leader_epoch < self.topic_barrier_epoch) return;
+        // Update max last_applied_index for this topic.
+        const cur = self.topic_barrier_max_index.get(body.topic_id) orelse 0;
+        if (body.last_applied_index > cur) {
+            self.topic_barrier_max_index.put(body.topic_id, body.last_applied_index) catch {};
+        }
+        self.topic_barrier_replies += 1;
+    }
+
+    fn handleTopicAckFeedback(self: *Self, data: [@sizeOf(topic_admin.TopicAckFeedbackBody)]u8) void {
+        const ts = self.topic_subsystem orelse return;
+        var body: topic_admin.TopicAckFeedbackBody = undefined;
+        @memcpy(@as(*[@sizeOf(topic_admin.TopicAckFeedbackBody)]u8, @ptrCast(&body)), &data);
+        if (ts.registry.getById(body.topic_id)) |_| {
+            var buf: [64]u8 = undefined;
+            const n = topic_messages.encodeAckFeedback(&buf, body.topic_id, body.leader_epoch, body.replicated_hwm);
+            _ = n;
+        }
+    }
+
+    fn broadcastTopicCreated(
+        self: *Self,
+        topic_id: u64,
+        name: []const u8,
+        config: topic_config.TopicConfig,
+        leader_node_id: u8,
+        leader_epoch: u64,
+    ) void {
+        self.broadcastAdminMessage(
+            topic_admin.TopicCreatedBody,
+            topic_admin.TEMPLATE_TOPIC_CREATED,
+            topic_admin.TopicCreatedBody{
+                .topic_id = topic_id,
+                .leader_epoch = leader_epoch,
+                .leader_node_id = leader_node_id,
+                .exists = 1,
+                .config = config,
+                .name = topic_admin.padTopicName(name),
+            },
+        );
+    }
+
+    /// Helper: write a control message to a service's control ring buffer.
+    fn writeToServiceControl(self: *Self, service_id: i32, payload: []const u8) bool {
+        const buffers = self.service_registry.getLocalBuffers(service_id) orelse return false;
+        var rb = RingBuffer.init(
+            @alignCast(buffers.getControlBuffer()),
+            false,
+            null,
+            null,
+        ) catch return false;
+        rb.write(CONTROL_MSG_TYPE, payload) catch return false;
+        return true;
+    }
+
+    /// Periodic topic leadership check (spec 08). Called from doWork.
+    /// On leadership change, announces TOPIC_LEADER_CHANGED and initiates
+    /// the catch-up barrier for all topics.
+    fn checkTopicLeadership(self: *Self, ts: *topics.TopicSubsystem, now_ns: i64) u32 {
+        const result = ts.checkLeadership(now_ns);
+        if (result.became_leader) {
+            log.info("this broker became the topic leader (epoch={})", .{result.leader_epoch});
+            // 1. Announce new leadership to all peers.
+            self.broadcastAdminMessage(
+                topic_admin.TopicLeaderChangedBody,
+                topic_admin.TEMPLATE_TOPIC_LEADER_CHANGED,
+                topic_admin.TopicLeaderChangedBody{
+                    .topic_id = 0,
+                    .leader_epoch = result.leader_epoch,
+                    .new_leader = self.local_node_id,
+                },
+            );
+            // 2. Broadcast TopicAppliedQuery to learn each peer's last_applied_index.
+            self.broadcastAdminMessage(
+                topic_admin.TopicAppliedQueryBody,
+                topic_admin.TEMPLATE_TOPIC_APPLIED_QUERY,
+                topic_admin.TopicAppliedQueryBody{ .topic_id = 0 },
+            );
+            // 3. Begin barrier collection phase.
+            self.topic_barrier_active = true;
+            self.topic_barrier_epoch = result.leader_epoch;
+            self.topic_barrier_replies = 0;
+            self.topic_barrier_deadline_ns = now_ns + 500 * std.time.ns_per_ms; // 500ms timeout
+            self.topic_barrier_max_index.clearRetainingCapacity();
+            // Enqueue catch_up_barrier for every topic (accepting_writes stays false).
+            // Use the registry's recorded leader (previous leader) as the from_node
+            // so the new leader can catch up from the most-advanced replica.
+            var iter = ts.registry.iterator();
+            while (iter.next()) |rec| {
+                _ = ts.ctrl_in.enqueue(.{ .catch_up_barrier = .{
+                    .topic_id = rec.topic_id,
+                    .from_node = rec.leader_node_id,
+                    .target_index = 0,
+                } });
+            }
+            return 1;
+        }
+        return 0;
+    }
+
+    /// Check if the barrier deadline has passed and process the collected
+    /// AppliedReply data. Called from doWork's periodic section.
+    fn checkBarrierCollection(self: *Self, ts: *topics.TopicSubsystem, now_ns: i64) u32 {
+        if (!self.topic_barrier_active) return 0;
+        if (now_ns < self.topic_barrier_deadline_ns) return 0;
+
+        // Deadline passed: for each topic, pick the max peer index and
+        // enqueue a catch_up_barrier with actual from_node/target_index,
+        // or promote directly if we're already the most advanced.
+        self.topic_barrier_active = false;
+
+        var iter = ts.registry.iterator();
+        while (iter.next()) |rec| {
+            const max_peer = self.topic_barrier_max_index.get(rec.topic_id) orelse 0;
+            if (ts.store.get(rec.topic_id)) |tq| {
+                if (max_peer > tq.hwm_index) {
+                    // Need to catch up from the most-advanced peer.
+                    // from_node=0 means "use any peer" — the engine will
+                    // use the AppliedReply with the highest index.
+                    _ = self.topic_barrier_max_index.get(rec.topic_id);
+                    _ = ts.ctrl_in.enqueue(.{
+                        .catch_up_barrier = .{
+                            .topic_id = rec.topic_id,
+                            .from_node = 1, // placeholder; engine resolves
+                            .target_index = max_peer,
+                        },
+                    });
+                } else {
+                    // We're already caught up; promote directly.
+                    _ = ts.ctrl_in.enqueue(.{ .promote_to_leader = .{ .topic_id = rec.topic_id } });
+                }
+            } else {
+                // Queue not yet open; open + promote.
+                _ = ts.ctrl_in.enqueue(.{ .open_master = .{ .topic_id = rec.topic_id, .config = rec.config, .epoch = self.topic_barrier_epoch } });
+                _ = ts.ctrl_in.enqueue(.{ .promote_to_leader = .{ .topic_id = rec.topic_id } });
+            }
+        }
+        return 1;
+    }
+
+    /// Callback for drainStatus: processes engine→control updates.
+    fn drainTopicStatusHandler(ctx: *anyopaque, status: topic_commands.EngineStatus) void {
+        const self: *ControlLoop = @ptrCast(@alignCast(ctx));
+        switch (status) {
+            .replicated_hwm => |h| {
+                // Track for throttled ack feedback emission.
+                if (self.topic_subsystem) |ts| {
+                    if (ts.store.get(h.topic_id)) |tq| {
+                        tq.replicated_hwm = h.index;
+                    }
+                }
+            },
+            .barrier_complete => |b| {
+                // Barrier finished; promote this topic to accept writes.
+                if (self.topic_subsystem) |ts| {
+                    _ = ts.ctrl_in.enqueue(.{ .promote_to_leader = .{ .topic_id = b.topic_id } });
+                }
+            },
+            .master_hwm, .replica_applied, .session_state => {},
+        }
+    }
+
+    /// Emit throttled TopicAckFeedback toward brokers with local producers.
+    fn emitTopicAckFeedbackIfDue(self: *Self, ts: *topics.TopicSubsystem, now_ns: i64) u32 {
+        const interval_ns = self.topic_ack_feedback_interval_ns;
+        var work: u32 = 0;
+
+        var iter = ts.store.openQueues();
+        while (iter.next()) |tqp| {
+            const tq = tqp.*;
+            if (tq.role != .leader) continue;
+            if (tq.replicated_hwm == 0) continue;
+
+            const next = self.topic_next_ack_feedback_ns.get(tq.topic_id) orelse 0;
+            if (now_ns < next) continue;
+
+            self.topic_next_ack_feedback_ns.put(tq.topic_id, now_ns + interval_ns) catch continue;
+
+            self.broadcastAdminMessage(
+                topic_admin.TopicAckFeedbackBody,
+                topic_admin.TEMPLATE_TOPIC_ACK_FEEDBACK,
+                topic_admin.TopicAckFeedbackBody{
+                    .topic_id = tq.topic_id,
+                    .leader_epoch = tq.epoch,
+                    .replicated_hwm = tq.replicated_hwm,
+                },
+            );
+            work += 1;
+        }
+        return work;
+    }
+
+    // ─────────────────────────────────────────────────────────────
     // Public accessors (for commands and cluster integration)
     // ─────────────────────────────────────────────────────────────
 
@@ -1550,7 +1978,7 @@ test "broker admin heartbeat timeout removes remote services" {
         .is_local = false,
     });
 
-    control_loop.handleBrokerHeartbeat(2, admin.padHostPort("127.0.0.1:9002"), 1);
+    control_loop.handleBrokerHeartbeat(2, admin.padHostPort("127.0.0.1:9002"), 1, false);
     try testing.expect(control_loop.admin_peer_seen[2]);
     try testing.expect(control_loop.service_registry.getInstancePtr(42, 2) != null);
 

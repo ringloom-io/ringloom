@@ -82,13 +82,18 @@ pub const AeronAdminError = error{
 
 /// templateId = 1: BrokerHeartbeat
 /// Serves as both liveness keepalive and leadership priority assertion.
+/// `topics_enabled` bit (0x01 in flags) advertises that this broker
+/// participates in the persistent topics subsystem (spec 08).
 pub const BrokerHeartbeatBody = extern struct {
     node_id: u8,
     host_and_port: [22]u8,
+    topics_enabled: u8 = 0, // 0 = false, 1 = true
 };
 
+pub const BROKER_FLAG_TOPICS_ENABLED: u8 = 0x01;
+
 comptime {
-    std.debug.assert(@sizeOf(BrokerHeartbeatBody) == 23);
+    std.debug.assert(@sizeOf(BrokerHeartbeatBody) == 24);
 }
 
 /// templateId = 3: ServiceAdded
@@ -313,10 +318,10 @@ test "encodeAdminMessage BrokerHeartbeat roundtrip" {
     const len = encodeAdminMessage(&buf, BrokerHeartbeatBody, TEMPLATE_BROKER_HEARTBEAT, body);
 
     // Then
-    try testing.expectEqual(@as(usize, 8 + 23), len);
+    try testing.expectEqual(@as(usize, 8 + 24), len);
 
     const header = decodeHeader(&buf).?;
-    try testing.expectEqual(@as(u16, 23), header.block_length);
+    try testing.expectEqual(@as(u16, 24), header.block_length);
     try testing.expectEqual(TEMPLATE_BROKER_HEARTBEAT, header.template_id);
     try testing.expectEqual(SCHEMA_ID, header.schema_id);
     try testing.expectEqual(SCHEMA_VERSION, header.version);
@@ -324,8 +329,8 @@ test "encodeAdminMessage BrokerHeartbeat roundtrip" {
     // Decode body
     const body_data = bodySlice(buf[0..len]);
     var decoded_body: BrokerHeartbeatBody = undefined;
-    const decoded_bytes: *[23]u8 = @ptrCast(&decoded_body);
-    @memcpy(decoded_bytes, body_data[0..23]);
+    const decoded_bytes: *[@sizeOf(BrokerHeartbeatBody)]u8 = @ptrCast(&decoded_body);
+    @memcpy(decoded_bytes, body_data[0..@sizeOf(BrokerHeartbeatBody)]);
     try testing.expectEqual(@as(u8, 1), decoded_body.node_id);
     try testing.expectEqualStrings("localhost:40456", trimHostPort(&decoded_body.host_and_port));
 }

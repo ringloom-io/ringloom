@@ -20,4 +20,5 @@ comptime {
     _ = @import("graceful_unregister_test.zig");
     _ = @import("backpressure_test.zig");
     _ = @import("observability_test.zig");
+    _ = @import("topic_test.zig");
 }

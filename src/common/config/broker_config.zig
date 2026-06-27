@@ -50,6 +50,42 @@ pub const PeerEndpoint = struct {
     port: u16,
 };
 
+/// Persistent topics subsystem configuration (see docs/topics-architecture.md §10).
+/// Topics are disabled by default; only enabled brokers store topic queues,
+/// replicate, and stand for topic leadership.
+pub const TopicsConfig = struct {
+    /// Per-broker master switch.
+    enabled: bool = false,
+    /// Root dir for persistent topic queues. Empty → `<storage_path>/topics`.
+    path: []const u8 = "",
+    /// Default ringloom-queue roll scheme for new topics.
+    default_roll_scheme: []const u8 = "FAST_DAILY",
+    /// Default retention_cycles for new topics (0 = keep indefinitely).
+    default_retention_cycles: u32 = 0,
+    /// Registry capacity.
+    max_topics: u32 = 1024,
+    /// Aeron stream base for topic replication.
+    repl_stream_base: u32 = 40_000,
+    /// Aeron stream base for topic publish.
+    pub_stream_base: u32 = 50_000,
+    /// Throttle interval for TopicAckFeedback HWM frames (replicate_once), microseconds.
+    ack_feedback_interval_us: u32 = 200,
+    /// Optional CPU affinity for the prefetcher/maintenance thread (-1 = unset).
+    prefetcher_cpu_affinity: i32 = -1,
+    /// ringloom-queue appender prefetch runway (write pre-touch).
+    write_runway_bytes: u64 = 8 * 1024 * 1024,
+    /// ringloom-queue source-tailer read-prefetch runway.
+    read_runway_bytes: u64 = 4 * 1024 * 1024,
+
+    /// Resolves the effective topics root directory into `buffer`.
+    pub fn resolvePath(self: *const TopicsConfig, storage_path: []const u8, buffer: []u8) std.fmt.BufPrintError![]u8 {
+        if (self.path.len > 0) {
+            return std.fmt.bufPrint(buffer, "{s}", .{self.path});
+        }
+        return std.fmt.bufPrint(buffer, "{s}/topics", .{storage_path});
+    }
+};
+
 pub const BrokerConfig = struct {
     // ── Required ────────────────────────────────────────────────
     node_id: u8,
@@ -119,6 +155,9 @@ pub const BrokerConfig = struct {
     fc_check_interval_ms: u32 = 1,
     fc_slot_reuse_delay_ms: u32 = 10_000,
     benchmark_latency_tracing_enabled: bool = false,
+
+    // ── Persistent topics ───────────────────────────────────────
+    topics: TopicsConfig = .{},
 
     // ── Computed (set during validation, not from file) ─────────
     max_counter_id: u32 = 0,

@@ -21,6 +21,8 @@ const ServiceRegistry = message_router.ServiceRegistry;
 const admin_dispatch = @import("../cluster/admin_dispatch.zig");
 const admin_messages = @import("../cluster/admin_messages.zig");
 const AdminCommandQueue = admin_dispatch.AdminCommandQueue;
+const topics = @import("../topics.zig");
+const topic_data_header = ringloom_common.message.topic_data_header;
 
 const log = std.log.scoped(.receiver);
 
@@ -117,6 +119,10 @@ pub const ReceiverEventLoop = struct {
     broker_udp_transport: ?*broker_aeron.BrokerUdpTransport,
     broker_udp_assembler: ringloom_aeron.FragmentAssembler,
     broker_admin_udp_assembler: ringloom_aeron.FragmentAssembler,
+    broker_repl_udp_assembler: ringloom_aeron.FragmentAssembler,
+    broker_topic_ipc_assembler: ringloom_aeron.FragmentAssembler,
+    /// Persistent topics subsystem (null when topics are disabled).
+    topic_subsystem: ?*topics.TopicSubsystem = null,
     max_data_payload_length: usize,
 
     const Self = @This();
@@ -178,6 +184,14 @@ pub const ReceiverEventLoop = struct {
                 .context = null,
                 .callback = onBrokerAdminUdpFragment,
             }),
+            .broker_repl_udp_assembler = ringloom_aeron.FragmentAssembler.init(.{
+                .context = null,
+                .callback = onBrokerReplUdpFragment,
+            }),
+            .broker_topic_ipc_assembler = ringloom_aeron.FragmentAssembler.init(.{
+                .context = null,
+                .callback = onBrokerTopicIpcFragment,
+            }),
             .max_data_payload_length = aeron_options.max_data_payload_length,
         };
         const now_ns = Clock.monotonicNanos();
@@ -193,9 +207,15 @@ pub const ReceiverEventLoop = struct {
         self.aeron_agent = agent;
     }
 
+    pub fn setTopicSubsystem(self: *Self, subsystem: ?*topics.TopicSubsystem) void {
+        self.topic_subsystem = subsystem;
+    }
+
     pub fn deinit(self: *Self) void {
         self.broker_udp_assembler.deinit();
         self.broker_admin_udp_assembler.deinit();
+        self.broker_repl_udp_assembler.deinit();
+        self.broker_topic_ipc_assembler.deinit();
     }
 
     pub fn doWork(self: *Self) u32 {
@@ -205,6 +225,9 @@ pub const ReceiverEventLoop = struct {
         work_count += self.invokeAeronAgent();
         work_count += self.pollBrokerUdp();
         work_count += self.pollBrokerAdminUdp();
+        work_count += self.pollBrokerReplUdp();
+        work_count += self.pollBrokerTopicIpc();
+        if (self.topic_subsystem) |ts| work_count += ts.receiverStep();
         work_count += self.checkHeartbeatTimeouts(now_ns);
 
         return work_count;
@@ -242,6 +265,32 @@ pub const ReceiverEventLoop = struct {
         return @intCast(fragments);
     }
 
+    fn pollBrokerReplUdp(self: *Self) u32 {
+        if (self.topic_subsystem == null) return 0;
+        const transport_ref = self.broker_udp_transport orelse return 0;
+        const repl_sub = transport_ref.replSubscriptionPtr() orelse return 0;
+        self.broker_repl_udp_assembler.handler.context = self;
+        const fragments = self.broker_repl_udp_assembler.poll(repl_sub, constants.aeron_fragment_read_limit) catch |err| {
+            log.err("broker Aeron repl UDP poll failed: {}", .{err});
+            self.counters.increment(self.counter_ids.connection_errors);
+            return 0;
+        };
+        return @intCast(fragments);
+    }
+
+    fn pollBrokerTopicIpc(self: *Self) u32 {
+        if (self.topic_subsystem == null) return 0;
+        const transport_ref = self.broker_udp_transport orelse return 0;
+        const ipc_sub = transport_ref.topicIpcSubscriptionPtr() orelse return 0;
+        self.broker_topic_ipc_assembler.handler.context = self;
+        const fragments = self.broker_topic_ipc_assembler.poll(ipc_sub, constants.aeron_fragment_read_limit) catch |err| {
+            log.err("broker Aeron topic IPC poll failed: {}", .{err});
+            self.counters.increment(self.counter_ids.connection_errors);
+            return 0;
+        };
+        return @intCast(fragments);
+    }
+
     fn onBrokerUdpFragment(context: ?*anyopaque, bytes: []const u8) void {
         const self: *Self = @ptrCast(@alignCast(context.?));
         self.processBrokerUdpFragment(bytes);
@@ -250,6 +299,44 @@ pub const ReceiverEventLoop = struct {
     fn onBrokerAdminUdpFragment(context: ?*anyopaque, bytes: []const u8) void {
         const self: *Self = @ptrCast(@alignCast(context.?));
         self.processBrokerAdminUdpFragment(bytes);
+    }
+
+    fn onBrokerReplUdpFragment(context: ?*anyopaque, bytes: []const u8) void {
+        const self: *Self = @ptrCast(@alignCast(context.?));
+        self.processBrokerReplUdpFragment(bytes);
+    }
+
+    fn onBrokerTopicIpcFragment(context: ?*anyopaque, bytes: []const u8) void {
+        const self: *Self = @ptrCast(@alignCast(context.?));
+        self.processBrokerTopicIpcFragment(bytes);
+    }
+
+    fn processBrokerReplUdpFragment(self: *Self, bytes: []const u8) void {
+        self.counters.add(self.counter_ids.bytes_received, @intCast(bytes.len));
+        const ts = self.topic_subsystem orelse return;
+        const env = topic_data_header.TopicReplEnvelope.decode(bytes) catch {
+            self.counters.increment(self.counter_ids.invalid_frame_drops);
+            return;
+        };
+        self.refreshPeerLiveness(@intCast(env.source_node_id));
+        ts.onReplFrame(env, env.frameSlice(bytes));
+    }
+
+    fn processBrokerTopicIpcFragment(self: *Self, bytes: []const u8) void {
+        self.counters.add(self.counter_ids.bytes_received, @intCast(bytes.len));
+
+        const frame = data_header.decodeFrame(bytes, self.max_data_payload_length) catch |err| {
+            log.warn("dropping invalid broker topic IPC frame: {}", .{err});
+            self.counters.increment(self.counter_ids.invalid_frame_drops);
+            return;
+        };
+
+        // IPC frames from co-located publishers always target this broker.
+        // Skip the target_node_id check and peer liveness refresh (local IPC).
+        if (frame.header.flags & constants.flag_topic != 0) {
+            self.routeTopicPublish(frame);
+            return;
+        }
     }
 
     fn processBrokerUdpFragment(self: *Self, bytes: []const u8) void {
@@ -267,7 +354,40 @@ pub const ReceiverEventLoop = struct {
         }
 
         self.refreshPeerLiveness(@intCast(frame.header.source_node_id));
+
+        // Topic publish frames (flag_topic, target_service_id == 0) are demuxed
+        // to the topics engine instead of service routing (spec 04).
+        if (frame.header.flags & constants.flag_topic != 0) {
+            self.routeTopicPublish(frame);
+            return;
+        }
+
         self.routeDataFrameToService(frame);
+    }
+
+    fn routeTopicPublish(self: *Self, frame: data_header.DecodedFrame) void {
+        const ts = self.topic_subsystem orelse return;
+        const pub_hdr = topic_data_header.TopicPublishHeader.decode(frame.payload) catch {
+            self.counters.increment(self.counter_ids.invalid_frame_drops);
+            return;
+        };
+        const payload = frame.payload[topic_data_header.TopicPublishHeader.encoded_length..];
+        // Benchmark-only stage tracing (zero-copy, gated): stamp the broker-A
+        // receiver-ingress time into the app payload. This rides byte-exact
+        // through replication into the replica queue, so the subscriber can
+        // split end-to-end latency into pub→broker-A vs. broker-A→sub.
+        if (self.benchmark_latency_tracing_enabled) {
+            latency_trace.stampReceiverIngress(@constCast(payload), @intCast(Clock.monotonicNanosStable()));
+        }
+        ts.onPublish(.{
+            .topic_id = pub_hdr.topic_id,
+            .leader_epoch = pub_hdr.leader_epoch,
+            .correlation_id = pub_hdr.correlation_id,
+            .source_node = @intCast(frame.header.source_node_id),
+            .source_service = @intCast(frame.header.source_service_id),
+            .ack_mode = topics.AckMode.fromU8(pub_hdr.ack_mode) orelse .fire_and_forget,
+            .payload = payload,
+        });
     }
 
     fn routeDataFrameToService(self: *Self, frame: data_header.DecodedFrame) void {

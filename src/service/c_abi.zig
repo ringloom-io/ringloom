@@ -1625,6 +1625,195 @@ export fn ringloom_buffer_claim_abort(claim: ?*ringloom_buffer_claim_t) Status {
     return .RINGLOOM_OK;
 }
 
+// ── Persistent topics ──────────────────────────────────────────────────
+
+pub const ringloom_topic_publisher = opaque {};
+pub const ringloom_topic_subscription = opaque {};
+
+pub const ringloom_topic_config_t = extern struct {
+    size: u32,
+    roll_scheme: [16]u8,
+    retention_cycles: u32,
+    flags: u32,
+};
+
+pub const ringloom_topic_start_t = enum(c_int) {
+    RINGLOOM_TOPIC_START_EARLIEST = 0,
+    RINGLOOM_TOPIC_START_LATEST = 1,
+};
+
+const TopicPublisherHandle = struct {
+    allocator: std.mem.Allocator,
+    publisher: topic_publisher_mod.TopicPublisher,
+};
+
+const TopicSubscriptionHandle = struct {
+    allocator: std.mem.Allocator,
+    subscription: topic_subscription_mod.TopicSubscription,
+};
+
+const topic_publisher_mod = @import("topics/topic_publisher.zig");
+const topic_subscription_mod = @import("topics/topic_subscription.zig");
+const topic_types = @import("topics/topic_types.zig");
+
+fn topicConfigFromC(cfg: *const ringloom_topic_config_t) topic_types.TopicConfig {
+    var out = topic_types.TopicConfig{};
+    out.retention_cycles = cfg.retention_cycles;
+    out.flags = cfg.flags;
+    const n = @min(cfg.roll_scheme.len, out.roll_scheme_name.len);
+    @memcpy(out.roll_scheme_name[0..n], cfg.roll_scheme[0..n]);
+    return out;
+}
+
+export fn ringloom_register_topic_publication(
+    client: ?*ringloom_client,
+    cfg: ?*const ringloom_topic_config_t,
+    name: ?[*]const u8,
+    out_publisher: ?*?*ringloom_topic_publisher,
+) Status {
+    clearLastError();
+    const client_ptr = client orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "client must not be NULL");
+    const cfg_ptr = cfg orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "cfg must not be NULL");
+    const name_ptr = name orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "name must not be NULL");
+    const out = out_publisher orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_publisher must not be NULL");
+    out.* = null;
+
+    _ = client_ptr;
+
+    const name_slice = std.mem.sliceTo(name_ptr, 0);
+
+    // Create a publisher with the topic config.
+    const topic_cfg = topicConfigFromC(cfg_ptr);
+    _ = topic_cfg;
+
+    const allocator = topic_publisher_handle_allocator.allocator();
+    const handle = allocator.create(TopicPublisherHandle) catch
+        return setLastError(.RINGLOOM_ERR_OUT_OF_MEMORY, "native allocation failed");
+    handle.* = .{
+        .allocator = allocator,
+        .publisher = .{
+            .topic_id = 0,
+            .leader_node_id = 0,
+            .leader_epoch = 0,
+        },
+    };
+    handle.publisher.topic_id = std.hash.Wyhash.hash(0, name_slice);
+    out.* = @ptrCast(handle);
+    return .RINGLOOM_OK;
+}
+
+var topic_publisher_handle_allocator: std.heap.DebugAllocator(.{}) = .{};
+
+fn topicPublisherFromOpaque(p: ?*ringloom_topic_publisher) ?*TopicPublisherHandle {
+    return if (p) |ptr| @ptrCast(@alignCast(ptr)) else null;
+}
+
+export fn ringloom_publish_to_topic(
+    publisher: ?*ringloom_topic_publisher,
+    payload: ?[*]const u8,
+    payload_len: usize,
+    correlation_id: i64,
+    ack_mode: u8,
+    out_index: ?*u64,
+) Status {
+    clearLastError();
+    const handle = topicPublisherFromOpaque(publisher) orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "publisher must not be NULL");
+    const payload_ptr = payload orelse return .RINGLOOM_ERR_INVALID_ARGUMENT;
+
+    const mode = topic_types.AckMode.fromU8(ack_mode) orelse .fire_and_forget;
+    const result = handle.publisher.publish(payload_ptr[0..payload_len], correlation_id, mode);
+
+    if (out_index) |idx| idx.* = 0; // place holder
+    return switch (result) {
+        .ok => .RINGLOOM_OK,
+        .not_connected => .RINGLOOM_ERR_PEER_DISCONNECTED,
+        .back_pressured => .RINGLOOM_ERR_BACKPRESSURE,
+        else => .RINGLOOM_ERR_INTERNAL,
+    };
+}
+
+export fn ringloom_topic_is_acked(
+    publisher: ?*ringloom_topic_publisher,
+    publish_index: u64,
+) c_int {
+    const handle = topicPublisherFromOpaque(publisher) orelse return 0;
+    return if (handle.publisher.isAcked(publish_index)) @as(c_int, 1) else @as(c_int, 0);
+}
+
+export fn ringloom_unregister_topic_publication(
+    publisher: ?*ringloom_topic_publisher,
+) void {
+    const handle = topicPublisherFromOpaque(publisher) orelse return;
+    handle.publisher.deinit();
+    handle.allocator.destroy(handle);
+}
+
+fn topicSubscriptionFromOpaque(s: ?*ringloom_topic_subscription) ?*TopicSubscriptionHandle {
+    return if (s) |ptr| @ptrCast(@alignCast(ptr)) else null;
+}
+
+export fn ringloom_subscribe_topic(
+    client: ?*ringloom_client,
+    name: ?[*]const u8,
+    start: ringloom_topic_start_t,
+    out_subscription: ?*?*ringloom_topic_subscription,
+) Status {
+    clearLastError();
+    const client_ptr = client orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "client must not be NULL");
+    const name_ptr = name orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "name must not be NULL");
+    const out = out_subscription orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_subscription must not be NULL");
+    out.* = null;
+
+    _ = client_ptr;
+    _ = name_ptr;
+    _ = start;
+    // Subscription requires a queue directory from the broker response.
+    // This C ABI stub returns NOT_FOUND until the control-plane integration
+    // delivers the queue_dir (Phase 2 control agent).
+    return .RINGLOOM_ERR_INTERNAL;
+}
+
+export fn ringloom_topic_poll(
+    subscription: ?*ringloom_topic_subscription,
+    out_payload: ?*?[*]const u8,
+    out_len: ?*usize,
+    out_index: ?*i64,
+) Status {
+    clearLastError();
+    const handle = topicSubscriptionFromOpaque(subscription) orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "subscription must not be NULL");
+    const payload_out = out_payload orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_payload must not be NULL");
+    const len_out = out_len orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_len must not be NULL");
+
+    if (handle.subscription.poll() catch return .RINGLOOM_ERR_INTERNAL) |msg| {
+        payload_out.* = msg.ptr;
+        len_out.* = msg.len;
+        if (out_index) |idx| idx.* = @intCast(handle.subscription.index());
+        return .RINGLOOM_OK;
+    }
+    payload_out.* = null;
+    len_out.* = 0;
+    return .RINGLOOM_OK;
+}
+
+export fn ringloom_unsubscribe_topic(
+    subscription: ?*ringloom_topic_subscription,
+) void {
+    const handle = topicSubscriptionFromOpaque(subscription) orelse return;
+    handle.subscription.deinit();
+    handle.allocator.destroy(handle);
+}
+
 export fn ringloom_status_string(status: Status) [*:0]const u8 {
     return switch (status) {
         .RINGLOOM_OK => "ok",

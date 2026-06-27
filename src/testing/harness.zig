@@ -83,6 +83,10 @@ pub const BrokerSpec = struct {
     sender_cpu_affinity: ?u32 = null,
     receiver_cpu_affinity: ?u32 = null,
     benchmark_latency_tracing_enabled: bool = false,
+    /// Enable persistent topics (default: false).
+    topics_enabled: bool = false,
+    /// Topics storage path (default: auto-generated in storage).
+    topics_path: ?[]const u8 = null,
 };
 
 /// Describes the configuration for a service process to be started by

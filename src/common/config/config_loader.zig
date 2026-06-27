@@ -218,6 +218,38 @@ pub const ConfigLoader = struct {
         if (props.get("broker.benchmark.latency.tracing.enabled")) |v|
             config.benchmark_latency_tracing_enabled = std.mem.eql(u8, v, "true");
 
+        // ── Persistent topics ───────────────────────────────────
+        if (props.get("broker.topics.enabled")) |v|
+            config.topics.enabled = std.mem.eql(u8, v, "true");
+        if (props.get("broker.topics.path")) |v|
+            config.topics.path = self.allocator.dupe(u8, v) catch return ConfigError.IoError;
+        if (props.get("broker.topics.default.roll.scheme")) |v|
+            config.topics.default_roll_scheme = self.allocator.dupe(u8, v) catch return ConfigError.IoError;
+        if (props.get("broker.topics.default.retention.cycles")) |v|
+            config.topics.default_retention_cycles = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.topics.max.topics")) |v|
+            config.topics.max_topics = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.topics.repl.stream.base")) |v|
+            config.topics.repl_stream_base = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.topics.pub.stream.base")) |v|
+            config.topics.pub_stream_base = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.topics.ack.feedback.interval.us")) |v|
+            config.topics.ack_feedback_interval_us = std.fmt.parseInt(u32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.topics.prefetcher.cpu.affinity")) |v|
+            config.topics.prefetcher_cpu_affinity = std.fmt.parseInt(i32, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.topics.write.runway.bytes")) |v|
+            config.topics.write_runway_bytes = std.fmt.parseInt(u64, v, 10) catch
+                return ConfigError.InvalidValue;
+        if (props.get("broker.topics.read.runway.bytes")) |v|
+            config.topics.read_runway_bytes = std.fmt.parseInt(u64, v, 10) catch
+                return ConfigError.InvalidValue;
+
         // ── Validate and compute derived fields ─────────────────
         try validate(&config);
 
