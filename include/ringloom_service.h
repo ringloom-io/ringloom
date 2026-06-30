@@ -28,6 +28,7 @@ typedef enum ringloom_status {
     RINGLOOM_ERR_PEER_DISCONNECTED = 8,
     RINGLOOM_ERR_CLAIM_NOT_ACTIVE = 9,
     RINGLOOM_ERR_MESSAGE_TOO_LONG = 10,
+    RINGLOOM_NOT_READY = 11,
     RINGLOOM_ERR_INTERNAL = 255
 } ringloom_status_t;
 
@@ -409,6 +410,7 @@ ringloom_status_t ringloom_register_topic_publication(
     ringloom_client_t *client,
     const ringloom_topic_config_t *cfg,
     const char *name,
+    size_t name_len,
     ringloom_topic_publisher_t **out_publisher
 );
 
@@ -436,6 +438,7 @@ void ringloom_unregister_topic_publication(
 ringloom_status_t ringloom_subscribe_topic(
     ringloom_client_t *client,
     const char *name,
+    size_t name_len,
     ringloom_topic_start_t start,
     ringloom_topic_subscription_t **out_subscription
 );
@@ -446,6 +449,14 @@ ringloom_status_t ringloom_topic_poll(
     const uint8_t **out_payload,
     size_t *out_len,
     int64_t *out_index
+);
+
+/// Advances the subscription's ringloom-queue maintenance/cleaner work and
+/// pre-touches read pages ahead of the tailer. Safe to call from any thread that
+/// does not poll the same subscription concurrently. max_work_units <= 0 is a no-op.
+ringloom_status_t ringloom_topic_subscription_maintenance_poll(
+    ringloom_topic_subscription_t *subscription,
+    int max_work_units
 );
 
 void ringloom_unsubscribe_topic(

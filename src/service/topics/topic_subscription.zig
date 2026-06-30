@@ -79,4 +79,9 @@ pub const TopicSubscription = struct {
     pub fn index(self: *const TopicSubscription) u64 {
         return self.tailer.getIndex();
     }
+
+    /// Drives queue-level prefetcher and cleaner work within a bounded budget.
+    pub fn maintenancePoll(self: *TopicSubscription, max_work_units: u32) void {
+        _ = self.queue.maintenancePoll(max_work_units) catch {};
+    }
 };

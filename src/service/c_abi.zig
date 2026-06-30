@@ -37,6 +37,7 @@ pub const ringloom_status_t = enum(c_int) {
     RINGLOOM_ERR_PEER_DISCONNECTED = 8,
     RINGLOOM_ERR_CLAIM_NOT_ACTIVE = 9,
     RINGLOOM_ERR_MESSAGE_TOO_LONG = 10,
+    RINGLOOM_NOT_READY = 11,
     RINGLOOM_ERR_INTERNAL = 255,
 };
 
@@ -1669,6 +1670,7 @@ export fn ringloom_register_topic_publication(
     client: ?*ringloom_client,
     cfg: ?*const ringloom_topic_config_t,
     name: ?[*]const u8,
+    name_len: usize,
     out_publisher: ?*?*ringloom_topic_publisher,
 ) Status {
     clearLastError();
@@ -1684,7 +1686,7 @@ export fn ringloom_register_topic_publication(
 
     _ = client_ptr;
 
-    const name_slice = std.mem.sliceTo(name_ptr, 0);
+    const name_slice = if (name_len == 0) "" else name_ptr[0..name_len];
 
     // Create a publisher with the topic config.
     const topic_cfg = topicConfigFromC(cfg_ptr);
@@ -1723,10 +1725,11 @@ export fn ringloom_publish_to_topic(
     clearLastError();
     const handle = topicPublisherFromOpaque(publisher) orelse
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "publisher must not be NULL");
-    const payload_ptr = payload orelse return .RINGLOOM_ERR_INVALID_ARGUMENT;
+    const payload_ptr = if (payload_len == 0) null else payload orelse return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "payload must not be NULL");
 
     const mode = topic_types.AckMode.fromU8(ack_mode) orelse .fire_and_forget;
-    const result = handle.publisher.publish(payload_ptr[0..payload_len], correlation_id, mode);
+    const payload_slice = if (payload_ptr) |p| p[0..payload_len] else &[0]u8{};
+    const result = handle.publisher.publish(payload_slice, correlation_id, mode);
 
     if (out_index) |idx| idx.* = 0; // place holder
     return switch (result) {
@@ -1760,6 +1763,7 @@ fn topicSubscriptionFromOpaque(s: ?*ringloom_topic_subscription) ?*TopicSubscrip
 export fn ringloom_subscribe_topic(
     client: ?*ringloom_client,
     name: ?[*]const u8,
+    name_len: usize,
     start: ringloom_topic_start_t,
     out_subscription: ?*?*ringloom_topic_subscription,
 ) Status {
@@ -1774,6 +1778,7 @@ export fn ringloom_subscribe_topic(
 
     _ = client_ptr;
     _ = name_ptr;
+    _ = name_len;
     _ = start;
     // Subscription requires a queue directory from the broker response.
     // This C ABI stub returns NOT_FOUND until the control-plane integration
@@ -1803,6 +1808,18 @@ export fn ringloom_topic_poll(
     }
     payload_out.* = null;
     len_out.* = 0;
+    return .RINGLOOM_NOT_READY;
+}
+
+export fn ringloom_topic_subscription_maintenance_poll(
+    subscription: ?*ringloom_topic_subscription,
+    max_work_units: c_int,
+) Status {
+    clearLastError();
+    if (max_work_units <= 0) return .RINGLOOM_OK;
+    const handle = topicSubscriptionFromOpaque(subscription) orelse
+        return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "subscription must not be NULL");
+    handle.subscription.maintenancePoll(@intCast(max_work_units));
     return .RINGLOOM_OK;
 }
 
@@ -1827,6 +1844,7 @@ export fn ringloom_status_string(status: Status) [*:0]const u8 {
         .RINGLOOM_ERR_PEER_DISCONNECTED => "peer_disconnected",
         .RINGLOOM_ERR_CLAIM_NOT_ACTIVE => "claim_not_active",
         .RINGLOOM_ERR_MESSAGE_TOO_LONG => "message_too_long",
+        .RINGLOOM_NOT_READY => "not_ready",
         .RINGLOOM_ERR_INTERNAL => "internal",
     };
 }
