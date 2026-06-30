@@ -4,6 +4,7 @@
 const std = @import("std");
 const ringloom_aeron = @import("ringloom_aeron");
 const ringloom_common = @import("ringloom_common");
+const repl_publisher = @import("topics/repl_channel.zig");
 
 const BrokerConfig = ringloom_common.config.broker_config.BrokerConfig;
 const PeerEndpoint = ringloom_common.config.broker_config.PeerEndpoint;
@@ -84,6 +85,10 @@ const PeerPublication = struct {
     admin_stream_id: i32,
     data_publication: ringloom_aeron.ExclusivePublication,
     admin_publication: ringloom_aeron.ExclusivePublication,
+    /// Topic replication publication (only created when topics are enabled).
+    repl_channel: ?[:0]u8 = null,
+    repl_stream_id: i32 = 0,
+    repl_publication: ?ringloom_aeron.ExclusivePublication = null,
 };
 
 /// Broker-owned Aeron UDP data publications/subscription.
@@ -99,6 +104,13 @@ pub const BrokerUdpTransport = struct {
     admin_inbound_stream_id: i32,
     data_inbound_subscription: ringloom_aeron.Subscription,
     admin_inbound_subscription: ringloom_aeron.Subscription,
+    /// Topic replication inbound subscription (only when topics enabled).
+    repl_inbound_channel: ?[:0]u8 = null,
+    repl_inbound_stream_id: i32 = 0,
+    repl_inbound_subscription: ?ringloom_aeron.Subscription = null,
+    /// Topic IPC inbound subscription (co-located publishers, only when topics enabled).
+    topic_ipc_stream_id: i32 = 0,
+    topic_ipc_subscription: ?ringloom_aeron.Subscription = null,
     peers: []PeerPublication,
 
     pub fn open(
@@ -126,6 +138,31 @@ pub const BrokerUdpTransport = struct {
         var admin_inbound_subscription = try client.addSubscription(admin_inbound_channel, admin_inbound_stream_id, driver_agents);
         errdefer admin_inbound_subscription.close() catch {};
 
+        // Topic replication inbound subscription (full-mesh replication path).
+        const topics_enabled = config.topics.enabled;
+        var repl_inbound_channel: ?[:0]u8 = null;
+        errdefer if (repl_inbound_channel) |c| allocator.free(c);
+        var repl_inbound_subscription: ?ringloom_aeron.Subscription = null;
+        errdefer if (repl_inbound_subscription) |*s| s.close() catch {};
+        const repl_inbound_stream_id = replStreamId(config, config.node_id);
+        if (topics_enabled) {
+            repl_inbound_channel = try allocator.dupeZ(u8, inbound_uri);
+            repl_inbound_subscription = try client.addSubscription(repl_inbound_channel.?, repl_inbound_stream_id, driver_agents);
+        }
+
+        // Topic IPC inbound subscription (co-located publisher → broker).
+        const topic_ipc_stream_id: i32 = if (topics_enabled)
+            @as(i32, @intCast(config.topics.pub_stream_base)) + @as(i32, @intCast(config.node_id))
+        else
+            0;
+        var topic_ipc_subscription: ?ringloom_aeron.Subscription = null;
+        errdefer if (topic_ipc_subscription) |*s| s.close() catch {};
+        if (topics_enabled) {
+            var ipc_uri_buf: [64]u8 = undefined;
+            const ipc_channel_z = try std.fmt.bufPrintZ(&ipc_uri_buf, "aeron:ipc", .{});
+            topic_ipc_subscription = try client.addSubscription(ipc_channel_z, topic_ipc_stream_id, driver_agents);
+        }
+
         const peers = try allocator.alloc(PeerPublication, config.peer_endpoints.len);
         errdefer allocator.free(peers);
         var initialized: usize = 0;
@@ -133,8 +170,10 @@ pub const BrokerUdpTransport = struct {
             for (peers[0..initialized]) |*peer| {
                 peer.data_publication.close() catch {};
                 peer.admin_publication.close() catch {};
+                if (peer.repl_publication) |*p| p.close() catch {};
                 allocator.free(peer.data_channel);
                 allocator.free(peer.admin_channel);
+                if (peer.repl_channel) |c| allocator.free(c);
             }
         }
 
@@ -152,6 +191,16 @@ pub const BrokerUdpTransport = struct {
             var admin_publication = try client.addExclusivePublication(peer_admin_channel, admin_stream_id, driver_agents);
             errdefer if (initialized == i) admin_publication.close() catch {};
 
+            var peer_repl_channel: ?[:0]u8 = null;
+            errdefer if (initialized == i and peer_repl_channel != null) allocator.free(peer_repl_channel.?);
+            var peer_repl_publication: ?ringloom_aeron.ExclusivePublication = null;
+            errdefer if (initialized == i and peer_repl_publication != null) peer_repl_publication.?.close() catch {};
+            const peer_repl_stream_id = replStreamId(config, endpoint.node_id);
+            if (topics_enabled) {
+                peer_repl_channel = try allocator.dupeZ(u8, peer_uri);
+                peer_repl_publication = try client.addExclusivePublication(peer_repl_channel.?, peer_repl_stream_id, driver_agents);
+            }
+
             peers[i] = .{
                 .node_id = endpoint.node_id,
                 .data_channel = peer_channel,
@@ -160,6 +209,9 @@ pub const BrokerUdpTransport = struct {
                 .admin_stream_id = admin_stream_id,
                 .data_publication = publication,
                 .admin_publication = admin_publication,
+                .repl_channel = peer_repl_channel,
+                .repl_stream_id = peer_repl_stream_id,
+                .repl_publication = peer_repl_publication,
             };
             initialized += 1;
         }
@@ -172,6 +224,11 @@ pub const BrokerUdpTransport = struct {
             .admin_inbound_stream_id = admin_inbound_stream_id,
             .data_inbound_subscription = inbound_subscription,
             .admin_inbound_subscription = admin_inbound_subscription,
+            .repl_inbound_channel = repl_inbound_channel,
+            .repl_inbound_stream_id = repl_inbound_stream_id,
+            .repl_inbound_subscription = repl_inbound_subscription,
+            .topic_ipc_stream_id = topic_ipc_stream_id,
+            .topic_ipc_subscription = topic_ipc_subscription,
             .peers = peers,
         };
     }
@@ -179,13 +236,18 @@ pub const BrokerUdpTransport = struct {
     pub fn deinit(self: *BrokerUdpTransport) void {
         self.data_inbound_subscription.close() catch {};
         self.admin_inbound_subscription.close() catch {};
+        if (self.repl_inbound_subscription) |*s| s.close() catch {};
+        if (self.topic_ipc_subscription) |*s| s.close() catch {};
         self.allocator.free(self.data_inbound_channel);
         self.allocator.free(self.admin_inbound_channel);
+        if (self.repl_inbound_channel) |c| self.allocator.free(c);
         for (self.peers) |*peer| {
             peer.data_publication.close() catch {};
             peer.admin_publication.close() catch {};
+            if (peer.repl_publication) |*p| p.close() catch {};
             self.allocator.free(peer.data_channel);
             self.allocator.free(peer.admin_channel);
+            if (peer.repl_channel) |c| self.allocator.free(c);
         }
         self.allocator.free(self.peers);
         self.* = undefined;
@@ -197,6 +259,32 @@ pub const BrokerUdpTransport = struct {
 
     pub fn adminSubscriptionPtr(self: *BrokerUdpTransport) *ringloom_aeron.Subscription {
         return &self.admin_inbound_subscription;
+    }
+
+    /// Inbound topic-replication subscription, or null when topics are disabled.
+    pub fn replSubscriptionPtr(self: *BrokerUdpTransport) ?*ringloom_aeron.Subscription {
+        if (self.repl_inbound_subscription) |*s| return s;
+        return null;
+    }
+
+    /// Inbound topic IPC subscription (co-located publishers), or null when topics are disabled.
+    pub fn topicIpcSubscriptionPtr(self: *BrokerUdpTransport) ?*ringloom_aeron.Subscription {
+        if (self.topic_ipc_subscription) |*s| return s;
+        return null;
+    }
+
+    /// Forwards a wrapped topic-replication frame to a peer over the repl stream.
+    pub fn forwardReplFrame(self: *BrokerUdpTransport, target_node_id: u8, frame: []const u8) BrokerUdpForwardResult {
+        const peer = self.findPeer(target_node_id) orelse return .unknown_peer;
+        if (peer.repl_publication) |*pub_ref| return forwardFrame(pub_ref, frame);
+        return .not_connected;
+    }
+
+    /// True if the repl publication to `target_node_id` is connected.
+    pub fn replConnected(self: *BrokerUdpTransport, target_node_id: u8) bool {
+        const peer = self.findPeer(target_node_id) orelse return false;
+        if (peer.repl_publication) |*pub_ref| return pub_ref.isConnected();
+        return false;
     }
 
     pub fn forwardDataFrame(self: *BrokerUdpTransport, target_node_id: u16, frame: []const u8) BrokerUdpForwardResult {
@@ -257,6 +345,56 @@ pub fn dataStreamId(config: *const BrokerConfig, node_id: u8) i32 {
 pub fn adminStreamId(config: *const BrokerConfig, node_id: u8) i32 {
     return config.aeron_admin_stream_base + @as(i32, @intCast(node_id));
 }
+
+pub fn replStreamId(config: *const BrokerConfig, node_id: u8) i32 {
+    return @as(i32, @intCast(config.topics.repl_stream_base)) + @as(i32, @intCast(node_id));
+}
+
+/// Adapter exposing a `BrokerUdpTransport` as a topic-replication `Publisher`
+/// (the SPI the `ReplHub` uses to send wrapped ringloom-queue frames to peers).
+/// The transport pointer is bound after the transport is opened.
+pub const ReplPublisherAdapter = struct {
+    transport: ?*BrokerUdpTransport = null,
+
+    pub fn bind(self: *ReplPublisherAdapter, transport: *BrokerUdpTransport) void {
+        self.transport = transport;
+    }
+
+    fn offerImpl(ctx: *anyopaque, target_node: u8, frame: []const u8) i64 {
+        const self: *ReplPublisherAdapter = @ptrCast(@alignCast(ctx));
+        const transport = self.transport orelse return -2; // not_connected
+        return switch (transport.forwardReplFrame(target_node, frame)) {
+            .forwarded => @as(i64, @intCast(frame.len)),
+            .back_pressured => -1,
+            .not_connected, .unknown_peer => -2,
+            .admin_action => -3,
+            .closed => -4,
+            .max_position_exceeded => -5,
+            .failed => -2,
+        };
+    }
+
+    fn isConnectedImpl(ctx: *anyopaque, target_node: u8) bool {
+        const self: *ReplPublisherAdapter = @ptrCast(@alignCast(ctx));
+        const transport = self.transport orelse return false;
+        return transport.replConnected(target_node);
+    }
+
+    fn isBackPressuredImpl(ctx: *anyopaque, target_node: u8) bool {
+        _ = ctx;
+        _ = target_node;
+        return false;
+    }
+
+    pub fn publisher(self: *ReplPublisherAdapter) repl_publisher.Publisher {
+        return .{
+            .ctx = @ptrCast(self),
+            .offerFn = offerImpl,
+            .isConnectedFn = isConnectedImpl,
+            .isBackPressuredFn = isBackPressuredImpl,
+        };
+    }
+};
 
 pub fn peerChannelUri(
     buffer: []u8,

@@ -10,6 +10,11 @@ pub const MessageHeader = message_header.MessageHeader;
 pub const data_header = @import("message/data_header.zig");
 pub const RingLoomDataHeader = data_header.RingLoomDataHeader;
 
+pub const topic_data_header = @import("message/topic_data_header.zig");
+pub const TopicPublishHeader = topic_data_header.TopicPublishHeader;
+pub const TopicReplEnvelope = topic_data_header.TopicReplEnvelope;
+pub const ReplDirection = topic_data_header.ReplDirection;
+
 pub const control_encoding = @import("message/control_encoding.zig");
 
 pub const message_fragmenting_producer = @import("message/message_fragmenting_producer.zig");
@@ -25,6 +30,7 @@ pub const latency_trace = @import("message/latency_trace.zig");
 comptime {
     _ = @import("message/message_header.zig");
     _ = @import("message/data_header.zig");
+    _ = @import("message/topic_data_header.zig");
     _ = @import("message/control_encoding.zig");
     _ = @import("message/message_fragmenting_producer.zig");
     _ = @import("message/message_assembler.zig");

@@ -4,6 +4,7 @@ package io.ringloom.service;
  * Native RingLoom status code constants returned by hot-path Java APIs.
  */
 public final class RingloomStatus {
+
     /**
      * Operation completed successfully.
      */
@@ -49,12 +50,16 @@ public final class RingloomStatus {
      */
     public static final int MESSAGE_TOO_LONG = 10;
     /**
+     * No message is available for the requested operation (e.g. topic poll at tip).
+     * This is not an error; callers should retry or move on.
+     */
+    public static final int NOT_READY = 11;
+    /**
      * Unexpected native failure.
      */
     public static final int INTERNAL = 255;
 
-    private RingloomStatus() {
-    }
+    private RingloomStatus() {}
 
     /**
      * Returns whether a status code is {@link #OK}.

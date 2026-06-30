@@ -14,6 +14,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const ringloom_queue = b.dependency("ringloom_queue", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("ringloom_queue");
+
     const ringloom_aeron = aeron_build.buildRingLoomAeron(b, target, optimize, .{
         .module_name = "ringloom_aeron",
         .library_name = "aeron_driver",
@@ -32,6 +37,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "ringloom_common", .module = ringloom_common },
             .{ .name = "ringloom_aeron", .module = ringloom_aeron.module },
+            .{ .name = "ringloom_queue", .module = ringloom_queue },
         },
     });
 
@@ -42,6 +48,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "ringloom_common", .module = ringloom_common },
             .{ .name = "ringloom_aeron", .module = ringloom_aeron.module },
+            .{ .name = "ringloom_queue", .module = ringloom_queue },
         },
     });
 
@@ -52,6 +59,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "ringloom_common", .module = ringloom_common },
             .{ .name = "ringloom_aeron", .module = ringloom_aeron.module },
+            .{ .name = "ringloom_queue", .module = ringloom_queue },
         },
     });
 
@@ -85,6 +93,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "ringloom_common", .module = ringloom_common },
             .{ .name = "ringloom_aeron", .module = ringloom_aeron.module },
+            .{ .name = "ringloom_queue", .module = ringloom_queue },
         },
     });
 
@@ -139,6 +148,10 @@ pub fn build(b: *std.Build) void {
         .{ .source_name = "test_leader_service", .exe_name = "ringloom-test-leader-service" },
         .{ .source_name = "test_slow_consumer_service", .exe_name = "ringloom-test-slow-consumer-service" },
         .{ .source_name = "test_crashy_service", .exe_name = "ringloom-test-crashy-service" },
+        .{ .source_name = "test_topic_publisher_service", .exe_name = "ringloom-test-topic-publisher-service" },
+        .{ .source_name = "test_topic_subscriber_service", .exe_name = "ringloom-test-topic-subscriber-service" },
+        .{ .source_name = "test_topic_aeron_bench", .exe_name = "ringloom-test-topic-aeron-bench" },
+        .{ .source_name = "test_topic_sub_bench", .exe_name = "ringloom-test-topic-sub-bench" },
     };
 
     const test_bins_step = b.step("test-bins", "Build all test service binaries");
@@ -154,7 +167,9 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "ringloom_common", .module = ringloom_common },
+                    .{ .name = "ringloom_aeron", .module = ringloom_aeron.module },
                     .{ .name = "ringloom_service", .module = ringloom_service },
+                    .{ .name = "ringloom_queue", .module = ringloom_queue },
                     .{ .name = "ringloom_testing", .module = ringloom_testing },
                 },
             }),
@@ -183,6 +198,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "ringloom_common", .module = common_for_c_link_tests },
             .{ .name = "ringloom_aeron", .module = aeron_for_c_link_tests.module },
+            .{ .name = "ringloom_queue", .module = ringloom_queue },
         },
     });
     const service_for_c_link_tests = b.createModule(.{
@@ -191,6 +207,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "ringloom_common", .module = common_for_c_link_tests },
             .{ .name = "ringloom_aeron", .module = aeron_for_c_link_tests.module },
+            .{ .name = "ringloom_queue", .module = ringloom_queue },
         },
     });
 

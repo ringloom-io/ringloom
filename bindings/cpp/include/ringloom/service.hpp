@@ -33,6 +33,7 @@ enum class Status : int {
     peer_disconnected = RINGLOOM_ERR_PEER_DISCONNECTED,
     claim_not_active = RINGLOOM_ERR_CLAIM_NOT_ACTIVE,
     message_too_long = RINGLOOM_ERR_MESSAGE_TOO_LONG,
+    not_ready = RINGLOOM_NOT_READY,
     internal = RINGLOOM_ERR_INTERNAL,
 };
 
@@ -149,6 +150,28 @@ struct TargetService {
     bool is_leader = false;
 };
 
+// ── Persistent topics ────────────────────────────────────────────────
+
+enum class TopicStart : std::uint8_t {
+    earliest = RINGLOOM_TOPIC_START_EARLIEST,
+    latest = RINGLOOM_TOPIC_START_LATEST,
+};
+
+enum class TopicAckMode : std::uint8_t {
+    fire_and_forget = 0,
+    replicate_once = 1,
+};
+
+struct TopicConfig {
+    std::string roll_scheme;
+    std::uint32_t retention_cycles = 0;
+    std::uint32_t flags = 0;
+
+    static TopicConfig defaults() {
+        return TopicConfig{"FAST_DAILY", 0, 0};
+    }
+};
+
 enum class ServiceLifecycleEventType : int {
     available = RINGLOOM_SERVICE_AVAILABLE,
     unavailable = RINGLOOM_SERVICE_UNAVAILABLE,
@@ -231,6 +254,10 @@ private:
 
     ringloom_buffer_claim_t claim_{};
 };
+
+// Forward declarations for topic types used in Client methods.
+class TopicPublisher;
+class TopicSubscription;
 
 class Client {
 public:
@@ -316,6 +343,12 @@ public:
             static_cast<const std::uint8_t *>(payload),
             payload_len));
     }
+
+    /// Register a topic publication on the broker.
+    TopicPublisher registerTopicPublication(std::string_view topic_name, const TopicConfig &config = TopicConfig::defaults());
+
+    /// Subscribe to a persistent topic.
+    TopicSubscription subscribeTopic(std::string_view topic_name, TopicStart start = TopicStart::earliest);
 
     std::vector<TargetService> targetServices() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -462,6 +495,180 @@ private:
     LifecycleHandler lifecycle_handler_;
     std::exception_ptr lifecycle_exception_;
 };
+
+class TopicPublisher {
+public:
+    explicit TopicPublisher(ringloom_topic_publisher_t *handle)
+        : handle_(handle) {
+        if (handle_ == nullptr) {
+            throw std::invalid_argument("topic publisher handle must not be null");
+        }
+    }
+
+    ~TopicPublisher() { close(); }
+
+    TopicPublisher(const TopicPublisher &) = delete;
+    TopicPublisher &operator=(const TopicPublisher &) = delete;
+    TopicPublisher(TopicPublisher &&) = delete;
+    TopicPublisher &operator=(TopicPublisher &&) = delete;
+
+    /// Hot-path fire-and-forget publish (no ack tracking).
+    Status publish(const void *payload, std::size_t payload_len) noexcept {
+        std::uint64_t ignored = 0;
+        return publish(payload, payload_len, TopicAckMode::fire_and_forget, 0, &ignored);
+    }
+
+    /// Publish with string_view payload.
+    Status publish(std::string_view payload) noexcept {
+        return publish(payload.data(), payload.size());
+    }
+
+    /// Publish with explicit ack mode and correlation id.
+    /// out_index receives the assigned publish index (meaningful only for replicate_once).
+    Status publish(const void *payload, std::size_t payload_len,
+                   TopicAckMode ack_mode, std::int64_t correlation_id,
+                   std::uint64_t *out_index) noexcept {
+        return toStatus(ringloom_publish_to_topic(
+            handle_,
+            static_cast<const std::uint8_t *>(payload),
+            payload_len,
+            correlation_id,
+            static_cast<std::uint8_t>(ack_mode),
+            out_index));
+    }
+
+    /// Publish with string_view and ack mode.
+    Status publish(std::string_view payload, TopicAckMode ack_mode,
+                   std::int64_t correlation_id, std::uint64_t *out_index) noexcept {
+        return publish(payload.data(), payload.size(), ack_mode, correlation_id, out_index);
+    }
+
+    /// Ergonomic fire-and-forget publish that throws on non-OK.
+    void publishOrThrow(const void *payload, std::size_t payload_len) {
+        throwIfNotOk("ringloom_publish_to_topic", publish(payload, payload_len));
+    }
+
+    /// Non-blocking ack check for replicate_once publishes.
+    bool isAcked(std::uint64_t publish_index) const noexcept {
+        return ringloom_topic_is_acked(handle_, publish_index) != 0;
+    }
+
+    void close() noexcept {
+        if (handle_ == nullptr) {
+            return;
+        }
+        ringloom_unregister_topic_publication(handle_);
+        handle_ = nullptr;
+    }
+
+private:
+    ringloom_topic_publisher_t *handle_ = nullptr;
+};
+
+struct TopicPollResult {
+    const std::uint8_t *payload = nullptr;
+    std::size_t payload_length = 0;
+    std::int64_t index = 0;
+
+    /// Returns true when a message was available.
+    bool hasMessage() const noexcept {
+        return payload != nullptr && payload_length > 0;
+    }
+
+    /// Copy the borrowed payload into a vector.
+    std::vector<std::uint8_t> copyPayload() const {
+        if (!hasMessage()) {
+            return {};
+        }
+        return std::vector<std::uint8_t>(payload, payload + payload_length);
+    }
+};
+
+class TopicSubscription {
+public:
+    explicit TopicSubscription(ringloom_topic_subscription_t *handle)
+        : handle_(handle) {
+        if (handle_ == nullptr) {
+            throw std::invalid_argument("topic subscription handle must not be null");
+        }
+    }
+
+    ~TopicSubscription() { close(); }
+
+    TopicSubscription(const TopicSubscription &) = delete;
+    TopicSubscription &operator=(const TopicSubscription &) = delete;
+    TopicSubscription(TopicSubscription &&) = delete;
+    TopicSubscription &operator=(TopicSubscription &&) = delete;
+
+    /// Poll for the next message. Returns ok when a message was polled,
+    /// not_ready when the tailer is at the tip (not an error).
+    Status poll(TopicPollResult &out) noexcept {
+        const std::uint8_t *payload = nullptr;
+        std::size_t len = 0;
+        std::int64_t index = 0;
+        const Status status = toStatus(ringloom_topic_poll(
+            handle_, &payload, &len, &index));
+        if (status == Status::ok) {
+            out.payload = payload;
+            out.payload_length = len;
+            out.index = index;
+        } else {
+            out.payload = nullptr;
+            out.payload_length = 0;
+            out.index = 0;
+        }
+        return status;
+    }
+
+    /// Drive ringloom-queue maintenance. max_work_units <= 0 is a no-op.
+    Status maintenancePoll(std::int32_t max_work_units) noexcept {
+        return toStatus(ringloom_topic_subscription_maintenance_poll(handle_, max_work_units));
+    }
+
+    void close() noexcept {
+        if (handle_ == nullptr) {
+            return;
+        }
+        ringloom_unsubscribe_topic(handle_);
+        handle_ = nullptr;
+    }
+
+private:
+    ringloom_topic_subscription_t *handle_ = nullptr;
+};
+
+// ── Client topic methods (out-of-line, after Topic types are defined) ──
+
+inline TopicPublisher Client::registerTopicPublication(std::string_view topic_name, const TopicConfig &config) {
+    ringloom_topic_config_t native_cfg{};
+    native_cfg.size = sizeof(ringloom_topic_config_t);
+    const auto name_bytes = std::min(config.roll_scheme.size(), sizeof(native_cfg.roll_scheme));
+    std::memcpy(native_cfg.roll_scheme, config.roll_scheme.data(), name_bytes);
+    native_cfg.retention_cycles = config.retention_cycles;
+    native_cfg.flags = config.flags;
+
+    ringloom_topic_publisher_t *publisher = nullptr;
+    const Status status = toStatus(ringloom_register_topic_publication(
+        handle_,
+        &native_cfg,
+        topic_name.data(),
+        topic_name.size(),
+        &publisher));
+    throwIfNotOk("ringloom_register_topic_publication", status);
+    return TopicPublisher(publisher);
+}
+
+inline TopicSubscription Client::subscribeTopic(std::string_view topic_name, TopicStart start) {
+    ringloom_topic_subscription_t *subscription = nullptr;
+    const Status status = toStatus(ringloom_subscribe_topic(
+        handle_,
+        topic_name.data(),
+        topic_name.size(),
+        static_cast<ringloom_topic_start_t>(start),
+        &subscription));
+    throwIfNotOk("ringloom_subscribe_topic", status);
+    return TopicSubscription(subscription);
+}
 
 class MessageConsumer {
 public:

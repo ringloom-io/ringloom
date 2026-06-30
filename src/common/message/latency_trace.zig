@@ -30,6 +30,15 @@ pub const StageTrace = struct {
     receiver_ingress_ns: u64,
 };
 
+/// Topic-path stage trace: only `send_ts_ns` and `receiver_ingress_ns` are
+/// stamped (the leader appends inline in the receiver loop — there is no
+/// sender-loop dequeue stage). The third hop (subscriber receive) is computed
+/// by the subscriber as `now - send_ts`.
+pub const TopicStageTrace = struct {
+    send_ts_ns: u64,
+    receiver_ingress_ns: u64,
+};
+
 pub fn embedSend(payload: []u8, phase: u8, send_ts_ns: u64) void {
     if (payload.len < min_basic_len) return;
 
@@ -84,6 +93,24 @@ fn hasTraceMarker(payload: []const u8) bool {
         std.mem.readInt(u32, payload[magic_offset .. magic_offset + 4], .little) == magic;
 }
 
+/// Topic-path reader: decodes only the stages the topic leader stamps
+/// (send + receiver ingress). Returns null unless both are present and
+/// `receiver_ingress >= send`. The unused `sender_dequeue` slot is ignored.
+pub fn readTopicStageTrace(payload: []const u8) ?TopicStageTrace {
+    if (!hasTraceMarker(payload)) return null;
+
+    const send_ts_ns = std.mem.readInt(u64, payload[send_ts_offset .. send_ts_offset + 8], .little);
+    const receiver_ingress_ns = std.mem.readInt(u64, payload[receiver_ingress_offset .. receiver_ingress_offset + 8], .little);
+
+    if (send_ts_ns == 0 or receiver_ingress_ns == 0) return null;
+    if (receiver_ingress_ns < send_ts_ns) return null;
+
+    return .{
+        .send_ts_ns = send_ts_ns,
+        .receiver_ingress_ns = receiver_ingress_ns,
+    };
+}
+
 test "embedSend writes basic timestamp and phase" {
     var payload: [12]u8 = [_]u8{0xAA} ** 12;
 
@@ -116,4 +143,20 @@ test "stage trace is readable after sender and receiver stamps" {
     try std.testing.expectEqual(@as(u64, 100), trace.send_ts_ns);
     try std.testing.expectEqual(@as(u64, 250), trace.sender_dequeue_ns);
     try std.testing.expectEqual(@as(u64, 400), trace.receiver_ingress_ns);
+}
+
+test "topic stage trace reads with only send + receiver ingress stamped" {
+    var payload: [128]u8 = [_]u8{0xAA} ** 128;
+
+    embedSend(&payload, measured_phase, 1000);
+    // Topic leader stamps only receiver ingress (no sender-dequeue stage).
+    stampReceiverIngress(&payload, 5000);
+
+    // The full-trace reader rejects this (sender_dequeue == 0)...
+    try std.testing.expect(readStageTrace(&payload) == null);
+
+    // ...but the topic reader decodes the two stamped hops.
+    const trace = readTopicStageTrace(&payload).?;
+    try std.testing.expectEqual(@as(u64, 1000), trace.send_ts_ns);
+    try std.testing.expectEqual(@as(u64, 5000), trace.receiver_ingress_ns);
 }

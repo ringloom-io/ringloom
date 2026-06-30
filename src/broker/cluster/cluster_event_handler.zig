@@ -139,6 +139,13 @@ pub const ClusterEventHandler = struct {
                 .remaining_bytes_update,
                 .flow_control_snapshot,
                 .service_capacity_update,
+                .topic_created,
+                .topic_lookup,
+                .topic_info,
+                .topic_leader_changed,
+                .topic_applied_query,
+                .topic_applied_reply,
+                .topic_ack_feedback,
                 => {
                     // Handled by the control loop, not the event handler.
                 },

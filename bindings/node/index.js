@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-'use strict';
+"use strict";
 
-const native = require('./build/Release/ringloom_node.node');
+const native = require("./build/Release/ringloom_node.node");
 
 const RingloomStatus = Object.freeze({
   OK: 0,
@@ -15,6 +15,7 @@ const RingloomStatus = Object.freeze({
   PEER_DISCONNECTED: 8,
   CLAIM_NOT_ACTIVE: 9,
   MESSAGE_TOO_LONG: 10,
+  NOT_READY: 11,
   INTERNAL: 255,
   isOk(status) {
     return status === 0;
@@ -35,10 +36,27 @@ const AeronPublicationStatus = Object.freeze({
   },
 });
 
+const TopicStart = Object.freeze({
+  EARLIEST: 0,
+  LATEST: 1,
+});
+
+const TopicAckMode = Object.freeze({
+  FIRE_AND_FORGET: 0,
+  REPLICATE_ONCE: 1,
+});
+
 class RingloomError extends Error {
-  constructor(action, statusCode, statusName = native.statusName(statusCode), nativeMessage = native.lastErrorMessage()) {
-    super(`${action} failed with ${statusName} (${statusCode}): ${nativeMessage}`);
-    this.name = 'RingloomError';
+  constructor(
+    action,
+    statusCode,
+    statusName = native.statusName(statusCode),
+    nativeMessage = native.lastErrorMessage(),
+  ) {
+    super(
+      `${action} failed with ${statusName} (${statusCode}): ${nativeMessage}`,
+    );
+    this.name = "RingloomError";
     this.statusCode = statusCode;
     this.statusName = statusName;
     this.nativeMessage = nativeMessage;
@@ -55,11 +73,15 @@ function throwForStatus(action, status) {
 module.exports = {
   RingloomStatus,
   AeronPublicationStatus,
+  TopicStart,
+  TopicAckMode,
   RingloomError,
   throwForStatus,
   RingloomService: native.RingloomService,
   RingloomClient: native.RingloomClient,
   MessageConsumer: native.MessageConsumer,
   BufferClaim: native.BufferClaim,
+  TopicPublisher: native.TopicPublisher,
+  TopicSubscription: native.TopicSubscription,
   native,
 };

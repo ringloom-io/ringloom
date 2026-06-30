@@ -155,6 +155,12 @@ pub const ConfigGen = struct {
         if (spec.benchmark_latency_tracing_enabled) {
             try writer.writer.writeAll("broker.benchmark.latency.tracing.enabled=true\n");
         }
+        if (spec.topics_enabled) {
+            try writer.writer.writeAll("broker.topics.enabled=true\n");
+            if (spec.topics_path) |tp| {
+                try writer.writer.print("broker.topics.path={s}\n", .{tp});
+            }
+        }
 
         return self.allocator.dupe(u8, writer.written());
     }

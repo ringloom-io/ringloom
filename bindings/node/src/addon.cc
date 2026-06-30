@@ -19,6 +19,8 @@ struct TargetInfo {
   bool is_leader;
 };
 
+constexpr size_t kTopicConfigSize = sizeof(ringloom_topic_config_t);
+
 std::string StatusName(int status) {
   const char* value = ringloom_status_string(static_cast<ringloom_status_t>(status));
   return value == nullptr ? "unknown" : value;
@@ -164,6 +166,192 @@ class BufferClaimWrap;
 class ClientWrap;
 class MessageConsumerWrap;
 class ServiceWrap;
+class TopicPublisherWrap;
+class TopicSubscriptionWrap;
+
+class TopicPublisherWrap final : public Napi::ObjectWrap<TopicPublisherWrap> {
+ public:
+  static Napi::FunctionReference constructor;
+
+  static void Init(Napi::Env env, Napi::Object exports) {
+    Napi::Function func = DefineClass(env, "TopicPublisher", {
+      InstanceMethod("publish", &TopicPublisherWrap::Publish),
+      InstanceMethod("isAcked", &TopicPublisherWrap::IsAcked),
+      InstanceMethod("close", &TopicPublisherWrap::Close),
+    });
+    constructor = Napi::Persistent(func);
+    constructor.SuppressDestruct();
+    exports.Set("TopicPublisher", func);
+  }
+
+  explicit TopicPublisherWrap(const Napi::CallbackInfo& info)
+      : Napi::ObjectWrap<TopicPublisherWrap>(info), publisher_(nullptr), closed_(false) {
+    if (info.Length() < 1 || !info[0].IsExternal()) {
+      Napi::TypeError::New(info.Env(), "TopicPublisher instances are created by RingloomClient")
+          .ThrowAsJavaScriptException();
+      return;
+    }
+    publisher_ = info[0].As<Napi::External<ringloom_topic_publisher_t>>().Data();
+  }
+
+  ~TopicPublisherWrap() override { CloseNative(); }
+
+  ringloom_topic_publisher_t* Publisher() const { return publisher_; }
+  bool IsClosed() const { return closed_; }
+
+ private:
+  void CloseNative() {
+    if (closed_) return;
+    closed_ = true;
+    if (publisher_ != nullptr) {
+      ringloom_unregister_topic_publication(publisher_);
+      publisher_ = nullptr;
+    }
+  }
+
+  Napi::Value Publish(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "TopicPublisher")) {
+      return env.Undefined();
+    }
+    PayloadView payload{};
+    if (info.Length() == 0 || !ReadPayload(env, info[0], &payload)) {
+      return env.Undefined();
+    }
+    uint8_t ack_mode = 0;
+    int64_t correlation_id = 0;
+    uint64_t out_index = 0;
+    uint64_t* out_index_ptr = nullptr;
+
+    if (info.Length() >= 2 && info[1].IsNumber()) {
+      ack_mode = static_cast<uint8_t>(info[1].As<Napi::Number>().Uint32Value());
+    }
+    if (info.Length() >= 3 && info[2].IsNumber()) {
+      correlation_id = static_cast<int64_t>(info[2].As<Napi::Number>().Int64Value());
+    }
+    if (info.Length() >= 4 && info[3].IsTypedArray()) {
+      Napi::TypedArray arr = info[3].As<Napi::TypedArray>();
+      if (arr.ByteLength() >= 8) {
+        out_index_ptr = &out_index;
+      }
+    }
+
+    const ringloom_status_t status = ringloom_publish_to_topic(
+        publisher_, payload.data, payload.length, correlation_id, ack_mode, out_index_ptr);
+
+    if (out_index_ptr != nullptr && info.Length() >= 4) {
+      Napi::TypedArray arr = info[3].As<Napi::TypedArray>();
+      Napi::ArrayBuffer buf = arr.ArrayBuffer();
+      auto* view = static_cast<uint8_t*>(buf.Data()) + arr.ByteOffset();
+      std::memcpy(view, &out_index, sizeof(out_index));
+    }
+
+    return Napi::Number::New(env, static_cast<int>(status));
+  }
+
+  Napi::Value IsAcked(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "TopicPublisher")) {
+      return env.Undefined();
+    }
+    if (info.Length() < 1 || !info[0].IsNumber()) {
+      Napi::TypeError::New(env, "isAcked(publishIndex) requires a number").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    const uint64_t publish_index = static_cast<uint64_t>(info[0].As<Napi::Number>().Int64Value());
+    return Napi::Boolean::New(env, ringloom_topic_is_acked(publisher_, publish_index) != 0);
+  }
+
+  Napi::Value Close(const Napi::CallbackInfo& info) {
+    CloseNative();
+    return info.Env().Undefined();
+  }
+
+  ringloom_topic_publisher_t* publisher_;
+  bool closed_;
+};
+
+class TopicSubscriptionWrap final : public Napi::ObjectWrap<TopicSubscriptionWrap> {
+ public:
+  static Napi::FunctionReference constructor;
+
+  static void Init(Napi::Env env, Napi::Object exports) {
+    Napi::Function func = DefineClass(env, "TopicSubscription", {
+      InstanceMethod("poll", &TopicSubscriptionWrap::Poll),
+      InstanceMethod("maintenancePoll", &TopicSubscriptionWrap::MaintenancePoll),
+      InstanceMethod("close", &TopicSubscriptionWrap::Close),
+    });
+    constructor = Napi::Persistent(func);
+    constructor.SuppressDestruct();
+    exports.Set("TopicSubscription", func);
+  }
+
+  explicit TopicSubscriptionWrap(const Napi::CallbackInfo& info)
+      : Napi::ObjectWrap<TopicSubscriptionWrap>(info), subscription_(nullptr), closed_(false) {
+    if (info.Length() < 1 || !info[0].IsExternal()) {
+      Napi::TypeError::New(info.Env(), "TopicSubscription instances are created by RingloomClient")
+          .ThrowAsJavaScriptException();
+      return;
+    }
+    subscription_ = info[0].As<Napi::External<ringloom_topic_subscription_t>>().Data();
+  }
+
+  ~TopicSubscriptionWrap() override { CloseNative(); }
+
+ private:
+  void CloseNative() {
+    if (closed_) return;
+    closed_ = true;
+    if (subscription_ != nullptr) {
+      ringloom_unsubscribe_topic(subscription_);
+      subscription_ = nullptr;
+    }
+  }
+
+  Napi::Value Poll(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "TopicSubscription")) {
+      return env.Undefined();
+    }
+    const uint8_t* payload = nullptr;
+    size_t len = 0;
+    int64_t index = 0;
+    const ringloom_status_t status = ringloom_topic_poll(
+        subscription_, &payload, &len, &index);
+
+    Napi::Object result = Napi::Object::New(env);
+    result.Set("status", Napi::Number::New(env, static_cast<int>(status)));
+    if (status == RINGLOOM_OK && payload != nullptr && len > 0) {
+      result.Set("payload", Napi::Buffer<uint8_t>::Copy(env, payload, len));
+    } else {
+      result.Set("payload", env.Null());
+    }
+    result.Set("index", Napi::BigInt::New(env, index));
+    return result;
+  }
+
+  Napi::Value MaintenancePoll(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "TopicSubscription")) {
+      return env.Undefined();
+    }
+    int max_work_units = 0;
+    if (info.Length() >= 1 && info[0].IsNumber()) {
+      max_work_units = info[0].As<Napi::Number>().Int32Value();
+    }
+    const ringloom_status_t status =
+        ringloom_topic_subscription_maintenance_poll(subscription_, max_work_units);
+    return Napi::Number::New(env, static_cast<int>(status));
+  }
+
+  Napi::Value Close(const Napi::CallbackInfo& info) {
+    CloseNative();
+    return info.Env().Undefined();
+  }
+
+  ringloom_topic_subscription_t* subscription_;
+  bool closed_;
+};
 
 class BufferClaimWrap final : public Napi::ObjectWrap<BufferClaimWrap> {
  public:
@@ -297,6 +485,8 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
       InstanceMethod("onLifecycle", &ClientWrap::OnLifecycle),
       InstanceMethod("clearLifecycleHandler", &ClientWrap::ClearLifecycleHandler),
       InstanceMethod("close", &ClientWrap::Close),
+      InstanceMethod("registerTopicPublication", &ClientWrap::RegisterTopicPublication),
+      InstanceMethod("subscribeTopic", &ClientWrap::SubscribeTopic),
     });
     constructor = Napi::Persistent(func);
     constructor.SuppressDestruct();
@@ -603,6 +793,78 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
     return env.Undefined();
   }
 
+  Napi::Value RegisterTopicPublication(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "RingloomClient")) {
+      return env.Undefined();
+    }
+    if (info.Length() < 1 || !info[0].IsString()) {
+      Napi::TypeError::New(env, "registerTopicPublication(topicName [, config]) requires a topic name")
+          .ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    const std::string topic_name = info[0].As<Napi::String>().Utf8Value();
+    if (topic_name.empty() || topic_name.size() > 16) {
+      Napi::TypeError::New(env, "topicName must be 1..16 UTF-8 bytes").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+
+    ringloom_topic_config_t native_cfg{};
+    native_cfg.size = sizeof(ringloom_topic_config_t);
+    if (info.Length() >= 2 && info[1].IsObject()) {
+      Napi::Object cfg = info[1].As<Napi::Object>();
+      std::string roll_scheme = OptionalString(cfg, "rollScheme", "FAST_DAILY");
+      const auto copy_len = std::min(roll_scheme.size(), sizeof(native_cfg.roll_scheme));
+      std::memcpy(native_cfg.roll_scheme, roll_scheme.data(), copy_len);
+      native_cfg.retention_cycles = OptionalUint32(cfg, "retentionCycles", 0);
+      native_cfg.flags = OptionalUint32(cfg, "flags", 0);
+    }
+
+    ringloom_topic_publisher_t* publisher = nullptr;
+    const ringloom_status_t status = ringloom_register_topic_publication(
+        client_, &native_cfg, topic_name.data(), topic_name.size(), &publisher);
+    if (ThrowIfNonOk(env, "ringloom_register_topic_publication", status)) {
+      return env.Undefined();
+    }
+
+    Napi::Object object = TopicPublisherWrap::constructor.New(
+        {Napi::External<ringloom_topic_publisher_t>::New(env, publisher)});
+    return object;
+  }
+
+  Napi::Value SubscribeTopic(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!RequireOpen(env, closed_, "RingloomClient")) {
+      return env.Undefined();
+    }
+    if (info.Length() < 1 || !info[0].IsString()) {
+      Napi::TypeError::New(env, "subscribeTopic(topicName [, start]) requires a topic name")
+          .ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    const std::string topic_name = info[0].As<Napi::String>().Utf8Value();
+    if (topic_name.empty() || topic_name.size() > 16) {
+      Napi::TypeError::New(env, "topicName must be 1..16 UTF-8 bytes").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+
+    ringloom_topic_start_t start = RINGLOOM_TOPIC_START_EARLIEST;
+    if (info.Length() >= 2 && info[1].IsNumber()) {
+      start = static_cast<ringloom_topic_start_t>(info[1].As<Napi::Number>().Int32Value());
+    }
+
+    ringloom_topic_subscription_t* subscription = nullptr;
+    const ringloom_status_t status = ringloom_subscribe_topic(
+        client_, topic_name.data(), topic_name.size(), start, &subscription);
+    if (ThrowIfNonOk(env, "ringloom_subscribe_topic", status)) {
+      return env.Undefined();
+    }
+
+    Napi::Object object = TopicSubscriptionWrap::constructor.New(
+        {Napi::External<ringloom_topic_subscription_t>::New(env, subscription)});
+    return object;
+  }
+
   Napi::Value Close(const Napi::CallbackInfo& info) {
     CloseNative();
     return info.Env().Undefined();
@@ -610,6 +872,8 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
 };
 
 Napi::FunctionReference ClientWrap::constructor;
+Napi::FunctionReference TopicPublisherWrap::constructor;
+Napi::FunctionReference TopicSubscriptionWrap::constructor;
 
 class MessageConsumerWrap final : public Napi::ObjectWrap<MessageConsumerWrap> {
  public:
@@ -996,6 +1260,8 @@ Napi::Value AeronPublicationStatusNameValue(const Napi::CallbackInfo& info) {
 Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
   BufferClaimWrap::Init(env, exports);
   ClientWrap::Init(env, exports);
+  TopicPublisherWrap::Init(env, exports);
+  TopicSubscriptionWrap::Init(env, exports);
   MessageConsumerWrap::Init(env, exports);
   ServiceWrap::Init(env, exports);
   exports.Set("abiVersion", Napi::Function::New(env, AbiVersion));

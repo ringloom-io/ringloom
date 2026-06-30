@@ -109,6 +109,16 @@ pub fn freeBrokerConfig(allocator: std.mem.Allocator, config: *BrokerConfig) voi
         allocator.free(config.aeron_directory);
     }
 
+    // Topics: free duped strings (defaults are static literals / empty).
+    if (config.topics.path.len > 0) {
+        allocator.free(config.topics.path);
+    }
+    if (config.topics.default_roll_scheme.len > 0 and
+        !std.mem.eql(u8, config.topics.default_roll_scheme, "FAST_DAILY"))
+    {
+        allocator.free(config.topics.default_roll_scheme);
+    }
+
     if (config.peer_endpoints.len > 0) {
         for (config.peer_endpoints) |peer| {
             if (peer.host.len > 0) {

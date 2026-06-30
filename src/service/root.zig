@@ -57,6 +57,16 @@ pub const ipc = struct {
 pub const IpcProducer = ipc.IpcProducer;
 pub const IpcConsumer = ipc.IpcConsumer;
 
+// ── Persistent topics (producer/subscriber client API) ─────────────
+
+pub const topics = struct {
+    pub const topic_publisher = @import("topics/topic_publisher.zig");
+    pub const TopicPublisher = topic_publisher.TopicPublisher;
+    pub const topic_subscription = @import("topics/topic_subscription.zig");
+    pub const TopicSubscription = topic_subscription.TopicSubscription;
+    pub const topic_types = @import("topics/topic_types.zig");
+};
+
 // ── Service configuration ────────────────────────────────────────────
 
 pub const config = struct {
@@ -90,6 +100,11 @@ comptime {
 
     // Configuration
     _ = @import("config/service_config.zig");
+
+    // Topics
+    _ = @import("topics/topic_types.zig");
+    _ = @import("topics/topic_publisher.zig");
+    _ = @import("topics/topic_subscription.zig");
 }
 
 test "service module exports canonical service APIs" {

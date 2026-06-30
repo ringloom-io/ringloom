@@ -21,8 +21,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * control plane.</p>
  */
 public final class RingloomClient implements AutoCloseable {
+
     private static final FunctionDescriptor LIFECYCLE_HANDLER_DESCRIPTOR =
-        FunctionDescriptor.ofVoid(RingloomNative.ADDRESS, RingloomNative.ADDRESS);
+        FunctionDescriptor.ofVoid(
+            RingloomNative.ADDRESS,
+            RingloomNative.ADDRESS
+        );
 
     private final MemorySegment nativeHandle;
     private final MemorySegment lifecycleUpcallStub;
@@ -43,7 +47,11 @@ public final class RingloomClient implements AutoCloseable {
                 .findVirtual(
                     RingloomClient.class,
                     "dispatchLifecycle",
-                    MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class)
+                    MethodType.methodType(
+                        void.class,
+                        MemorySegment.class,
+                        MemorySegment.class
+                    )
                 )
                 .bindTo(this);
             this.lifecycleUpcallStub = RingloomNative.LINKER.upcallStub(
@@ -54,7 +62,10 @@ public final class RingloomClient implements AutoCloseable {
         } catch (NoSuchMethodException | IllegalAccessException ex) {
             callbackArena.close();
             RingloomNative.destroyClient(nativeHandle);
-            throw new IllegalStateException("Failed to create RingLoom lifecycle callback", ex);
+            throw new IllegalStateException(
+                "Failed to create RingLoom lifecycle callback",
+                ex
+            );
         }
 
         int status = RingloomNative.clientSetLifecycleHandler(
@@ -63,10 +74,17 @@ public final class RingloomClient implements AutoCloseable {
             MemorySegment.NULL
         );
         try {
-            RingloomNative.throwForStatus("ringloom_client_set_lifecycle_handler", status);
+            RingloomNative.throwForStatus(
+                "ringloom_client_set_lifecycle_handler",
+                status
+            );
             targetServices = loadTargetServicesSnapshot();
         } catch (RuntimeException | Error ex) {
-            RingloomNative.clientSetLifecycleHandler(nativeHandle, MemorySegment.NULL, MemorySegment.NULL);
+            RingloomNative.clientSetLifecycleHandler(
+                nativeHandle,
+                MemorySegment.NULL,
+                MemorySegment.NULL
+            );
             RingloomNative.destroyClient(nativeHandle);
             callbackArena.close();
             throw ex;
@@ -94,12 +112,22 @@ public final class RingloomClient implements AutoCloseable {
     public int tryClaim(int templateId, long payloadLength, BufferClaim claim) {
         ensureOpen();
         Objects.requireNonNull(claim, "claim");
-        int status = RingloomNative.clientTryClaim(nativeHandle, narrowTemplateId(templateId), payloadLength, claim.nativeStruct());
+        int status = RingloomNative.clientTryClaim(
+            nativeHandle,
+            narrowTemplateId(templateId),
+            payloadLength,
+            claim.nativeStruct()
+        );
         claim.refreshFromNative();
         return status;
     }
 
-    public int tryClaimRequest(int templateId, long correlationId, long payloadLength, BufferClaim claim) {
+    public int tryClaimRequest(
+        int templateId,
+        long correlationId,
+        long payloadLength,
+        BufferClaim claim
+    ) {
         ensureOpen();
         Objects.requireNonNull(claim, "claim");
         int status = RingloomNative.clientTryClaimRequest(
@@ -157,7 +185,11 @@ public final class RingloomClient implements AutoCloseable {
         return status;
     }
 
-    public int tryClaimToLeader(int templateId, long payloadLength, BufferClaim claim) {
+    public int tryClaimToLeader(
+        int templateId,
+        long payloadLength,
+        BufferClaim claim
+    ) {
         ensureOpen();
         Objects.requireNonNull(claim, "claim");
         int status = RingloomNative.clientTryClaimToLeader(
@@ -170,7 +202,12 @@ public final class RingloomClient implements AutoCloseable {
         return status;
     }
 
-    public int tryClaimToLeaderRequest(int templateId, long correlationId, long payloadLength, BufferClaim claim) {
+    public int tryClaimToLeaderRequest(
+        int templateId,
+        long correlationId,
+        long payloadLength,
+        BufferClaim claim
+    ) {
         ensureOpen();
         Objects.requireNonNull(claim, "claim");
         int status = RingloomNative.clientTryClaimToLeaderRequest(
@@ -202,9 +239,17 @@ public final class RingloomClient implements AutoCloseable {
         ensureOpen();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outStatus = arena.allocate(ValueLayout.JAVA_INT);
-            int status = RingloomNative.clientLastAeronSendStatus(nativeHandle, outStatus);
-            RingloomNative.throwForStatus("ringloom_client_last_aeron_send_status", status);
-            return AeronPublicationStatus.fromNative(outStatus.get(ValueLayout.JAVA_INT, 0));
+            int status = RingloomNative.clientLastAeronSendStatus(
+                nativeHandle,
+                outStatus
+            );
+            RingloomNative.throwForStatus(
+                "ringloom_client_last_aeron_send_status",
+                status
+            );
+            return AeronPublicationStatus.fromNative(
+                outStatus.get(ValueLayout.JAVA_INT, 0)
+            );
         }
     }
 
@@ -239,7 +284,11 @@ public final class RingloomClient implements AutoCloseable {
     public int send(MemorySegment payload) {
         ensureOpen();
         MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
-        return RingloomNative.clientSend(nativeHandle, RingloomNative.payloadPointer(segment), segment.byteSize());
+        return RingloomNative.clientSend(
+            nativeHandle,
+            RingloomNative.payloadPointer(segment),
+            segment.byteSize()
+        );
     }
 
     public int sendMessage(int templateId, MemorySegment payload) {
@@ -253,7 +302,11 @@ public final class RingloomClient implements AutoCloseable {
         );
     }
 
-    public int sendMessageRequest(int templateId, long correlationId, MemorySegment payload) {
+    public int sendMessageRequest(
+        int templateId,
+        long correlationId,
+        MemorySegment payload
+    ) {
         ensureOpen();
         MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
         return RingloomNative.clientSendMessageRequest(
@@ -273,7 +326,11 @@ public final class RingloomClient implements AutoCloseable {
      * @param payload borrowed payload segment, or {@code null} for an empty payload
      * @return a {@link RingloomStatus} integer
      */
-    public int sendTo(short targetNodeId, int targetServiceId, MemorySegment payload) {
+    public int sendTo(
+        short targetNodeId,
+        int targetServiceId,
+        MemorySegment payload
+    ) {
         ensureOpen();
         MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
         return RingloomNative.clientSendTo(
@@ -285,7 +342,12 @@ public final class RingloomClient implements AutoCloseable {
         );
     }
 
-    public int sendToMessage(short targetNodeId, int targetServiceId, int templateId, MemorySegment payload) {
+    public int sendToMessage(
+        short targetNodeId,
+        int targetServiceId,
+        int templateId,
+        MemorySegment payload
+    ) {
         ensureOpen();
         MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
         return RingloomNative.clientSendToMessage(
@@ -327,7 +389,11 @@ public final class RingloomClient implements AutoCloseable {
     public int sendToLeader(MemorySegment payload) {
         ensureOpen();
         MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
-        return RingloomNative.clientSendToLeader(nativeHandle, RingloomNative.payloadPointer(segment), segment.byteSize());
+        return RingloomNative.clientSendToLeader(
+            nativeHandle,
+            RingloomNative.payloadPointer(segment),
+            segment.byteSize()
+        );
     }
 
     public int sendToLeaderMessage(int templateId, MemorySegment payload) {
@@ -341,7 +407,11 @@ public final class RingloomClient implements AutoCloseable {
         );
     }
 
-    public int sendToLeaderMessageRequest(int templateId, long correlationId, MemorySegment payload) {
+    public int sendToLeaderMessageRequest(
+        int templateId,
+        long correlationId,
+        MemorySegment payload
+    ) {
         ensureOpen();
         MemorySegment segment = payload == null ? MemorySegment.NULL : payload;
         return RingloomNative.clientSendToLeaderMessageRequest(
@@ -361,7 +431,10 @@ public final class RingloomClient implements AutoCloseable {
     public void sendOrThrow(byte[] payload) {
         Objects.requireNonNull(payload, "payload");
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment segment = arena.allocateFrom(ValueLayout.JAVA_BYTE, payload);
+            MemorySegment segment = arena.allocateFrom(
+                ValueLayout.JAVA_BYTE,
+                payload
+            );
             sendOrThrow(segment);
         }
     }
@@ -384,9 +457,161 @@ public final class RingloomClient implements AutoCloseable {
     public void sendMessageOrThrow(int templateId, byte[] payload) {
         Objects.requireNonNull(payload, "payload");
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment segment = arena.allocateFrom(ValueLayout.JAVA_BYTE, payload);
+            MemorySegment segment = arena.allocateFrom(
+                ValueLayout.JAVA_BYTE,
+                payload
+            );
             sendMessageOrThrow(templateId, segment);
         }
+    }
+
+    // ── Persistent topics ────────────────────────────────────────────────
+
+    /**
+     * Registers a topic publication on the broker and returns a publisher handle.
+     *
+     * <p>This sends a {@code RegisterTopicPublicationMsg} over the control ring buffer
+     * and awaits a {@code TopicPublicationResponseMsg}. It is a startup-only path.</p>
+     *
+     * @param topicName topic name (UTF-8, 1..16 bytes)
+     * @param config    topic configuration
+     * @return publisher handle
+     * @throws IllegalStateException if the native library does not support topics
+     * @throws RingloomException    for {@code config_mismatch}, {@code collision}, {@code disabled}
+     */
+    public TopicPublisher registerTopicPublication(
+        String topicName,
+        TopicConfig config
+    ) {
+        ensureOpen();
+        if (!RingloomNative.TOPIC_SYMBOLS_PRESENT) {
+            throw new IllegalStateException(
+                "native library does not support topics; " +
+                    "rebuild libringloom_service with topics support"
+            );
+        }
+        Objects.requireNonNull(topicName, "topicName");
+        Objects.requireNonNull(config, "config");
+        byte[] nameBytes = topicName.getBytes(StandardCharsets.UTF_8);
+        if (nameBytes.length == 0 || nameBytes.length > 16) {
+            throw new IllegalArgumentException(
+                "topicName must be 1..16 UTF-8 bytes"
+            );
+        }
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment nativeName = arena.allocateFrom(
+                ValueLayout.JAVA_BYTE,
+                nameBytes
+            );
+            MemorySegment nativeCfg = allocateTopicConfig(arena, config);
+            MemorySegment outPublisher = arena.allocate(RingloomNative.ADDRESS);
+            outPublisher.set(RingloomNative.ADDRESS, 0, MemorySegment.NULL);
+
+            int status = RingloomNative.topicRegisterPublication(
+                nativeHandle,
+                nativeCfg,
+                nativeName,
+                nameBytes.length,
+                outPublisher
+            );
+            RingloomNative.throwForStatus(
+                "ringloom_register_topic_publication",
+                status
+            );
+            return new TopicPublisher(
+                outPublisher.get(RingloomNative.ADDRESS, 0),
+                topicName
+            );
+        }
+    }
+
+    /**
+     * Subscribes to a persistent topic and returns a subscription handle.
+     *
+     * <p>This sends a {@code SubscribeTopicMsg} and awaits a {@code TopicSubscriptionResponseMsg}.
+     * It is a startup-only path.</p>
+     *
+     * @param topicName topic name (UTF-8, 1..16 bytes)
+     * @param start     starting position for the subscription
+     * @return subscription handle
+     * @throws IllegalStateException if the native library does not support topics
+     * @throws RingloomException    for {@code unknown_topic}, {@code disabled}
+     */
+    public TopicSubscription subscribeTopic(
+        String topicName,
+        TopicStart start
+    ) {
+        ensureOpen();
+        if (!RingloomNative.TOPIC_SYMBOLS_PRESENT) {
+            throw new IllegalStateException(
+                "native library does not support topics; " +
+                    "rebuild libringloom_service with topics support"
+            );
+        }
+        Objects.requireNonNull(topicName, "topicName");
+        Objects.requireNonNull(start, "start");
+        byte[] nameBytes = topicName.getBytes(StandardCharsets.UTF_8);
+        if (nameBytes.length == 0 || nameBytes.length > 16) {
+            throw new IllegalArgumentException(
+                "topicName must be 1..16 UTF-8 bytes"
+            );
+        }
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment nativeName = arena.allocateFrom(
+                ValueLayout.JAVA_BYTE,
+                nameBytes
+            );
+            MemorySegment outSubscription = arena.allocate(
+                RingloomNative.ADDRESS
+            );
+            outSubscription.set(RingloomNative.ADDRESS, 0, MemorySegment.NULL);
+
+            int status = RingloomNative.topicSubscribe(
+                nativeHandle,
+                nativeName,
+                nameBytes.length,
+                start.nativeValue(),
+                outSubscription
+            );
+            RingloomNative.throwForStatus("ringloom_subscribe_topic", status);
+            return new TopicSubscription(
+                outSubscription.get(RingloomNative.ADDRESS, 0),
+                topicName
+            );
+        }
+    }
+
+    private static MemorySegment allocateTopicConfig(
+        Arena arena,
+        TopicConfig config
+    ) {
+        MemorySegment cfg = arena.allocate(RingloomNative.TOPIC_CONFIG_SIZE, 8);
+        byte[] rollBytes = config.rollScheme().getBytes(StandardCharsets.UTF_8);
+        cfg.set(
+            ValueLayout.JAVA_INT,
+            RingloomNative.TOPIC_CONFIG_SIZE_OFFSET,
+            (int) RingloomNative.TOPIC_CONFIG_SIZE
+        );
+        for (int i = 0; i < rollBytes.length && i < 16; i++) {
+            cfg.set(
+                ValueLayout.JAVA_BYTE,
+                RingloomNative.TOPIC_CONFIG_ROLL_SCHEME_OFFSET + i,
+                rollBytes[i]
+            );
+        }
+        cfg.set(
+            ValueLayout.JAVA_INT,
+            RingloomNative.TOPIC_CONFIG_RETENTION_OFFSET,
+            config.retentionCycles()
+        );
+        cfg.set(
+            ValueLayout.JAVA_INT,
+            RingloomNative.TOPIC_CONFIG_FLAGS_OFFSET,
+            config.flags()
+        );
+        return cfg;
     }
 
     @Override
@@ -396,7 +621,11 @@ public final class RingloomClient implements AutoCloseable {
         }
         lifecycleHandler = null;
         targetServices = List.of();
-        RingloomNative.clientSetLifecycleHandler(nativeHandle, MemorySegment.NULL, MemorySegment.NULL);
+        RingloomNative.clientSetLifecycleHandler(
+            nativeHandle,
+            MemorySegment.NULL,
+            MemorySegment.NULL
+        );
         RingloomNative.destroyClient(nativeHandle);
         callbackArena.close();
     }
@@ -406,53 +635,104 @@ public final class RingloomClient implements AutoCloseable {
         while (true) {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment outCount = arena.allocate(ValueLayout.JAVA_LONG);
-                MemorySegment nativeTargets = capacity == 0
-                    ? MemorySegment.NULL
-                    : arena.allocate(RingloomNative.CLIENT_TARGET_SIZE * capacity, 8);
+                MemorySegment nativeTargets =
+                    capacity == 0
+                        ? MemorySegment.NULL
+                        : arena.allocate(
+                              RingloomNative.CLIENT_TARGET_SIZE * capacity,
+                              8
+                          );
 
-                int status = RingloomNative.clientListTargets(nativeHandle, nativeTargets, capacity, outCount);
-                RingloomNative.throwForStatus("ringloom_client_list_targets", status);
+                int status = RingloomNative.clientListTargets(
+                    nativeHandle,
+                    nativeTargets,
+                    capacity,
+                    outCount
+                );
+                RingloomNative.throwForStatus(
+                    "ringloom_client_list_targets",
+                    status
+                );
 
                 long actualCount = outCount.get(ValueLayout.JAVA_LONG, 0);
                 if (actualCount == 0) {
                     return List.of();
                 }
                 if (actualCount < 0 || actualCount > Integer.MAX_VALUE) {
-                    throw new IllegalStateException("target count is out of range: " + actualCount);
+                    throw new IllegalStateException(
+                        "target count is out of range: " + actualCount
+                    );
                 }
                 if (actualCount > capacity) {
                     capacity = actualCount;
                     continue;
                 }
 
-                ArrayList<TargetService> targets = new ArrayList<>((int) actualCount);
+                ArrayList<TargetService> targets = new ArrayList<>(
+                    (int) actualCount
+                );
                 for (long i = 0; i < actualCount; i++) {
                     long offset = i * RingloomNative.CLIENT_TARGET_SIZE;
-                    targets.add(new TargetService(
-                        nativeTargets.get(ValueLayout.JAVA_INT, offset + RingloomNative.CLIENT_TARGET_SERVICE_ID_OFFSET),
-                        nativeTargets.get(ValueLayout.JAVA_SHORT, offset + RingloomNative.CLIENT_TARGET_NODE_ID_OFFSET),
-                        nativeTargets.get(ValueLayout.JAVA_BYTE, offset + RingloomNative.CLIENT_TARGET_IS_LEADER_OFFSET) != 0
-                    ));
+                    targets.add(
+                        new TargetService(
+                            nativeTargets.get(
+                                ValueLayout.JAVA_INT,
+                                offset +
+                                    RingloomNative.CLIENT_TARGET_SERVICE_ID_OFFSET
+                            ),
+                            nativeTargets.get(
+                                ValueLayout.JAVA_SHORT,
+                                offset +
+                                    RingloomNative.CLIENT_TARGET_NODE_ID_OFFSET
+                            ),
+                            nativeTargets.get(
+                                ValueLayout.JAVA_BYTE,
+                                offset +
+                                    RingloomNative.CLIENT_TARGET_IS_LEADER_OFFSET
+                            ) != 0
+                        )
+                    );
                 }
                 return List.copyOf(targets);
             }
         }
     }
 
-    private void dispatchLifecycle(MemorySegment userData, MemorySegment nativeEvent) {
+    private void dispatchLifecycle(
+        MemorySegment userData,
+        MemorySegment nativeEvent
+    ) {
         @SuppressWarnings("unused")
         MemorySegment ignored = userData;
 
-        MemorySegment event = nativeEvent.reinterpret(RingloomNative.LIFECYCLE_EVENT_SIZE);
-        int type = event.get(ValueLayout.JAVA_INT, RingloomNative.LIFECYCLE_EVENT_TYPE_OFFSET);
-        int serviceId = event.get(ValueLayout.JAVA_INT, RingloomNative.LIFECYCLE_EVENT_SERVICE_ID_OFFSET);
-        short nodeId = event.get(ValueLayout.JAVA_SHORT, RingloomNative.LIFECYCLE_EVENT_NODE_ID_OFFSET);
-        boolean leader = event.get(ValueLayout.JAVA_BYTE, RingloomNative.LIFECYCLE_EVENT_IS_LEADER_OFFSET) != 0;
+        MemorySegment event = nativeEvent.reinterpret(
+            RingloomNative.LIFECYCLE_EVENT_SIZE
+        );
+        int type = event.get(
+            ValueLayout.JAVA_INT,
+            RingloomNative.LIFECYCLE_EVENT_TYPE_OFFSET
+        );
+        int serviceId = event.get(
+            ValueLayout.JAVA_INT,
+            RingloomNative.LIFECYCLE_EVENT_SERVICE_ID_OFFSET
+        );
+        short nodeId = event.get(
+            ValueLayout.JAVA_SHORT,
+            RingloomNative.LIFECYCLE_EVENT_NODE_ID_OFFSET
+        );
+        boolean leader =
+            event.get(
+                ValueLayout.JAVA_BYTE,
+                RingloomNative.LIFECYCLE_EVENT_IS_LEADER_OFFSET
+            ) != 0;
         MemorySegment serviceNameAddress = event.get(
             RingloomNative.ADDRESS,
             RingloomNative.LIFECYCLE_EVENT_SERVICE_NAME_OFFSET
         );
-        long serviceNameLength = event.get(ValueLayout.JAVA_LONG, RingloomNative.LIFECYCLE_EVENT_SERVICE_NAME_LEN_OFFSET);
+        long serviceNameLength = event.get(
+            ValueLayout.JAVA_LONG,
+            RingloomNative.LIFECYCLE_EVENT_SERVICE_NAME_LEN_OFFSET
+        );
         String serviceName = readUtf8(serviceNameAddress, serviceNameLength);
 
         ServiceLifecycleEvent lifecycleEvent = new ServiceLifecycleEvent(
@@ -470,10 +750,20 @@ public final class RingloomClient implements AutoCloseable {
         }
     }
 
-    private synchronized void updateTargetServices(ServiceLifecycleEvent event) {
-        TargetService target = new TargetService(event.serviceId(), event.nodeId(), event.leader());
+    private synchronized void updateTargetServices(
+        ServiceLifecycleEvent event
+    ) {
+        TargetService target = new TargetService(
+            event.serviceId(),
+            event.nodeId(),
+            event.leader()
+        );
         ArrayList<TargetService> updated = new ArrayList<>(targetServices);
-        int index = indexOfTarget(updated, target.targetNodeId(), target.targetServiceId());
+        int index = indexOfTarget(
+            updated,
+            target.targetNodeId(),
+            target.targetServiceId()
+        );
 
         if (event.type() == ServiceLifecycleEventType.AVAILABLE) {
             if (index >= 0) {
@@ -493,10 +783,17 @@ public final class RingloomClient implements AutoCloseable {
         targetServices = List.copyOf(updated);
     }
 
-    private static int indexOfTarget(List<TargetService> targets, short targetNodeId, int targetServiceId) {
+    private static int indexOfTarget(
+        List<TargetService> targets,
+        short targetNodeId,
+        int targetServiceId
+    ) {
         for (int i = 0; i < targets.size(); i++) {
             TargetService target = targets.get(i);
-            if (target.targetNodeId() == targetNodeId && target.targetServiceId() == targetServiceId) {
+            if (
+                target.targetNodeId() == targetNodeId &&
+                target.targetServiceId() == targetServiceId
+            ) {
                 return i;
             }
         }
@@ -508,12 +805,21 @@ public final class RingloomClient implements AutoCloseable {
             return "";
         }
         if (length > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("service name length is out of range: " + length);
+            throw new IllegalArgumentException(
+                "service name length is out of range: " + length
+            );
         }
 
         MemorySegment bytes = address.reinterpret(length);
         byte[] copy = new byte[(int) length];
-        MemorySegment.copy(bytes, ValueLayout.JAVA_BYTE, 0, copy, 0, copy.length);
+        MemorySegment.copy(
+            bytes,
+            ValueLayout.JAVA_BYTE,
+            0,
+            copy,
+            0,
+            copy.length
+        );
         return new String(copy, StandardCharsets.UTF_8);
     }
 
@@ -525,7 +831,9 @@ public final class RingloomClient implements AutoCloseable {
 
     private static short narrowTemplateId(int templateId) {
         if (templateId < 0 || templateId > 0xFFFF) {
-            throw new IllegalArgumentException("templateId must be in range 0..65535");
+            throw new IllegalArgumentException(
+                "templateId must be in range 0..65535"
+            );
         }
         return (short) templateId;
     }

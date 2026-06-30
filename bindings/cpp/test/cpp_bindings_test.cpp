@@ -380,13 +380,121 @@ void testRemoteAeron() {
     }
 }
 
+void testTopicValueTypes() {
+    // Enum values
+    require(static_cast<int>(ringloom::TopicStart::earliest) == RINGLOOM_TOPIC_START_EARLIEST, "TopicStart earliest mismatch");
+    require(static_cast<int>(ringloom::TopicStart::latest) == RINGLOOM_TOPIC_START_LATEST, "TopicStart latest mismatch");
+    require(static_cast<int>(ringloom::TopicAckMode::fire_and_forget) == 0, "TopicAckMode fire_and_forget mismatch");
+    require(static_cast<int>(ringloom::TopicAckMode::replicate_once) == 1, "TopicAckMode replicate_once mismatch");
+
+    // Status
+    require(static_cast<int>(ringloom::Status::not_ready) == RINGLOOM_NOT_READY, "Status not_ready mismatch");
+    require(!ringloom::isOk(ringloom::Status::not_ready), "not_ready should not be ok");
+
+    // TopicConfig
+    auto cfg = ringloom::TopicConfig::defaults();
+    require(cfg.roll_scheme == "FAST_DAILY", "default roll scheme mismatch");
+    require(cfg.retention_cycles == 0, "default retention cycles mismatch");
+    require(cfg.flags == 0, "default flags mismatch");
+
+    // TopicPollResult
+    ringloom::TopicPollResult result;
+    require(!result.hasMessage(), "empty poll result should not have message");
+    require(result.copyPayload().empty(), "empty poll result should have empty copy");
+}
+
+void testTopicPublisher() {
+    const std::string repo_root = getenvOr("RINGLOOM_PROJECT_ROOT", std::filesystem::current_path().string());
+    const std::string workspace = createWorkspace();
+    bool success = false;
+
+    try {
+        TestBroker broker(repo_root, workspace);
+
+        auto echo = ringloom::Service::start(serviceConfig("cpp-topic-pub", broker));
+        auto client = echo.createClient("cpp-topic-pub");
+
+        // Register a topic publisher
+        auto publisher = client.registerTopicPublication("pub-test");
+
+        // Publish (may return not_connected since backend is stubbed)
+        const std::string payload = "hello";
+        static_cast<void>(publisher.publish(payload.data(), payload.size()));
+        // Don't assert OK - the backend may be stubbed
+
+        // Publish with ack mode
+        std::uint64_t out_index = 0;
+        static_cast<void>(publisher.publish(payload.data(), payload.size(),
+            ringloom::TopicAckMode::replicate_once, 0, &out_index));
+
+        // isAcked
+        static_cast<void>(publisher.isAcked(0));  // exercise the API
+
+        // publishOrThrow (may throw if not_connected, so catch)
+        try {
+            publisher.publishOrThrow(payload.data(), payload.size());
+        } catch (const ringloom::RingloomError&) {
+            // expected when backend is stubbed
+        }
+
+        // Close idempotency
+        publisher.close();
+        publisher.close();  // should not crash
+
+        success = true;
+        broker.stop();
+    } catch (...) {
+        std::cerr << "Preserving RingLoom C++ workspace: " << workspace << '\n';
+        throw;
+    }
+
+    if (success) {
+        std::filesystem::remove_all(workspace);
+    }
+}
+
+void testTopicSubscriptionStubbed() {
+    const std::string repo_root = getenvOr("RINGLOOM_PROJECT_ROOT", std::filesystem::current_path().string());
+    const std::string workspace = createWorkspace();
+    bool success = false;
+
+    try {
+        TestBroker broker(repo_root, workspace);
+
+        auto echo = ringloom::Service::start(serviceConfig("cpp-topic-sub", broker));
+        auto client = echo.createClient("cpp-topic-sub");
+
+        // subscribeTopic should throw since subscription backend returns INTERNAL
+        bool threw = false;
+        try {
+            auto sub = client.subscribeTopic("sub-test");
+        } catch (const ringloom::RingloomError&) {
+            threw = true;
+        }
+        require(threw, "subscribeTopic should throw when subscription backend is stubbed");
+
+        success = true;
+        broker.stop();
+    } catch (...) {
+        std::cerr << "Preserving RingLoom C++ workspace: " << workspace << '\n';
+        throw;
+    }
+
+    if (success) {
+        std::filesystem::remove_all(workspace);
+    }
+}
+
 } // namespace
 
 int main() {
     try {
         testAbiBasics();
+        testTopicValueTypes();
         testLocalIpc();
         testRemoteAeron();
+        testTopicPublisher();
+        testTopicSubscriptionStubbed();
         std::cout << "C++ binding tests passed\n";
         return 0;
     } catch (const std::exception &ex) {

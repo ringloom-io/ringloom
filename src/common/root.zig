@@ -18,6 +18,7 @@ pub const config = struct {
     pub const ThreadingMode = broker_config.ThreadingMode;
     pub const IdleStrategyName = broker_config.IdleStrategyName;
     pub const PeerEndpoint = broker_config.PeerEndpoint;
+    pub const TopicsConfig = broker_config.TopicsConfig;
 
     pub const config_loader = @import("config/config_loader.zig");
     pub const ConfigLoader = config_loader.ConfigLoader;

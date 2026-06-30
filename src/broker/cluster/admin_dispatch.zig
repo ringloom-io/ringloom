@@ -7,6 +7,7 @@
 const std = @import("std");
 const admin = @import("admin_messages.zig");
 const fc_messages = @import("ringloom_common").message.flow_control_messages;
+const topic_admin = @import("../topics/topic_admin.zig");
 
 // ── Admin Command ─────────────────────────────────────────────────────
 
@@ -16,6 +17,7 @@ pub const AdminCommand = union(enum) {
         node_id: u8,
         host_and_port: [22]u8,
         received_ns: i64,
+        topics_enabled: bool = false,
     },
     cluster_state_snapshot: struct {
         /// Snapshot payload data (after AdminMessageHeader).
@@ -46,6 +48,29 @@ pub const AdminCommand = union(enum) {
     },
     service_capacity_update: struct {
         data: [@sizeOf(fc_messages.ServiceCapacityUpdatePayload)]u8,
+    },
+
+    // ── Persistent topics admin commands (spec 02 templates 12-18) ──────
+    topic_created: struct {
+        data: [@sizeOf(topic_admin.TopicCreatedBody)]u8,
+    },
+    topic_lookup: struct {
+        data: [@sizeOf(topic_admin.TopicLookupBody)]u8,
+    },
+    topic_info: struct {
+        data: [@sizeOf(topic_admin.TopicCreatedBody)]u8,
+    },
+    topic_leader_changed: struct {
+        data: [@sizeOf(topic_admin.TopicLeaderChangedBody)]u8,
+    },
+    topic_applied_query: struct {
+        data: [@sizeOf(topic_admin.TopicAppliedQueryBody)]u8,
+    },
+    topic_applied_reply: struct {
+        data: [@sizeOf(topic_admin.TopicAppliedReplyBody)]u8,
+    },
+    topic_ack_feedback: struct {
+        data: [@sizeOf(topic_admin.TopicAckFeedbackBody)]u8,
     },
 
     /// Maximum snapshot payload (body after header): 1 byte node_id +
@@ -130,6 +155,7 @@ pub fn dispatchAdminMessage(
                     .node_id = msg_body.node_id,
                     .host_and_port = msg_body.host_and_port,
                     .received_ns = now_ns,
+                    .topics_enabled = msg_body.topics_enabled != 0,
                 },
             });
         },
@@ -197,6 +223,63 @@ pub fn dispatchAdminMessage(
                 .service_capacity_update = .{ .data = undefined },
             };
             @memcpy(&cmd.service_capacity_update.data, body[0..@sizeOf(fc_messages.ServiceCapacityUpdatePayload)]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        // ── Topic admin templates (12-18) ──────────────
+        topic_admin.TEMPLATE_TOPIC_CREATED => {
+            if (body.len < @sizeOf(topic_admin.TopicCreatedBody)) return;
+            var cmd = AdminCommand{
+                .topic_created = .{ .data = undefined },
+            };
+            @memcpy(&cmd.topic_created.data, body[0..@sizeOf(topic_admin.TopicCreatedBody)]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        topic_admin.TEMPLATE_TOPIC_LOOKUP => {
+            if (body.len < @sizeOf(topic_admin.TopicLookupBody)) return;
+            var cmd = AdminCommand{
+                .topic_lookup = .{ .data = undefined },
+            };
+            @memcpy(&cmd.topic_lookup.data, body[0..@sizeOf(topic_admin.TopicLookupBody)]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        topic_admin.TEMPLATE_TOPIC_INFO => {
+            if (body.len < @sizeOf(topic_admin.TopicCreatedBody)) return;
+            var cmd = AdminCommand{
+                .topic_info = .{ .data = undefined },
+            };
+            @memcpy(&cmd.topic_info.data, body[0..@sizeOf(topic_admin.TopicCreatedBody)]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        topic_admin.TEMPLATE_TOPIC_LEADER_CHANGED => {
+            if (body.len < @sizeOf(topic_admin.TopicLeaderChangedBody)) return;
+            var cmd = AdminCommand{
+                .topic_leader_changed = .{ .data = undefined },
+            };
+            @memcpy(&cmd.topic_leader_changed.data, body[0..@sizeOf(topic_admin.TopicLeaderChangedBody)]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        topic_admin.TEMPLATE_TOPIC_APPLIED_QUERY => {
+            if (body.len < @sizeOf(topic_admin.TopicAppliedQueryBody)) return;
+            var cmd = AdminCommand{
+                .topic_applied_query = .{ .data = undefined },
+            };
+            @memcpy(&cmd.topic_applied_query.data, body[0..@sizeOf(topic_admin.TopicAppliedQueryBody)]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        topic_admin.TEMPLATE_TOPIC_APPLIED_REPLY => {
+            if (body.len < @sizeOf(topic_admin.TopicAppliedReplyBody)) return;
+            var cmd = AdminCommand{
+                .topic_applied_reply = .{ .data = undefined },
+            };
+            @memcpy(&cmd.topic_applied_reply.data, body[0..@sizeOf(topic_admin.TopicAppliedReplyBody)]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        topic_admin.TEMPLATE_TOPIC_ACK_FEEDBACK => {
+            if (body.len < @sizeOf(topic_admin.TopicAckFeedbackBody)) return;
+            var cmd = AdminCommand{
+                .topic_ack_feedback = .{ .data = undefined },
+            };
+            @memcpy(&cmd.topic_ack_feedback.data, body[0..@sizeOf(topic_admin.TopicAckFeedbackBody)]);
             _ = cmd_queue.enqueue(cmd);
         },
         else => {}, // unknown templateId — silently drop

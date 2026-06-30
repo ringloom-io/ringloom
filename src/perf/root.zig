@@ -15,6 +15,7 @@ comptime {
     _ = @import("remote_latency_bench.zig");
     _ = @import("backpressure_bench.zig");
     _ = @import("recovery_bench.zig");
+    _ = @import("topic_bench.zig");
 }
 
 test "perf module compiles" {

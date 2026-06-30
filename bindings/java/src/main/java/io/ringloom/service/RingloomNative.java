@@ -15,9 +15,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 final class RingloomNative {
+
     static final int ABI_VERSION = 4;
     private static final String LIBRARY_BASE_NAME = "ringloom_service";
-    private static final String CLASSPATH_LIBRARY_ROOT = "/io/ringloom/service/native";
+    private static final String CLASSPATH_LIBRARY_ROOT =
+        "/io/ringloom/service/native";
 
     static final Linker LINKER = Linker.nativeLinker();
     static final Arena LIBRARY_ARENA = Arena.ofShared();
@@ -79,6 +81,13 @@ final class RingloomNative {
     static final long RING_STATS_PRODUCER_OFFSET = 24L;
     static final long RING_STATS_CONSUMER_OFFSET = 32L;
 
+    // ── Topic config layout ────────────────────────────────────────────
+    static final long TOPIC_CONFIG_SIZE = 28L;
+    static final long TOPIC_CONFIG_SIZE_OFFSET = 0L;
+    static final long TOPIC_CONFIG_ROLL_SCHEME_OFFSET = 4L;
+    static final long TOPIC_CONFIG_RETENTION_OFFSET = 20L;
+    static final long TOPIC_CONFIG_FLAGS_OFFSET = 24L;
+
     private static final SymbolLookup SYMBOLS;
 
     private static final MethodHandle ABI_VERSION_HANDLE;
@@ -127,71 +136,463 @@ final class RingloomNative {
     private static final MethodHandle AERON_PUBLICATION_STATUS_STRING_HANDLE;
     private static final MethodHandle LAST_ERROR_MESSAGE_HANDLE;
 
+    // ── Topic method handles (resolved optionally) ─────────────────────
+    private static final MethodHandle TOPIC_REGISTER_PUBLICATION_HANDLE;
+    private static final MethodHandle TOPIC_PUBLISH_HANDLE;
+    private static final MethodHandle TOPIC_IS_ACKED_HANDLE;
+    private static final MethodHandle TOPIC_UNREGISTER_PUBLICATION_HANDLE;
+    private static final MethodHandle TOPIC_SUBSCRIBE_HANDLE;
+    private static final MethodHandle TOPIC_POLL_HANDLE;
+    private static final MethodHandle TOPIC_UNSUBSCRIBE_HANDLE;
+    private static final MethodHandle TOPIC_SUBSCRIPTION_MAINTENANCE_POLL_HANDLE;
+
+    /** Whether all eight topic symbols were resolved from the native library. */
+    static final boolean TOPIC_SYMBOLS_PRESENT;
+
     static {
         try {
             Path libraryPath = nativeLibraryPath();
             System.load(libraryPath.toAbsolutePath().toString());
             SYMBOLS = SymbolLookup.libraryLookup(libraryPath, LIBRARY_ARENA);
 
-            ABI_VERSION_HANDLE = downcall("ringloom_service_abi_version", FunctionDescriptor.of(ValueLayout.JAVA_INT));
-            SERVICE_START_HANDLE = downcall("ringloom_service_start", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
-            SERVICE_STOP_HANDLE = downcall("ringloom_service_stop", FunctionDescriptor.ofVoid(ADDRESS));
-            SERVICE_DESTROY_HANDLE = downcall("ringloom_service_destroy", FunctionDescriptor.ofVoid(ADDRESS));
-            SERVICE_ID_HANDLE = downcall("ringloom_service_id", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
-            SERVICE_NODE_ID_HANDLE = downcall("ringloom_service_node_id", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
-            SERVICE_AERON_DIRECTORY_HANDLE = downcall("ringloom_service_aeron_directory", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
-            SERVICE_AERON_INBOUND_STREAM_ID_HANDLE = downcall("ringloom_service_aeron_inbound_stream_id", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
-            SERVICE_PUBLICATION_CONNECTED_HANDLE = downcall("ringloom_service_publication_connected", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
-            SERVICE_POLL_CONTROL_HANDLE = downcall("ringloom_service_poll_control", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_INT, ADDRESS));
-            CREATE_CONSUMER_HANDLE = downcall("ringloom_service_create_message_consumer", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
-            DESTROY_CONSUMER_HANDLE = downcall("ringloom_message_consumer_destroy", FunctionDescriptor.ofVoid(ADDRESS));
-            POLL_CONSUMER_HANDLE = downcall("ringloom_message_consumer_poll", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ValueLayout.JAVA_INT, ADDRESS));
-            CREATE_METRICS_READER_HANDLE = downcall("ringloom_service_create_metrics_reader", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
-            DESTROY_METRICS_READER_HANDLE = downcall("ringloom_metrics_reader_destroy", FunctionDescriptor.ofVoid(ADDRESS));
-            METRICS_COUNTER_COUNT_HANDLE = downcall("ringloom_metrics_reader_counter_count", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
-            METRICS_COUNTER_AT_HANDLE = downcall("ringloom_metrics_reader_counter_at", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
-            METRICS_RING_STATS_HANDLE = downcall("ringloom_metrics_reader_ring_stats", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
-            SERVICE_COUNTER_REGISTER_HANDLE = downcall("ringloom_service_counter_register", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
-            SERVICE_GAUGE_REGISTER_HANDLE = downcall("ringloom_service_gauge_register", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
-            CREATE_CLIENT_HANDLE = downcall("ringloom_service_create_client", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
-            DESTROY_CLIENT_HANDLE = downcall("ringloom_client_destroy", FunctionDescriptor.ofVoid(ADDRESS));
-            CLIENT_SET_LIFECYCLE_HANDLE = downcall("ringloom_client_set_lifecycle_handler", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
-            CLIENT_SEND_HANDLE = downcall("ringloom_client_send", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG));
-            CLIENT_SEND_MESSAGE_HANDLE = downcall("ringloom_client_send_message", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ADDRESS, ValueLayout.JAVA_LONG));
-            CLIENT_SEND_MESSAGE_REQUEST_HANDLE = downcall("ringloom_client_send_message_request", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ADDRESS, ValueLayout.JAVA_LONG));
-            CLIENT_SEND_TO_HANDLE = downcall("ringloom_client_send_to", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_LONG));
-            CLIENT_SEND_TO_MESSAGE_HANDLE = downcall("ringloom_client_send_to_message", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_INT, ValueLayout.JAVA_SHORT, ADDRESS, ValueLayout.JAVA_LONG));
-            CLIENT_SEND_TO_MESSAGE_REQUEST_HANDLE = downcall("ringloom_client_send_to_message_request", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_INT, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ADDRESS, ValueLayout.JAVA_LONG));
-            CLIENT_SEND_TO_LEADER_HANDLE = downcall("ringloom_client_send_to_leader", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG));
-            CLIENT_SEND_TO_LEADER_MESSAGE_HANDLE = downcall("ringloom_client_send_to_leader_message", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ADDRESS, ValueLayout.JAVA_LONG));
-            CLIENT_SEND_TO_LEADER_MESSAGE_REQUEST_HANDLE = downcall("ringloom_client_send_to_leader_message_request", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ADDRESS, ValueLayout.JAVA_LONG));
-            CLIENT_LIST_TARGETS_HANDLE = downcall("ringloom_client_list_targets", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS, ValueLayout.JAVA_LONG, ADDRESS));
-            CLIENT_TRY_CLAIM_HANDLE = downcall("ringloom_client_try_claim", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ADDRESS));
-            CLIENT_TRY_CLAIM_REQUEST_HANDLE = downcall("ringloom_client_try_claim_request", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ADDRESS));
-            CLIENT_TRY_CLAIM_TO_HANDLE = downcall("ringloom_client_try_claim_to", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_INT, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ADDRESS));
-            CLIENT_TRY_CLAIM_TO_REQUEST_HANDLE = downcall("ringloom_client_try_claim_to_request", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_INT, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ADDRESS));
-            CLIENT_TRY_CLAIM_TO_LEADER_HANDLE = downcall("ringloom_client_try_claim_to_leader", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ADDRESS));
-            CLIENT_TRY_CLAIM_TO_LEADER_REQUEST_HANDLE = downcall("ringloom_client_try_claim_to_leader_request", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ValueLayout.JAVA_SHORT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ADDRESS));
-            CLIENT_LAST_AERON_SEND_STATUS_HANDLE = downcall("ringloom_client_last_aeron_send_status", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS));
-            CLAIM_COMMIT_HANDLE = downcall("ringloom_buffer_claim_commit", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS));
-            CLAIM_ABORT_HANDLE = downcall("ringloom_buffer_claim_abort", FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS));
-            STATUS_STRING_HANDLE = downcall("ringloom_status_string", FunctionDescriptor.of(ADDRESS, ValueLayout.JAVA_INT));
-            AERON_PUBLICATION_STATUS_STRING_HANDLE = downcall("ringloom_aeron_publication_status_string", FunctionDescriptor.of(ADDRESS, ValueLayout.JAVA_INT));
-            LAST_ERROR_MESSAGE_HANDLE = downcall("ringloom_last_error_message", FunctionDescriptor.of(ADDRESS));
+            ABI_VERSION_HANDLE = downcall(
+                "ringloom_service_abi_version",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT)
+            );
+            SERVICE_START_HANDLE = downcall(
+                "ringloom_service_start",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS)
+            );
+            SERVICE_STOP_HANDLE = downcall(
+                "ringloom_service_stop",
+                FunctionDescriptor.ofVoid(ADDRESS)
+            );
+            SERVICE_DESTROY_HANDLE = downcall(
+                "ringloom_service_destroy",
+                FunctionDescriptor.ofVoid(ADDRESS)
+            );
+            SERVICE_ID_HANDLE = downcall(
+                "ringloom_service_id",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS)
+            );
+            SERVICE_NODE_ID_HANDLE = downcall(
+                "ringloom_service_node_id",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS)
+            );
+            SERVICE_AERON_DIRECTORY_HANDLE = downcall(
+                "ringloom_service_aeron_directory",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ADDRESS
+                )
+            );
+            SERVICE_AERON_INBOUND_STREAM_ID_HANDLE = downcall(
+                "ringloom_service_aeron_inbound_stream_id",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS)
+            );
+            SERVICE_PUBLICATION_CONNECTED_HANDLE = downcall(
+                "ringloom_service_publication_connected",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS)
+            );
+            SERVICE_POLL_CONTROL_HANDLE = downcall(
+                "ringloom_service_poll_control",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_INT,
+                    ADDRESS
+                )
+            );
+            CREATE_CONSUMER_HANDLE = downcall(
+                "ringloom_service_create_message_consumer",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS)
+            );
+            DESTROY_CONSUMER_HANDLE = downcall(
+                "ringloom_message_consumer_destroy",
+                FunctionDescriptor.ofVoid(ADDRESS)
+            );
+            POLL_CONSUMER_HANDLE = downcall(
+                "ringloom_message_consumer_poll",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_INT,
+                    ADDRESS
+                )
+            );
+            CREATE_METRICS_READER_HANDLE = downcall(
+                "ringloom_service_create_metrics_reader",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS)
+            );
+            DESTROY_METRICS_READER_HANDLE = downcall(
+                "ringloom_metrics_reader_destroy",
+                FunctionDescriptor.ofVoid(ADDRESS)
+            );
+            METRICS_COUNTER_COUNT_HANDLE = downcall(
+                "ringloom_metrics_reader_counter_count",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS)
+            );
+            METRICS_COUNTER_AT_HANDLE = downcall(
+                "ringloom_metrics_reader_counter_at",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            METRICS_RING_STATS_HANDLE = downcall(
+                "ringloom_metrics_reader_ring_stats",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            SERVICE_COUNTER_REGISTER_HANDLE = downcall(
+                "ringloom_service_counter_register",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            SERVICE_GAUGE_REGISTER_HANDLE = downcall(
+                "ringloom_service_gauge_register",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            CREATE_CLIENT_HANDLE = downcall(
+                "ringloom_service_create_client",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            DESTROY_CLIENT_HANDLE = downcall(
+                "ringloom_client_destroy",
+                FunctionDescriptor.ofVoid(ADDRESS)
+            );
+            CLIENT_SET_LIFECYCLE_HANDLE = downcall(
+                "ringloom_client_set_lifecycle_handler",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ADDRESS
+                )
+            );
+            CLIENT_SEND_HANDLE = downcall(
+                "ringloom_client_send",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG
+                )
+            );
+            CLIENT_SEND_MESSAGE_HANDLE = downcall(
+                "ringloom_client_send_message",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG
+                )
+            );
+            CLIENT_SEND_MESSAGE_REQUEST_HANDLE = downcall(
+                "ringloom_client_send_message_request",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG
+                )
+            );
+            CLIENT_SEND_TO_HANDLE = downcall(
+                "ringloom_client_send_to",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG
+                )
+            );
+            CLIENT_SEND_TO_MESSAGE_HANDLE = downcall(
+                "ringloom_client_send_to_message",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_SHORT,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG
+                )
+            );
+            CLIENT_SEND_TO_MESSAGE_REQUEST_HANDLE = downcall(
+                "ringloom_client_send_to_message_request",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG
+                )
+            );
+            CLIENT_SEND_TO_LEADER_HANDLE = downcall(
+                "ringloom_client_send_to_leader",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG
+                )
+            );
+            CLIENT_SEND_TO_LEADER_MESSAGE_HANDLE = downcall(
+                "ringloom_client_send_to_leader_message",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG
+                )
+            );
+            CLIENT_SEND_TO_LEADER_MESSAGE_REQUEST_HANDLE = downcall(
+                "ringloom_client_send_to_leader_message_request",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG
+                )
+            );
+            CLIENT_LIST_TARGETS_HANDLE = downcall(
+                "ringloom_client_list_targets",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            CLIENT_TRY_CLAIM_HANDLE = downcall(
+                "ringloom_client_try_claim",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            CLIENT_TRY_CLAIM_REQUEST_HANDLE = downcall(
+                "ringloom_client_try_claim_request",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            CLIENT_TRY_CLAIM_TO_HANDLE = downcall(
+                "ringloom_client_try_claim_to",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            CLIENT_TRY_CLAIM_TO_REQUEST_HANDLE = downcall(
+                "ringloom_client_try_claim_to_request",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            CLIENT_TRY_CLAIM_TO_LEADER_HANDLE = downcall(
+                "ringloom_client_try_claim_to_leader",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            CLIENT_TRY_CLAIM_TO_LEADER_REQUEST_HANDLE = downcall(
+                "ringloom_client_try_claim_to_leader_request",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_SHORT,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            CLIENT_LAST_AERON_SEND_STATUS_HANDLE = downcall(
+                "ringloom_client_last_aeron_send_status",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS, ADDRESS)
+            );
+            CLAIM_COMMIT_HANDLE = downcall(
+                "ringloom_buffer_claim_commit",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS)
+            );
+            CLAIM_ABORT_HANDLE = downcall(
+                "ringloom_buffer_claim_abort",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ADDRESS)
+            );
+            STATUS_STRING_HANDLE = downcall(
+                "ringloom_status_string",
+                FunctionDescriptor.of(ADDRESS, ValueLayout.JAVA_INT)
+            );
+            AERON_PUBLICATION_STATUS_STRING_HANDLE = downcall(
+                "ringloom_aeron_publication_status_string",
+                FunctionDescriptor.of(ADDRESS, ValueLayout.JAVA_INT)
+            );
+            LAST_ERROR_MESSAGE_HANDLE = downcall(
+                "ringloom_last_error_message",
+                FunctionDescriptor.of(ADDRESS)
+            );
+
+            // Resolve topic symbols optionally — topics are an additive feature.
+            TOPIC_REGISTER_PUBLICATION_HANDLE = optionalDowncall(
+                "ringloom_register_topic_publication",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ADDRESS
+                )
+            );
+            TOPIC_PUBLISH_HANDLE = optionalDowncall(
+                "ringloom_publish_to_topic",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.JAVA_BYTE,
+                    ADDRESS
+                )
+            );
+            TOPIC_IS_ACKED_HANDLE = optionalDowncall(
+                "ringloom_topic_is_acked",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG
+                )
+            );
+            TOPIC_UNREGISTER_PUBLICATION_HANDLE = optionalDowncall(
+                "ringloom_unregister_topic_publication",
+                FunctionDescriptor.ofVoid(ADDRESS)
+            );
+            TOPIC_SUBSCRIBE_HANDLE = optionalDowncall(
+                "ringloom_subscribe_topic",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.JAVA_BYTE,
+                    ADDRESS
+                )
+            );
+            TOPIC_POLL_HANDLE = optionalDowncall(
+                "ringloom_topic_poll",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ADDRESS,
+                    ADDRESS,
+                    ADDRESS
+                )
+            );
+            TOPIC_UNSUBSCRIBE_HANDLE = optionalDowncall(
+                "ringloom_unsubscribe_topic",
+                FunctionDescriptor.ofVoid(ADDRESS)
+            );
+            TOPIC_SUBSCRIPTION_MAINTENANCE_POLL_HANDLE = optionalDowncall(
+                "ringloom_topic_subscription_maintenance_poll",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ADDRESS,
+                    ValueLayout.JAVA_INT
+                )
+            );
+
+            TOPIC_SYMBOLS_PRESENT =
+                TOPIC_REGISTER_PUBLICATION_HANDLE != null &&
+                TOPIC_PUBLISH_HANDLE != null &&
+                TOPIC_IS_ACKED_HANDLE != null &&
+                TOPIC_UNREGISTER_PUBLICATION_HANDLE != null &&
+                TOPIC_SUBSCRIBE_HANDLE != null &&
+                TOPIC_POLL_HANDLE != null &&
+                TOPIC_UNSUBSCRIBE_HANDLE != null &&
+                TOPIC_SUBSCRIPTION_MAINTENANCE_POLL_HANDLE != null;
 
             int abiVersion = abiVersion();
             if (abiVersion != ABI_VERSION) {
-                throw new IllegalStateException("Unsupported RingLoom native ABI version " + abiVersion);
+                throw new IllegalStateException(
+                    "Unsupported RingLoom native ABI version " + abiVersion
+                );
             }
         } catch (RuntimeException | Error ex) {
             throw ex;
         } catch (Throwable ex) {
-            throw new IllegalStateException("Failed to initialize RingLoom native bindings", ex);
+            throw new IllegalStateException(
+                "Failed to initialize RingLoom native bindings",
+                ex
+            );
         }
     }
 
-    private RingloomNative() {
-    }
+    private RingloomNative() {}
 
     static Path nativeLibraryPath() {
         String libPath = System.getProperty("ringloom.nativeLibPath");
@@ -201,7 +602,11 @@ final class RingloomNative {
 
         String libDir = System.getProperty("ringloom.nativeLibDir");
         if (libDir != null && !libDir.isBlank()) {
-            return requireExistingLibrary(Path.of(libDir).resolve(System.mapLibraryName(LIBRARY_BASE_NAME)));
+            return requireExistingLibrary(
+                Path.of(libDir).resolve(
+                    System.mapLibraryName(LIBRARY_BASE_NAME)
+                )
+            );
         }
 
         return extractClasspathLibrary();
@@ -209,24 +614,32 @@ final class RingloomNative {
 
     private static Path requireExistingLibrary(Path path) {
         if (!Files.exists(path)) {
-            throw new IllegalStateException("Native library not found at " + path);
+            throw new IllegalStateException(
+                "Native library not found at " + path
+            );
         }
         return path;
     }
 
     private static Path extractClasspathLibrary() {
         String mappedLibraryName = System.mapLibraryName(LIBRARY_BASE_NAME);
-        String resourcePath = CLASSPATH_LIBRARY_ROOT
-            + "/"
-            + platformIdentifier()
-            + "/"
-            + mappedLibraryName;
+        String resourcePath =
+            CLASSPATH_LIBRARY_ROOT +
+            "/" +
+            platformIdentifier() +
+            "/" +
+            mappedLibraryName;
 
-        try (var libraryStream = RingloomNative.class.getResourceAsStream(resourcePath)) {
+        try (
+            var libraryStream = RingloomNative.class.getResourceAsStream(
+                resourcePath
+            )
+        ) {
             if (libraryStream == null) {
                 throw new IllegalStateException(
-                    "Embedded native library resource not found at " + resourcePath
-                        + "; set ringloom.nativeLibPath or ringloom.nativeLibDir to load an external build"
+                    "Embedded native library resource not found at " +
+                        resourcePath +
+                        "; set ringloom.nativeLibPath or ringloom.nativeLibDir to load an external build"
                 );
             }
 
@@ -239,14 +652,19 @@ final class RingloomNative {
         } catch (RuntimeException ex) {
             throw ex;
         } catch (Exception ex) {
-            throw new IllegalStateException("Failed to extract embedded RingLoom native library", ex);
+            throw new IllegalStateException(
+                "Failed to extract embedded RingLoom native library",
+                ex
+            );
         }
     }
 
     private static String platformIdentifier() {
-        return normalizeOsName(System.getProperty("os.name"))
-            + "-"
-            + normalizeArchName(System.getProperty("os.arch"));
+        return (
+            normalizeOsName(System.getProperty("os.name")) +
+            "-" +
+            normalizeArchName(System.getProperty("os.arch"))
+        );
     }
 
     private static String normalizeOsName(String osName) {
@@ -254,10 +672,15 @@ final class RingloomNative {
         if (normalized.startsWith("linux")) {
             return "linux";
         }
-        if (normalized.startsWith("mac os") || normalized.startsWith("darwin")) {
+        if (
+            normalized.startsWith("mac os") || normalized.startsWith("darwin")
+        ) {
             return "macos";
         }
-        throw new IllegalStateException("Unsupported operating system for embedded RingLoom native library: " + osName);
+        throw new IllegalStateException(
+            "Unsupported operating system for embedded RingLoom native library: " +
+                osName
+        );
     }
 
     private static String normalizeArchName(String archName) {
@@ -265,7 +688,8 @@ final class RingloomNative {
             case "x86_64", "amd64" -> "x86_64";
             case "aarch64", "arm64" -> "aarch64";
             default -> throw new IllegalStateException(
-                "Unsupported architecture for embedded RingLoom native library: " + archName
+                "Unsupported architecture for embedded RingLoom native library: " +
+                    archName
             );
         };
     }
@@ -318,43 +742,86 @@ final class RingloomNative {
         }
     }
 
-    static int serviceAeronDirectory(MemorySegment service, MemorySegment outDirectory, MemorySegment outDirectoryLen) {
+    static int serviceAeronDirectory(
+        MemorySegment service,
+        MemorySegment outDirectory,
+        MemorySegment outDirectoryLen
+    ) {
         try {
-            return (int) SERVICE_AERON_DIRECTORY_HANDLE.invokeExact(service, outDirectory, outDirectoryLen);
+            return (int) SERVICE_AERON_DIRECTORY_HANDLE.invokeExact(
+                service,
+                outDirectory,
+                outDirectoryLen
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_service_aeron_directory", throwable);
         }
     }
 
-    static int serviceAeronInboundStreamId(MemorySegment service, MemorySegment outStreamId) {
+    static int serviceAeronInboundStreamId(
+        MemorySegment service,
+        MemorySegment outStreamId
+    ) {
         try {
-            return (int) SERVICE_AERON_INBOUND_STREAM_ID_HANDLE.invokeExact(service, outStreamId);
+            return (int) SERVICE_AERON_INBOUND_STREAM_ID_HANDLE.invokeExact(
+                service,
+                outStreamId
+            );
         } catch (Throwable throwable) {
-            throw propagate("ringloom_service_aeron_inbound_stream_id", throwable);
+            throw propagate(
+                "ringloom_service_aeron_inbound_stream_id",
+                throwable
+            );
         }
     }
 
-    static int servicePublicationConnected(MemorySegment service, MemorySegment outConnected) {
+    static int servicePublicationConnected(
+        MemorySegment service,
+        MemorySegment outConnected
+    ) {
         try {
-            return (int) SERVICE_PUBLICATION_CONNECTED_HANDLE.invokeExact(service, outConnected);
+            return (int) SERVICE_PUBLICATION_CONNECTED_HANDLE.invokeExact(
+                service,
+                outConnected
+            );
         } catch (Throwable throwable) {
-            throw propagate("ringloom_service_publication_connected", throwable);
+            throw propagate(
+                "ringloom_service_publication_connected",
+                throwable
+            );
         }
     }
 
-    static int servicePollControl(MemorySegment service, int limit, MemorySegment outCount) {
+    static int servicePollControl(
+        MemorySegment service,
+        int limit,
+        MemorySegment outCount
+    ) {
         try {
-            return (int) SERVICE_POLL_CONTROL_HANDLE.invokeExact(service, limit, outCount);
+            return (int) SERVICE_POLL_CONTROL_HANDLE.invokeExact(
+                service,
+                limit,
+                outCount
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_service_poll_control", throwable);
         }
     }
 
-    static int createMessageConsumer(MemorySegment service, MemorySegment outConsumer) {
+    static int createMessageConsumer(
+        MemorySegment service,
+        MemorySegment outConsumer
+    ) {
         try {
-            return (int) CREATE_CONSUMER_HANDLE.invokeExact(service, outConsumer);
+            return (int) CREATE_CONSUMER_HANDLE.invokeExact(
+                service,
+                outConsumer
+            );
         } catch (Throwable throwable) {
-            throw propagate("ringloom_service_create_message_consumer", throwable);
+            throw propagate(
+                "ringloom_service_create_message_consumer",
+                throwable
+            );
         }
     }
 
@@ -374,17 +841,32 @@ final class RingloomNative {
         MemorySegment outCount
     ) {
         try {
-            return (int) POLL_CONSUMER_HANDLE.invokeExact(consumer, handler, userData, limit, outCount);
+            return (int) POLL_CONSUMER_HANDLE.invokeExact(
+                consumer,
+                handler,
+                userData,
+                limit,
+                outCount
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_message_consumer_poll", throwable);
         }
     }
 
-    static int createMetricsReader(MemorySegment service, MemorySegment outReader) {
+    static int createMetricsReader(
+        MemorySegment service,
+        MemorySegment outReader
+    ) {
         try {
-            return (int) CREATE_METRICS_READER_HANDLE.invokeExact(service, outReader);
+            return (int) CREATE_METRICS_READER_HANDLE.invokeExact(
+                service,
+                outReader
+            );
         } catch (Throwable throwable) {
-            throw propagate("ringloom_service_create_metrics_reader", throwable);
+            throw propagate(
+                "ringloom_service_create_metrics_reader",
+                throwable
+            );
         }
     }
 
@@ -396,49 +878,103 @@ final class RingloomNative {
         }
     }
 
-    static int metricsCounterCount(MemorySegment reader, MemorySegment outCount) {
+    static int metricsCounterCount(
+        MemorySegment reader,
+        MemorySegment outCount
+    ) {
         try {
-            return (int) METRICS_COUNTER_COUNT_HANDLE.invokeExact(reader, outCount);
+            return (int) METRICS_COUNTER_COUNT_HANDLE.invokeExact(
+                reader,
+                outCount
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_metrics_reader_counter_count", throwable);
         }
     }
 
-    static int metricsCounterAt(MemorySegment reader, long index, MemorySegment outMetric) {
+    static int metricsCounterAt(
+        MemorySegment reader,
+        long index,
+        MemorySegment outMetric
+    ) {
         try {
-            return (int) METRICS_COUNTER_AT_HANDLE.invokeExact(reader, index, outMetric);
+            return (int) METRICS_COUNTER_AT_HANDLE.invokeExact(
+                reader,
+                index,
+                outMetric
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_metrics_reader_counter_at", throwable);
         }
     }
 
-    static int metricsRingStats(MemorySegment reader, MemorySegment ringName, long ringNameLen, MemorySegment outStats) {
+    static int metricsRingStats(
+        MemorySegment reader,
+        MemorySegment ringName,
+        long ringNameLen,
+        MemorySegment outStats
+    ) {
         try {
-            return (int) METRICS_RING_STATS_HANDLE.invokeExact(reader, ringName, ringNameLen, outStats);
+            return (int) METRICS_RING_STATS_HANDLE.invokeExact(
+                reader,
+                ringName,
+                ringNameLen,
+                outStats
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_metrics_reader_ring_stats", throwable);
         }
     }
 
-    static int serviceCounterRegister(MemorySegment service, MemorySegment name, long nameLen, MemorySegment outSlot) {
+    static int serviceCounterRegister(
+        MemorySegment service,
+        MemorySegment name,
+        long nameLen,
+        MemorySegment outSlot
+    ) {
         try {
-            return (int) SERVICE_COUNTER_REGISTER_HANDLE.invokeExact(service, name, nameLen, outSlot);
+            return (int) SERVICE_COUNTER_REGISTER_HANDLE.invokeExact(
+                service,
+                name,
+                nameLen,
+                outSlot
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_service_counter_register", throwable);
         }
     }
 
-    static int serviceGaugeRegister(MemorySegment service, MemorySegment name, long nameLen, MemorySegment outSlot) {
+    static int serviceGaugeRegister(
+        MemorySegment service,
+        MemorySegment name,
+        long nameLen,
+        MemorySegment outSlot
+    ) {
         try {
-            return (int) SERVICE_GAUGE_REGISTER_HANDLE.invokeExact(service, name, nameLen, outSlot);
+            return (int) SERVICE_GAUGE_REGISTER_HANDLE.invokeExact(
+                service,
+                name,
+                nameLen,
+                outSlot
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_service_gauge_register", throwable);
         }
     }
 
-    static int createClient(MemorySegment service, MemorySegment serviceName, long serviceNameLen, MemorySegment outClient) {
+    static int createClient(
+        MemorySegment service,
+        MemorySegment serviceName,
+        long serviceNameLen,
+        MemorySegment outClient
+    ) {
         try {
-            return (int) CREATE_CLIENT_HANDLE.invokeExact(service, serviceName, serviceNameLen, outClient);
+            return (int) CREATE_CLIENT_HANDLE.invokeExact(
+                service,
+                serviceName,
+                serviceNameLen,
+                outClient
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_service_create_client", throwable);
         }
@@ -452,25 +988,51 @@ final class RingloomNative {
         }
     }
 
-    static int clientSetLifecycleHandler(MemorySegment client, MemorySegment handler, MemorySegment userData) {
+    static int clientSetLifecycleHandler(
+        MemorySegment client,
+        MemorySegment handler,
+        MemorySegment userData
+    ) {
         try {
-            return (int) CLIENT_SET_LIFECYCLE_HANDLE.invokeExact(client, handler, userData);
+            return (int) CLIENT_SET_LIFECYCLE_HANDLE.invokeExact(
+                client,
+                handler,
+                userData
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_set_lifecycle_handler", throwable);
         }
     }
 
-    static int clientSend(MemorySegment client, MemorySegment payload, long payloadLen) {
+    static int clientSend(
+        MemorySegment client,
+        MemorySegment payload,
+        long payloadLen
+    ) {
         try {
-            return (int) CLIENT_SEND_HANDLE.invokeExact(client, payload, payloadLen);
+            return (int) CLIENT_SEND_HANDLE.invokeExact(
+                client,
+                payload,
+                payloadLen
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_send", throwable);
         }
     }
 
-    static int clientSendMessage(MemorySegment client, short templateId, MemorySegment payload, long payloadLen) {
+    static int clientSendMessage(
+        MemorySegment client,
+        short templateId,
+        MemorySegment payload,
+        long payloadLen
+    ) {
         try {
-            return (int) CLIENT_SEND_MESSAGE_HANDLE.invokeExact(client, templateId, payload, payloadLen);
+            return (int) CLIENT_SEND_MESSAGE_HANDLE.invokeExact(
+                client,
+                templateId,
+                payload,
+                payloadLen
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_send_message", throwable);
         }
@@ -484,7 +1046,13 @@ final class RingloomNative {
         long payloadLen
     ) {
         try {
-            return (int) CLIENT_SEND_MESSAGE_REQUEST_HANDLE.invokeExact(client, templateId, correlationId, payload, payloadLen);
+            return (int) CLIENT_SEND_MESSAGE_REQUEST_HANDLE.invokeExact(
+                client,
+                templateId,
+                correlationId,
+                payload,
+                payloadLen
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_send_message_request", throwable);
         }
@@ -498,7 +1066,13 @@ final class RingloomNative {
         long payloadLen
     ) {
         try {
-            return (int) CLIENT_SEND_TO_HANDLE.invokeExact(client, targetNodeId, targetServiceId, payload, payloadLen);
+            return (int) CLIENT_SEND_TO_HANDLE.invokeExact(
+                client,
+                targetNodeId,
+                targetServiceId,
+                payload,
+                payloadLen
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_send_to", throwable);
         }
@@ -513,7 +1087,14 @@ final class RingloomNative {
         long payloadLen
     ) {
         try {
-            return (int) CLIENT_SEND_TO_MESSAGE_HANDLE.invokeExact(client, targetNodeId, targetServiceId, templateId, payload, payloadLen);
+            return (int) CLIENT_SEND_TO_MESSAGE_HANDLE.invokeExact(
+                client,
+                targetNodeId,
+                targetServiceId,
+                templateId,
+                payload,
+                payloadLen
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_send_to_message", throwable);
         }
@@ -529,25 +1110,57 @@ final class RingloomNative {
         long payloadLen
     ) {
         try {
-            return (int) CLIENT_SEND_TO_MESSAGE_REQUEST_HANDLE.invokeExact(client, targetNodeId, targetServiceId, templateId, correlationId, payload, payloadLen);
+            return (int) CLIENT_SEND_TO_MESSAGE_REQUEST_HANDLE.invokeExact(
+                client,
+                targetNodeId,
+                targetServiceId,
+                templateId,
+                correlationId,
+                payload,
+                payloadLen
+            );
         } catch (Throwable throwable) {
-            throw propagate("ringloom_client_send_to_message_request", throwable);
+            throw propagate(
+                "ringloom_client_send_to_message_request",
+                throwable
+            );
         }
     }
 
-    static int clientSendToLeader(MemorySegment client, MemorySegment payload, long payloadLen) {
+    static int clientSendToLeader(
+        MemorySegment client,
+        MemorySegment payload,
+        long payloadLen
+    ) {
         try {
-            return (int) CLIENT_SEND_TO_LEADER_HANDLE.invokeExact(client, payload, payloadLen);
+            return (int) CLIENT_SEND_TO_LEADER_HANDLE.invokeExact(
+                client,
+                payload,
+                payloadLen
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_send_to_leader", throwable);
         }
     }
 
-    static int clientSendToLeaderMessage(MemorySegment client, short templateId, MemorySegment payload, long payloadLen) {
+    static int clientSendToLeaderMessage(
+        MemorySegment client,
+        short templateId,
+        MemorySegment payload,
+        long payloadLen
+    ) {
         try {
-            return (int) CLIENT_SEND_TO_LEADER_MESSAGE_HANDLE.invokeExact(client, templateId, payload, payloadLen);
+            return (int) CLIENT_SEND_TO_LEADER_MESSAGE_HANDLE.invokeExact(
+                client,
+                templateId,
+                payload,
+                payloadLen
+            );
         } catch (Throwable throwable) {
-            throw propagate("ringloom_client_send_to_leader_message", throwable);
+            throw propagate(
+                "ringloom_client_send_to_leader_message",
+                throwable
+            );
         }
     }
 
@@ -559,23 +1172,52 @@ final class RingloomNative {
         long payloadLen
     ) {
         try {
-            return (int) CLIENT_SEND_TO_LEADER_MESSAGE_REQUEST_HANDLE.invokeExact(client, templateId, correlationId, payload, payloadLen);
+            return (int) CLIENT_SEND_TO_LEADER_MESSAGE_REQUEST_HANDLE.invokeExact(
+                client,
+                templateId,
+                correlationId,
+                payload,
+                payloadLen
+            );
         } catch (Throwable throwable) {
-            throw propagate("ringloom_client_send_to_leader_message_request", throwable);
+            throw propagate(
+                "ringloom_client_send_to_leader_message_request",
+                throwable
+            );
         }
     }
 
-    static int clientListTargets(MemorySegment client, MemorySegment outTargets, long targetCapacity, MemorySegment outCount) {
+    static int clientListTargets(
+        MemorySegment client,
+        MemorySegment outTargets,
+        long targetCapacity,
+        MemorySegment outCount
+    ) {
         try {
-            return (int) CLIENT_LIST_TARGETS_HANDLE.invokeExact(client, outTargets, targetCapacity, outCount);
+            return (int) CLIENT_LIST_TARGETS_HANDLE.invokeExact(
+                client,
+                outTargets,
+                targetCapacity,
+                outCount
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_list_targets", throwable);
         }
     }
 
-    static int clientTryClaim(MemorySegment client, short templateId, long payloadLen, MemorySegment outClaim) {
+    static int clientTryClaim(
+        MemorySegment client,
+        short templateId,
+        long payloadLen,
+        MemorySegment outClaim
+    ) {
         try {
-            return (int) CLIENT_TRY_CLAIM_HANDLE.invokeExact(client, templateId, payloadLen, outClaim);
+            return (int) CLIENT_TRY_CLAIM_HANDLE.invokeExact(
+                client,
+                templateId,
+                payloadLen,
+                outClaim
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_try_claim", throwable);
         }
@@ -589,7 +1231,13 @@ final class RingloomNative {
         MemorySegment outClaim
     ) {
         try {
-            return (int) CLIENT_TRY_CLAIM_REQUEST_HANDLE.invokeExact(client, templateId, correlationId, payloadLen, outClaim);
+            return (int) CLIENT_TRY_CLAIM_REQUEST_HANDLE.invokeExact(
+                client,
+                templateId,
+                correlationId,
+                payloadLen,
+                outClaim
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_try_claim_request", throwable);
         }
@@ -604,7 +1252,14 @@ final class RingloomNative {
         MemorySegment outClaim
     ) {
         try {
-            return (int) CLIENT_TRY_CLAIM_TO_HANDLE.invokeExact(client, targetNodeId, targetServiceId, templateId, payloadLen, outClaim);
+            return (int) CLIENT_TRY_CLAIM_TO_HANDLE.invokeExact(
+                client,
+                targetNodeId,
+                targetServiceId,
+                templateId,
+                payloadLen,
+                outClaim
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_try_claim_to", throwable);
         }
@@ -620,15 +1275,33 @@ final class RingloomNative {
         MemorySegment outClaim
     ) {
         try {
-            return (int) CLIENT_TRY_CLAIM_TO_REQUEST_HANDLE.invokeExact(client, targetNodeId, targetServiceId, templateId, correlationId, payloadLen, outClaim);
+            return (int) CLIENT_TRY_CLAIM_TO_REQUEST_HANDLE.invokeExact(
+                client,
+                targetNodeId,
+                targetServiceId,
+                templateId,
+                correlationId,
+                payloadLen,
+                outClaim
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_try_claim_to_request", throwable);
         }
     }
 
-    static int clientTryClaimToLeader(MemorySegment client, short templateId, long payloadLen, MemorySegment outClaim) {
+    static int clientTryClaimToLeader(
+        MemorySegment client,
+        short templateId,
+        long payloadLen,
+        MemorySegment outClaim
+    ) {
         try {
-            return (int) CLIENT_TRY_CLAIM_TO_LEADER_HANDLE.invokeExact(client, templateId, payloadLen, outClaim);
+            return (int) CLIENT_TRY_CLAIM_TO_LEADER_HANDLE.invokeExact(
+                client,
+                templateId,
+                payloadLen,
+                outClaim
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_client_try_claim_to_leader", throwable);
         }
@@ -642,17 +1315,35 @@ final class RingloomNative {
         MemorySegment outClaim
     ) {
         try {
-            return (int) CLIENT_TRY_CLAIM_TO_LEADER_REQUEST_HANDLE.invokeExact(client, templateId, correlationId, payloadLen, outClaim);
+            return (int) CLIENT_TRY_CLAIM_TO_LEADER_REQUEST_HANDLE.invokeExact(
+                client,
+                templateId,
+                correlationId,
+                payloadLen,
+                outClaim
+            );
         } catch (Throwable throwable) {
-            throw propagate("ringloom_client_try_claim_to_leader_request", throwable);
+            throw propagate(
+                "ringloom_client_try_claim_to_leader_request",
+                throwable
+            );
         }
     }
 
-    static int clientLastAeronSendStatus(MemorySegment client, MemorySegment outStatus) {
+    static int clientLastAeronSendStatus(
+        MemorySegment client,
+        MemorySegment outStatus
+    ) {
         try {
-            return (int) CLIENT_LAST_AERON_SEND_STATUS_HANDLE.invokeExact(client, outStatus);
+            return (int) CLIENT_LAST_AERON_SEND_STATUS_HANDLE.invokeExact(
+                client,
+                outStatus
+            );
         } catch (Throwable throwable) {
-            throw propagate("ringloom_client_last_aeron_send_status", throwable);
+            throw propagate(
+                "ringloom_client_last_aeron_send_status",
+                throwable
+            );
         }
     }
 
@@ -674,7 +1365,10 @@ final class RingloomNative {
 
     static String statusName(int status) {
         try {
-            return readCString((MemorySegment) STATUS_STRING_HANDLE.invokeExact(status), 128);
+            return readCString(
+                (MemorySegment) STATUS_STRING_HANDLE.invokeExact(status),
+                128
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_status_string", throwable);
         }
@@ -682,33 +1376,177 @@ final class RingloomNative {
 
     static String aeronPublicationStatusName(int status) {
         try {
-            return readCString((MemorySegment) AERON_PUBLICATION_STATUS_STRING_HANDLE.invokeExact(status), 128);
+            return readCString(
+                (MemorySegment) AERON_PUBLICATION_STATUS_STRING_HANDLE.invokeExact(
+                    status
+                ),
+                128
+            );
         } catch (Throwable throwable) {
-            throw propagate("ringloom_aeron_publication_status_string", throwable);
+            throw propagate(
+                "ringloom_aeron_publication_status_string",
+                throwable
+            );
         }
     }
 
     static String lastErrorMessage() {
         try {
-            return readCString((MemorySegment) LAST_ERROR_MESSAGE_HANDLE.invokeExact(), 8192);
+            return readCString(
+                (MemorySegment) LAST_ERROR_MESSAGE_HANDLE.invokeExact(),
+                8192
+            );
         } catch (Throwable throwable) {
             throw propagate("ringloom_last_error_message", throwable);
         }
     }
 
+    // ── Topic native methods ───────────────────────────────────────────
+
+    static int topicRegisterPublication(
+        MemorySegment client,
+        MemorySegment cfg,
+        MemorySegment name,
+        long nameLen,
+        MemorySegment outPublisher
+    ) {
+        try {
+            return (int) TOPIC_REGISTER_PUBLICATION_HANDLE.invokeExact(
+                client,
+                cfg,
+                name,
+                nameLen,
+                outPublisher
+            );
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_register_topic_publication", throwable);
+        }
+    }
+
+    static int topicPublish(
+        MemorySegment publisher,
+        MemorySegment payload,
+        long payloadLen,
+        long correlationId,
+        int ackMode,
+        MemorySegment outIndex
+    ) {
+        try {
+            return (int) TOPIC_PUBLISH_HANDLE.invokeExact(
+                publisher,
+                payload,
+                payloadLen,
+                correlationId,
+                (byte) ackMode,
+                outIndex
+            );
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_publish_to_topic", throwable);
+        }
+    }
+
+    static int topicIsAcked(MemorySegment publisher, long publishIndex) {
+        try {
+            return (int) TOPIC_IS_ACKED_HANDLE.invokeExact(
+                publisher,
+                publishIndex
+            );
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_topic_is_acked", throwable);
+        }
+    }
+
+    static void topicUnregisterPublication(MemorySegment publisher) {
+        try {
+            TOPIC_UNREGISTER_PUBLICATION_HANDLE.invokeExact(publisher);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_unregister_topic_publication", throwable);
+        }
+    }
+
+    static int topicSubscribe(
+        MemorySegment client,
+        MemorySegment name,
+        long nameLen,
+        int start,
+        MemorySegment outSubscription
+    ) {
+        try {
+            return (int) TOPIC_SUBSCRIBE_HANDLE.invokeExact(
+                client,
+                name,
+                nameLen,
+                (byte) start,
+                outSubscription
+            );
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_subscribe_topic", throwable);
+        }
+    }
+
+    static int topicPoll(
+        MemorySegment subscription,
+        MemorySegment outPayload,
+        MemorySegment outLen,
+        MemorySegment outIndex
+    ) {
+        try {
+            return (int) TOPIC_POLL_HANDLE.invokeExact(
+                subscription,
+                outPayload,
+                outLen,
+                outIndex
+            );
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_topic_poll", throwable);
+        }
+    }
+
+    static void topicUnsubscribe(MemorySegment subscription) {
+        try {
+            TOPIC_UNSUBSCRIBE_HANDLE.invokeExact(subscription);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_unsubscribe_topic", throwable);
+        }
+    }
+
+    static int topicSubscriptionMaintenancePoll(
+        MemorySegment subscription,
+        int maxWorkUnits
+    ) {
+        try {
+            return (int) TOPIC_SUBSCRIPTION_MAINTENANCE_POLL_HANDLE.invokeExact(
+                subscription,
+                maxWorkUnits
+            );
+        } catch (Throwable throwable) {
+            throw propagate(
+                "ringloom_topic_subscription_maintenance_poll",
+                throwable
+            );
+        }
+    }
+
     static void throwForStatus(String action, int status) {
-        if (status == RingloomStatus.OK) {
+        if (status == RingloomStatus.OK || status == RingloomStatus.NOT_READY) {
             return;
         }
 
         String nativeMessage = lastErrorMessage();
         if (status == RingloomStatus.INVALID_ARGUMENT) {
-            throw new IllegalArgumentException(action + " failed: " + nativeMessage);
+            throw new IllegalArgumentException(
+                action + " failed: " + nativeMessage
+            );
         }
         if (status == RingloomStatus.OUT_OF_MEMORY) {
             throw new OutOfMemoryError(action + " failed: " + nativeMessage);
         }
-        throw new RingloomException(status, statusName(status), nativeMessage, action);
+        throw new RingloomException(
+            status,
+            statusName(status),
+            nativeMessage,
+            action
+        );
     }
 
     static MemorySegment payloadPointer(MemorySegment payload) {
@@ -731,19 +1569,38 @@ final class RingloomNative {
         return new String(copy, StandardCharsets.UTF_8);
     }
 
-    private static MethodHandle downcall(String symbol, FunctionDescriptor descriptor) {
-        MemorySegment address = SYMBOLS.find(symbol)
-            .orElseThrow(() -> new IllegalStateException("Missing native symbol " + symbol));
+    private static MethodHandle downcall(
+        String symbol,
+        FunctionDescriptor descriptor
+    ) {
+        MemorySegment address = SYMBOLS.find(symbol).orElseThrow(() ->
+            new IllegalStateException("Missing native symbol " + symbol)
+        );
         return LINKER.downcallHandle(address, descriptor);
     }
 
-    private static RuntimeException propagate(String action, Throwable throwable) {
+    private static MethodHandle optionalDowncall(
+        String symbol,
+        FunctionDescriptor descriptor
+    ) {
+        return SYMBOLS.find(symbol)
+            .map(address -> LINKER.downcallHandle(address, descriptor))
+            .orElse(null);
+    }
+
+    private static RuntimeException propagate(
+        String action,
+        Throwable throwable
+    ) {
         if (throwable instanceof RuntimeException runtimeException) {
             return runtimeException;
         }
         if (throwable instanceof Error error) {
             throw error;
         }
-        return new IllegalStateException("Native invocation failed for " + action, throwable);
+        return new IllegalStateException(
+            "Native invocation failed for " + action,
+            throwable
+        );
     }
 }
