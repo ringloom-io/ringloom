@@ -125,6 +125,9 @@ pub const ControlLoop = struct {
     /// Next time (monotonic ns) to re-broadcast local service discovery.
     next_service_rebroadcast_ns: i64,
 
+    /// Next time (monotonic ns) to re-broadcast local topic creations (spec 02 §8).
+    next_topic_rebroadcast_ns: i64,
+
     /// Next time (monotonic ns) to send broker heartbeat on admin UDP.
     next_broker_heartbeat_ns: i64,
 
@@ -258,6 +261,7 @@ pub const ControlLoop = struct {
             .next_heartbeat_check_ns = 0,
             .next_fc_check_ns = 0,
             .next_service_rebroadcast_ns = 0,
+            .next_topic_rebroadcast_ns = 0,
             .next_broker_heartbeat_ns = 0,
             .allocator = opts.allocator,
             .admin_cmd_queue = opts.admin_cmd_queue,
@@ -333,6 +337,16 @@ pub const ControlLoop = struct {
                 self.broadcastAllLocalServices();
                 self.broadcastAllLocalCapacities();
                 self.next_service_rebroadcast_ns = now_ns + SERVICE_REBROADCAST_INTERVAL_NS;
+            }
+
+            // 3d-bis. Reconcile topic creations. Same rationale as services:
+            // TopicCreated admin broadcasts are idempotent and repair initial
+            // deliveries dropped while the Aeron admin publication connects.
+            if (self.peer_node_ids.len > 0 and now_ns > self.next_topic_rebroadcast_ns) {
+                if (self.topic_subsystem) |ts| {
+                    self.broadcastAllLocalTopics(ts);
+                }
+                self.next_topic_rebroadcast_ns = now_ns + SERVICE_REBROADCAST_INTERVAL_NS;
             }
 
             // 3e. Topic leadership — check and drive failover (spec 08).
@@ -840,9 +854,9 @@ pub const ControlLoop = struct {
         self.sendLeaderChangedToLocalSubscribers(leader_id, body.node_id, name);
     }
 
-    /// When a new peer connects, re-broadcast all local services so they
-    /// learn about us (handles the late-join case where the initial broadcast
-    /// was lost because the TCP link wasn't up yet).
+    /// When a new peer connects, re-broadcast all local services and topics so
+    /// they learn about us (handles the late-join case where the initial broadcast
+    /// was lost because the Aeron admin publication wasn't connected yet).
     fn handlePeerConnected(self: *Self, node_id: u8) void {
         log.info("peer connected notification: node={}, re-broadcasting {} local services", .{
             node_id,
@@ -850,6 +864,9 @@ pub const ControlLoop = struct {
         });
         self.broadcastAllLocalServices();
         self.broadcastAllLocalCapacities();
+        if (self.topic_subsystem) |ts| {
+            self.broadcastAllLocalTopics(ts);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -1056,18 +1073,9 @@ pub const ControlLoop = struct {
                 self.counters.increment(self.admin_udp_counters.unknown_peer);
                 log.warn("unknown peer for admin UDP template={} node={}", .{ template_id, peer_id });
             },
-            .not_connected => {
-                self.counters.increment(self.admin_udp_counters.not_connected);
-                log.debug("admin UDP publication not connected: template={} node={}", .{ template_id, peer_id });
-            },
-            .back_pressured => {
-                self.counters.increment(self.admin_udp_counters.back_pressured);
-                log.debug("admin UDP back pressured: template={} node={}", .{ template_id, peer_id });
-            },
-            .admin_action => {
-                self.counters.increment(self.admin_udp_counters.admin_action);
-                log.debug("admin UDP admin-action retry requested: template={} node={}", .{ template_id, peer_id });
-            },
+            .not_connected => self.counters.increment(self.admin_udp_counters.not_connected),
+            .back_pressured => self.counters.increment(self.admin_udp_counters.back_pressured),
+            .admin_action => self.counters.increment(self.admin_udp_counters.admin_action),
             .closed => {
                 self.counters.increment(self.admin_udp_counters.closed);
                 log.warn("admin UDP forward failed: template={} node={} result=closed", .{ template_id, peer_id });
@@ -1101,6 +1109,18 @@ pub const ControlLoop = struct {
                 inst.messages_buffer_capacity,
                 inst.last_fc_remaining,
             );
+        }
+    }
+
+    /// Re-broadcast TopicCreated for every topic this node leads (spec 02 §8).
+    /// Idempotent — replicas ignore duplicate creates. Periodic calls repair
+    /// initial deliveries lost while the Aeron admin publication connects.
+    fn broadcastAllLocalTopics(self: *Self, ts: *topics.TopicSubsystem) void {
+        var iter = ts.iterateTopics();
+        while (iter.next()) |rec| {
+            // Only the leader originates TopicCreated; replicas are passive.
+            if (rec.leader_node_id != self.local_node_id) continue;
+            self.broadcastTopicCreated(rec.topic_id, rec.name, rec.config, rec.leader_node_id, rec.leader_epoch);
         }
     }
 
@@ -1522,7 +1542,7 @@ pub const ControlLoop = struct {
         const name = topic_messages.registerTopicName(payload);
         if (name.len == 0) return;
 
-        const result = ts.registerPublication(name, msg.config, platform.Clock.monotonicNanos());
+        const result = ts.registerPublication(name, msg.config, platform.Clock.monotonicNanos(), msg.local_service_id);
 
         // Reply with TopicPublicationResponse.
         var buf: [512]u8 = undefined;
@@ -1544,8 +1564,14 @@ pub const ControlLoop = struct {
         _ = self.writeToServiceControl(@intCast(msg.local_service_id), buf[0..n]);
 
         // If newly created on the topic leader, broadcast TopicCreated admin.
+        // Deferred: the periodic broadcastAllLocalTopics (duty cycle step 3d-bis)
+        // handles this within one second, after the Aeron admin publication has
+        // had time to connect. Broadcasting immediately often races the connection
+        // setup and drops the one-shot admin frame silently.
         if (result.newly_created and result.status == .ok) {
-            self.broadcastTopicCreated(result.topic_id, name, result.effective_config, result.leader_node_id, result.leader_epoch);
+            // Reschedule the periodic rebroadcast to fire immediately on the
+            // next duty cycle iteration rather than waiting the full interval.
+            self.next_topic_rebroadcast_ns = 0;
         }
     }
 
@@ -1685,11 +1711,13 @@ pub const ControlLoop = struct {
         const ts = self.topic_subsystem orelse return;
         var body: topic_admin.TopicAckFeedbackBody = undefined;
         @memcpy(@as(*[@sizeOf(topic_admin.TopicAckFeedbackBody)]u8, @ptrCast(&body)), &data);
-        if (ts.registry.getById(body.topic_id)) |_| {
-            var buf: [64]u8 = undefined;
-            const n = topic_messages.encodeAckFeedback(&buf, body.topic_id, body.leader_epoch, body.replicated_hwm);
-            _ = n;
-        }
+        const rec = ts.registry.getById(body.topic_id) orelse return;
+        // Forward the throttled HWM feedback to the local producer service so its
+        // pending replicate_once acks can complete. No local producer → nothing to do.
+        if (rec.producer_service_id < 0) return;
+        var buf: [64]u8 = undefined;
+        const n = topic_messages.encodeAckFeedback(&buf, body.topic_id, body.leader_epoch, body.replicated_hwm, body.replicated_count);
+        _ = self.writeToServiceControl(rec.producer_service_id, buf[0..n]);
     }
 
     fn broadcastTopicCreated(
@@ -1766,6 +1794,18 @@ pub const ControlLoop = struct {
                     .from_node = rec.leader_node_id,
                     .target_index = 0,
                 } });
+                // Notify local producers of the new topic leader (template 13) so
+                // they re-target publishes and stamp the new epoch on ack entries.
+                if (rec.producer_service_id >= 0) {
+                    var lc_buf: [64]u8 = undefined;
+                    const ln = topic_messages.encodeTopicLeaderChanged(
+                        &lc_buf,
+                        rec.topic_id,
+                        @intCast(self.local_node_id),
+                        result.leader_epoch,
+                    );
+                    _ = self.writeToServiceControl(rec.producer_service_id, lc_buf[0..ln]);
+                }
             }
             return 1;
         }
@@ -1850,6 +1890,7 @@ pub const ControlLoop = struct {
 
             self.topic_next_ack_feedback_ns.put(tq.topic_id, now_ns + interval_ns) catch continue;
 
+            // 1. Broadcast to remote peers so replicas advance their HWM too.
             self.broadcastAdminMessage(
                 topic_admin.TopicAckFeedbackBody,
                 topic_admin.TEMPLATE_TOPIC_ACK_FEEDBACK,
@@ -1857,8 +1898,19 @@ pub const ControlLoop = struct {
                     .topic_id = tq.topic_id,
                     .leader_epoch = tq.epoch,
                     .replicated_hwm = tq.replicated_hwm,
+                    .replicated_count = tq.replicatedCount(),
                 },
             );
+            // 2. Deliver directly to any local producer service so its pending
+            //    replicate_once acks complete without a round-trip through the
+            //    admin UDP channel.
+            if (ts.registry.getById(tq.topic_id)) |rec| {
+                if (rec.producer_service_id >= 0) {
+                    var buf: [64]u8 = undefined;
+                    const n = topic_messages.encodeAckFeedback(&buf, tq.topic_id, tq.epoch, tq.replicated_hwm, tq.replicatedCount());
+                    _ = self.writeToServiceControl(@intCast(rec.producer_service_id), buf[0..n]);
+                }
+            }
             work += 1;
         }
         return work;

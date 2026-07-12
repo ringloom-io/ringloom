@@ -11,6 +11,9 @@ pub const concurrent = @import("concurrent.zig");
 pub const message = @import("message.zig");
 pub const monitoring = @import("monitoring.zig");
 
+// Shared topic wire types and identity — used by broker, service, and bindings.
+pub const topics = @import("topics.zig");
+
 // Configuration — shared config loading helpers.
 pub const config = struct {
     pub const broker_config = @import("config/broker_config.zig");
@@ -88,10 +91,16 @@ comptime {
     _ = @import("message/message_header.zig");
     _ = @import("message/data_header.zig");
     _ = @import("message/control_encoding.zig");
+    _ = @import("message/control_messages.zig");
+    _ = @import("message/topic_control_messages.zig");
     _ = @import("message/message_fragmenting_producer.zig");
     _ = @import("message/message_assembler.zig");
     _ = @import("message/flow_control_messages.zig");
     _ = @import("message/latency_trace.zig");
+
+    // Topics (shared wire types)
+    _ = @import("topics/topic_id.zig");
+    _ = @import("topics/topic_config.zig");
 
     // Monitoring
     _ = @import("monitoring/system_counter.zig");
@@ -114,6 +123,7 @@ test "common module compiles" {
     _ = memory;
     _ = concurrent;
     _ = message;
+    _ = topics;
     _ = config;
     _ = monitoring;
 }

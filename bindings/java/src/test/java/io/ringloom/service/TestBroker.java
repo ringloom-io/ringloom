@@ -27,13 +27,19 @@ final class TestBroker implements AutoCloseable {
         return start(repoRoot, workspace, (short) 1, 19001, "ringloom-java-test");
     }
 
+    /** Single-node topics-enabled broker, for topic integration tests. */
+    static TestBroker startTopicsEnabled(Path repoRoot, Path workspace) throws IOException, InterruptedException {
+        return start(repoRoot, workspace, (short) 1, 19001, "ringloom-java-test", new String[0], true);
+    }
+
     static TestBroker start(
         Path repoRoot,
         Path workspace,
         short nodeId,
         int port,
         String group,
-        String... peers
+        String[] peers,
+        boolean topicsEnabled
     ) throws IOException, InterruptedException {
         Path brokerBin = Path.of(System.getProperty("ringloom.brokerBin"));
         var command = new java.util.ArrayList<String>();
@@ -50,6 +56,9 @@ final class TestBroker implements AutoCloseable {
         command.add("--daemon");
         command.add("--bin-dir");
         command.add(brokerBin.getParent().toString());
+        if (topicsEnabled) {
+            command.add("--topics");
+        }
         for (String peer : peers) {
             command.add("--peer");
             command.add(peer);
@@ -71,6 +80,18 @@ final class TestBroker implements AutoCloseable {
             env.get("RINGLOOM_STORAGE_PATH"),
             env.get("RINGLOOM_GROUP")
         );
+    }
+
+    /** Backwards-compatible overload: single-node, topics disabled. */
+    static TestBroker start(
+        Path repoRoot,
+        Path workspace,
+        short nodeId,
+        int port,
+        String group,
+        String... peers
+    ) throws IOException, InterruptedException {
+        return start(repoRoot, workspace, nodeId, port, group, peers, false);
     }
 
     short nodeId() {

@@ -15,13 +15,15 @@ const RingLoomEngine = engine_mod.RingLoomEngine;
 const EngineServiceConfig = engine_mod.ServiceConfig;
 const StartOptions = engine_mod.StartOptions;
 const ServiceClient = @import("service_client.zig").ServiceClient;
+const control_agent_mod = @import("control_agent.zig");
+const Clock = ringloom_common.platform.Clock;
 
 pub const ringloom_service = opaque {};
 pub const ringloom_client = opaque {};
 pub const ringloom_message_consumer = opaque {};
 pub const ringloom_metrics_reader = opaque {};
 
-pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 4;
+pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 5;
 const max_error_message_length = error_state_mod.max_error_message_length;
 const claim_handle_record_length = std.math.minInt(i32);
 
@@ -38,6 +40,10 @@ pub const ringloom_status_t = enum(c_int) {
     RINGLOOM_ERR_CLAIM_NOT_ACTIVE = 9,
     RINGLOOM_ERR_MESSAGE_TOO_LONG = 10,
     RINGLOOM_NOT_READY = 11,
+    RINGLOOM_ERR_TOPIC_LEADER_UNAVAILABLE = 12,
+    RINGLOOM_ERR_TOPIC_DISABLED = 13,
+    RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH = 14,
+    RINGLOOM_ERR_TOPIC_UNKNOWN = 15,
     RINGLOOM_ERR_INTERNAL = 255,
 };
 
@@ -1646,6 +1652,9 @@ pub const ringloom_topic_start_t = enum(c_int) {
 const TopicPublisherHandle = struct {
     allocator: std.mem.Allocator,
     publisher: topic_publisher_mod.TopicPublisher,
+    /// Engine that owns the publisher registry + aeron runtime; used at close
+    /// to unregister from the registry. Null only if allocation failed mid-way.
+    engine: ?*RingLoomEngine = null,
 };
 
 const TopicSubscriptionHandle = struct {
@@ -1655,10 +1664,11 @@ const TopicSubscriptionHandle = struct {
 
 const topic_publisher_mod = @import("topics/topic_publisher.zig");
 const topic_subscription_mod = @import("topics/topic_subscription.zig");
-const topic_types = @import("topics/topic_types.zig");
+const topic_publisher_registry_mod = @import("topics/topic_publisher_registry.zig");
+const topic_messages = ringloom_common.message.topic_control_messages;
 
-fn topicConfigFromC(cfg: *const ringloom_topic_config_t) topic_types.TopicConfig {
-    var out = topic_types.TopicConfig{};
+fn topicConfigFromC(cfg: *const ringloom_topic_config_t) ringloom_common.topics.TopicConfig {
+    var out = ringloom_common.topics.TopicConfig{};
     out.retention_cycles = cfg.retention_cycles;
     out.flags = cfg.flags;
     const n = @min(cfg.roll_scheme.len, out.roll_scheme_name.len);
@@ -1674,7 +1684,7 @@ export fn ringloom_register_topic_publication(
     out_publisher: ?*?*ringloom_topic_publisher,
 ) Status {
     clearLastError();
-    const client_ptr = client orelse
+    const client_handle = clientHandleFromOpaque(client) orelse
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "client must not be NULL");
     const cfg_ptr = cfg orelse
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "cfg must not be NULL");
@@ -1684,31 +1694,78 @@ export fn ringloom_register_topic_publication(
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_publisher must not be NULL");
     out.* = null;
 
-    _ = client_ptr;
-
+    const engine = client_handle.service.engine orelse
+        return setLastError(.RINGLOOM_ERR_INTERNAL, "service engine is not running");
     const name_slice = if (name_len == 0) "" else name_ptr[0..name_len];
-
-    // Create a publisher with the topic config.
     const topic_cfg = topicConfigFromC(cfg_ptr);
-    _ = topic_cfg;
 
+    // 1. Send RegisterTopicPublication (template 7) over the broker control RB.
+    control_agent_mod.registerTopicPublication(
+        engine.broker_meta,
+        engine.service_id,
+        topic_cfg,
+        name_slice,
+    ) catch return setLastError(.RINGLOOM_ERR_INTERNAL, "failed to send topic registration");
+
+    // 2. Await the TopicPublicationResponse (template 8), polling the control RB.
+    const response = control_agent_mod.waitForTopicPublicationResponse(engine.service_meta, 5000) catch
+        return setLastError(.RINGLOOM_ERR_REGISTRATION_TIMEOUT, "topic registration timed out");
+
+    const ok_status: u8 = @intFromEnum(topic_messages.PublicationStatus.ok);
+    if (response.status != ok_status) {
+        return switch (response.status) {
+            @intFromEnum(topic_messages.PublicationStatus.config_mismatch) =>
+                setLastError(.RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH, "topic config mismatch"),
+            @intFromEnum(topic_messages.PublicationStatus.collision) =>
+                setLastError(.RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH, "topic id collision"),
+            @intFromEnum(topic_messages.PublicationStatus.disabled) =>
+                setLastError(.RINGLOOM_ERR_TOPIC_DISABLED, "topics disabled on broker"),
+            else => setLastError(.RINGLOOM_ERR_INTERNAL, "topic registration failed"),
+        };
+    }
+
+    // 3. Build the publisher with the real topic_id / leader identity and open
+    //    the leader IPC publication (co-located broker subscribes on
+    //    pub_stream_base + leader_node_id).
     const allocator = topic_publisher_handle_allocator.allocator();
     const handle = allocator.create(TopicPublisherHandle) catch
         return setLastError(.RINGLOOM_ERR_OUT_OF_MEMORY, "native allocation failed");
     handle.* = .{
         .allocator = allocator,
+        .engine = engine,
         .publisher = .{
-            .topic_id = 0,
-            .leader_node_id = 0,
-            .leader_epoch = 0,
+            .topic_id = response.topic_id,
+            .leader_node_id = @intCast(@max(0, response.leader_node_id)),
+            .leader_epoch = response.leader_epoch,
         },
     };
-    handle.publisher.topic_id = std.hash.Wyhash.hash(0, name_slice);
+    if (response.leader_node_id > 0) {
+        // Open the leader IPC publication and wire it into the publisher so its
+        // publish() hot path can offer frames to the co-located broker.
+        const opened = engine.aeron_runtime.addIpcPublication(handle.publisher.leader_node_id) catch null;
+        if (opened) |pub_ptr| {
+            handle.publisher.leader_pub = pub_ptr.*;
+            // Wait for the exclusive IPC publication to link to the co-located
+            // broker's topic subscription (drive the conductor while waiting).
+            const connect_deadline = Clock.monotonicNanos() + 2000 * std.time.ns_per_ms;
+            while (Clock.monotonicNanos() < connect_deadline) {
+                _ = engine.aeron_runtime.doWork() catch {};
+                if (handle.publisher.leader_pub.?.isConnected()) break;
+                std.atomic.spinLoopHint();
+            }
+        } else {
+            return setLastError(.RINGLOOM_ERR_INTERNAL, "failed to open topic leader IPC publication");
+        }
+    }
+    // 4. Register in the engine's publisher registry so ack-feedback (template
+    //    15) and leader-change (template 13) frames reach this publisher.
+    engine.topic_publishers.register(response.topic_id, &handle.publisher) catch {};
     out.* = @ptrCast(handle);
     return .RINGLOOM_OK;
 }
 
 var topic_publisher_handle_allocator: std.heap.DebugAllocator(.{}) = .{};
+var topic_subscription_handle_allocator: std.heap.DebugAllocator(.{}) = .{};
 
 fn topicPublisherFromOpaque(p: ?*ringloom_topic_publisher) ?*TopicPublisherHandle {
     return if (p) |ptr| @ptrCast(@alignCast(ptr)) else null;
@@ -1727,11 +1784,21 @@ export fn ringloom_publish_to_topic(
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "publisher must not be NULL");
     const payload_ptr = if (payload_len == 0) null else payload orelse return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "payload must not be NULL");
 
-    const mode = topic_types.AckMode.fromU8(ack_mode) orelse .fire_and_forget;
+    const mode = ringloom_common.topics.AckMode.fromU8(ack_mode) orelse .fire_and_forget;
     const payload_slice = if (payload_ptr) |p| p[0..payload_len] else &[0]u8{};
+
+    // Drive the Aeron conductor (agent invoker mode) so the leader IPC
+    // publication stays linked to the co-located broker's topic subscription.
+    // Mirrors the service-client send path, which invokes the conductor per send.
+    if (handle.engine) |engine| {
+        _ = engine.aeron_runtime.doWork() catch {};
+    }
     const result = handle.publisher.publish(payload_slice, correlation_id, mode);
 
-    if (out_index) |idx| idx.* = 0; // place holder
+    // On success, surface the per-topic sequence token assigned at offer time
+    // so replicate_once callers can poll isAcked(token). The token is stable and
+    // client-comparable (unlike the broker queue index).
+    if (out_index) |idx| idx.* = if (result == .ok) handle.publisher.lastAssignedToken() else 0;
     return switch (result) {
         .ok => .RINGLOOM_OK,
         .not_connected => .RINGLOOM_ERR_PEER_DISCONNECTED,
@@ -1752,6 +1819,13 @@ export fn ringloom_unregister_topic_publication(
     publisher: ?*ringloom_topic_publisher,
 ) void {
     const handle = topicPublisherFromOpaque(publisher) orelse return;
+    // Unregister from the engine's publisher registry so ack-feedback stops
+    // targeting this (now-closing) publisher.
+    if (handle.engine) |engine| {
+        engine.topic_publishers.unregister(handle.publisher.topic_id);
+        // Best-effort: notify the broker (template 11; broker no-ops on full mesh).
+        control_agent_mod.unregisterTopicPublication(engine.broker_meta, engine.service_id, handle.publisher.topic_id) catch {};
+    }
     handle.publisher.deinit();
     handle.allocator.destroy(handle);
 }
@@ -1768,7 +1842,7 @@ export fn ringloom_subscribe_topic(
     out_subscription: ?*?*ringloom_topic_subscription,
 ) Status {
     clearLastError();
-    const client_ptr = client orelse
+    const client_handle = clientHandleFromOpaque(client) orelse
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "client must not be NULL");
     const name_ptr = name orelse
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "name must not be NULL");
@@ -1776,14 +1850,58 @@ export fn ringloom_subscribe_topic(
         return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "out_subscription must not be NULL");
     out.* = null;
 
-    _ = client_ptr;
-    _ = name_ptr;
-    _ = name_len;
-    _ = start;
-    // Subscription requires a queue directory from the broker response.
-    // This C ABI stub returns NOT_FOUND until the control-plane integration
-    // delivers the queue_dir (Phase 2 control agent).
-    return .RINGLOOM_ERR_INTERNAL;
+    const engine = client_handle.service.engine orelse
+        return setLastError(.RINGLOOM_ERR_INTERNAL, "service engine is not running");
+    const name_slice = if (name_len == 0) "" else name_ptr[0..name_len];
+    const start_position: topic_messages.StartPosition = switch (start) {
+        .RINGLOOM_TOPIC_START_EARLIEST => .earliest,
+        .RINGLOOM_TOPIC_START_LATEST => .latest,
+    };
+
+    // 1. Send SubscribeTopic (template 9) and await the response (template 10).
+    control_agent_mod.subscribeTopic(engine.broker_meta, engine.service_id, start_position, name_slice) catch
+        return setLastError(.RINGLOOM_ERR_INTERNAL, "failed to send topic subscription");
+    const response = control_agent_mod.waitForTopicSubscriptionResponse(engine.service_meta, 5000) catch
+        return setLastError(.RINGLOOM_ERR_REGISTRATION_TIMEOUT, "topic subscription timed out");
+
+    const ok_status: u8 = @intFromEnum(topic_messages.SubscriptionStatus.ok);
+    if (response.status != ok_status) {
+        return switch (response.status) {
+            @intFromEnum(topic_messages.SubscriptionStatus.unknown_topic) =>
+                setLastError(.RINGLOOM_ERR_TOPIC_UNKNOWN, "unknown topic"),
+            @intFromEnum(topic_messages.SubscriptionStatus.disabled) =>
+                setLastError(.RINGLOOM_ERR_TOPIC_DISABLED, "topics disabled on broker"),
+            else => setLastError(.RINGLOOM_ERR_INTERNAL, "topic subscription failed"),
+        };
+    }
+
+    // 2. Open a tailer on the broker-supplied queue_dir. The response's queue_dir
+    //    borrows into the control ring buffer; dup it onto a stable allocation.
+    const allocator = topic_subscription_handle_allocator.allocator();
+    const queue_dir = allocator.dupe(u8, response.queue_dir) catch
+        return setLastError(.RINGLOOM_ERR_OUT_OF_MEMORY, "failed to copy queue_dir");
+
+    const sub = topic_subscription_mod.TopicSubscription.open(
+        allocator,
+        queue_dir,
+        response.start_index,
+        // Geometry from the broker response (roll scheme etc.); the tailer
+        // opens the existing queue file matching this geometry.
+        response.geometry,
+    ) catch {
+        allocator.free(queue_dir);
+        return setLastError(.RINGLOOM_ERR_INTERNAL, "failed to open topic tailer");
+    };
+
+    const handle = allocator.create(TopicSubscriptionHandle) catch {
+        allocator.free(queue_dir);
+        return setLastError(.RINGLOOM_ERR_OUT_OF_MEMORY, "native allocation failed");
+    };
+    handle.* = .{ .allocator = allocator, .subscription = sub };
+    // Store the topic_id on the subscription for the accessor.
+    handle.subscription.topic_id = response.topic_id;
+    out.* = @ptrCast(handle);
+    return .RINGLOOM_OK;
 }
 
 export fn ringloom_topic_poll(
@@ -1831,6 +1949,28 @@ export fn ringloom_unsubscribe_topic(
     handle.allocator.destroy(handle);
 }
 
+// ── Topic accessors ────────────────────────────────────────────────────
+
+export fn ringloom_topic_publisher_id(publisher: ?*const ringloom_topic_publisher) u64 {
+    const handle = topicPublisherFromOpaque(@constCast(publisher)) orelse return 0;
+    return handle.publisher.topic_id;
+}
+
+export fn ringloom_topic_publisher_leader_epoch(publisher: ?*const ringloom_topic_publisher) u64 {
+    const handle = topicPublisherFromOpaque(@constCast(publisher)) orelse return 0;
+    return handle.publisher.leader_epoch;
+}
+
+export fn ringloom_topic_publisher_replicated_count(publisher: ?*const ringloom_topic_publisher) u64 {
+    const handle = topicPublisherFromOpaque(@constCast(publisher)) orelse return 0;
+    return handle.publisher.replicated_count;
+}
+
+export fn ringloom_topic_subscription_id(subscription: ?*const ringloom_topic_subscription) u64 {
+    const handle = topicSubscriptionFromOpaque(@constCast(subscription)) orelse return 0;
+    return handle.subscription.topic_id;
+}
+
 export fn ringloom_status_string(status: Status) [*:0]const u8 {
     return switch (status) {
         .RINGLOOM_OK => "ok",
@@ -1845,6 +1985,10 @@ export fn ringloom_status_string(status: Status) [*:0]const u8 {
         .RINGLOOM_ERR_CLAIM_NOT_ACTIVE => "claim_not_active",
         .RINGLOOM_ERR_MESSAGE_TOO_LONG => "message_too_long",
         .RINGLOOM_NOT_READY => "not_ready",
+        .RINGLOOM_ERR_TOPIC_LEADER_UNAVAILABLE => "topic_leader_unavailable",
+        .RINGLOOM_ERR_TOPIC_DISABLED => "topic_disabled",
+        .RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH => "topic_config_mismatch",
+        .RINGLOOM_ERR_TOPIC_UNKNOWN => "topic_unknown",
         .RINGLOOM_ERR_INTERNAL => "internal",
     };
 }

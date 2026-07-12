@@ -12,6 +12,7 @@ peer_endpoints=()
 bin_dir="zig-out/bin"
 timeout_sec="10"
 mode=""
+topics_enabled="false"
 
 usage() {
     cat <<'EOF'
@@ -61,6 +62,10 @@ while [[ $# -gt 0 ]]; do
         --timeout)
             timeout_sec="$2"
             shift 2
+            ;;
+        --topics)
+            topics_enabled="true"
+            shift
             ;;
         --foreground)
             mode="foreground"
@@ -130,6 +135,10 @@ write_config() {
         printf 'broker.messages.buffer.size=1048576\n'
         printf 'broker.threading.mode=dedicated\n'
         printf 'broker.idle.strategy=backoff\n'
+        if [[ "$topics_enabled" == "true" ]]; then
+            printf 'broker.topics.enabled=true\n'
+            printf 'broker.topics.path=%s/topics\n' "$storage_dir"
+        fi
     } >"$config_file"
 }
 

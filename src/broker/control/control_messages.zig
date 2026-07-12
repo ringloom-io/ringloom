@@ -17,22 +17,15 @@
 //!   6  LeaderChanged            Broker → Service
 
 const std = @import("std");
+const common = @import("ringloom_common");
 
 // ── Common Header ─────────────────────────────────────────────────────
 
-/// 4-byte header prefixed to every control message.
-/// The ring buffer's own record header (8 bytes) wraps this — the control
-/// message header is the first thing inside the record payload.
-pub const ControlMessageHeader = extern struct {
-    /// Identifies the message type (see template_id table above).
-    template_id: u16,
-
-    /// Length of the message body AFTER this header, in bytes.
-    /// Total message size = @sizeOf(ControlMessageHeader) + body_length.
-    body_length: u16,
-};
-
-pub const header_size: usize = @sizeOf(ControlMessageHeader); // 4
+// The 4-byte header now lives in `ringloom_common` so the service runtime (and
+// bindings) encode/decode the identical layout. Re-exported here for existing
+// broker imports.
+pub const ControlMessageHeader = common.message.control_messages.ControlMessageHeader;
+pub const header_size: usize = common.message.control_messages.header_size;
 
 // ── Message Definitions ───────────────────────────────────────────────
 

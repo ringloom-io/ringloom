@@ -21,6 +21,7 @@ public final class TopicPublisher implements AutoCloseable {
     private final MemorySegment nativeHandle;
     private final AtomicBoolean closed;
     private final String topic;
+    private final long topicId;
     private final long[] discardedIndexHolder = new long[1];
 
     // Preallocated out-parameter segment for zero-allocation publish.
@@ -36,6 +37,52 @@ public final class TopicPublisher implements AutoCloseable {
         this.topic = Objects.requireNonNull(topic, "topic");
         this.scratchArena = Arena.ofShared();
         this.outIndex = scratchArena.allocate(ValueLayout.JAVA_LONG);
+        // Resolve the broker-assigned topic id once at construction. On older
+        // native builds without the accessor symbol this is 0 ("unavailable").
+        this.topicId = RingloomNative.topicPublisherId(nativeHandle);
+    }
+
+    /**
+     * The broker-assigned topic id for this publication.
+     *
+     * <p>Resolved once at construction; stable for the lifetime of the handle.
+     * Returns {@code 0} on older native builds that lack the accessor.</p>
+     *
+     * @return the topic id, or {@code 0} if unavailable
+     */
+    public long topicId() {
+        return topicId;
+    }
+
+    /**
+     * The publisher's current leader epoch.
+     *
+     * <p>Polls the native handle each call (the epoch advances on leader change,
+     * delivered via {@code TopicLeaderChanged}). Returns {@code 0} on older native
+     * builds that lack the accessor.</p>
+     *
+     * @return the current leader epoch, or {@code 0} if unavailable
+     */
+    public long leaderEpoch() {
+        ensureOpen();
+        return RingloomNative.topicPublisherLeaderEpoch(nativeHandle);
+    }
+
+    /**
+     * The count of this topic's publishes replicated to {@code >=1} replica
+     * (or appended, on a single-node broker).
+     *
+     * <p>Polls the native handle each call; advances as the broker's throttled
+     * ack feedback ({@code TopicAckFeedback}) lands. A {@code replicate_once}
+     * publish whose assigned sequence token (returned in {@code outIndexHolder})
+     * is {@code <= replicatedCount()} is considered acked — equivalent to
+     * {@link #isAcked(long)}. Returns {@code 0} on older native builds.</p>
+     *
+     * @return the replicated publish count, or {@code 0} if unavailable
+     */
+    public long replicatedCount() {
+        ensureOpen();
+        return RingloomNative.topicPublisherReplicatedCount(nativeHandle);
     }
 
     /**

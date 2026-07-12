@@ -17,6 +17,13 @@ pub const ReplDirection = topic_data_header.ReplDirection;
 
 pub const control_encoding = @import("message/control_encoding.zig");
 
+/// Shared 4-byte control-message header (broker + service).
+pub const control_messages = @import("message/control_messages.zig");
+pub const ControlMessageHeader = control_messages.ControlMessageHeader;
+
+/// Shared topic control messages (templates 7–15, spec 03).
+pub const topic_control_messages = @import("message/topic_control_messages.zig");
+
 pub const message_fragmenting_producer = @import("message/message_fragmenting_producer.zig");
 pub const MessageFragmentingProducer = message_fragmenting_producer.MessageFragmentingProducer;
 
@@ -32,6 +39,8 @@ comptime {
     _ = @import("message/data_header.zig");
     _ = @import("message/topic_data_header.zig");
     _ = @import("message/control_encoding.zig");
+    _ = @import("message/control_messages.zig");
+    _ = @import("message/topic_control_messages.zig");
     _ = @import("message/message_fragmenting_producer.zig");
     _ = @import("message/message_assembler.zig");
     _ = @import("message/flow_control_messages.zig");

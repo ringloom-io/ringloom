@@ -83,6 +83,11 @@ pub const BrokerApplication = struct {
     /// Persistent topics subsystem (null when topics are disabled).
     topic_subsystem: ?*topics.TopicSubsystem = null,
 
+    /// Standalone topic IPC subscription for single-node brokers (topics
+    /// enabled but no peers → no UDP transport). Owned by the application;
+    /// passed by pointer to the receiver loop.
+    standalone_topic_ipc_subscription: ?ringloom_aeron.Subscription = null,
+
     /// Adapter that bridges topic replication channels to Aeron (owned, stable pointer).
     repl_publisher_adapter: broker_aeron.ReplPublisherAdapter = .{},
 
@@ -146,6 +151,7 @@ pub const BrokerApplication = struct {
         self.shared_composite_loop = null;
         self.broker_threads = null;
         self.stopAeronUdpTransport();
+        self.stopStandaloneTopicIpcSubscription();
         self.stopAeronClient();
         self.stopAeronDriver();
 
@@ -303,6 +309,17 @@ pub const BrokerApplication = struct {
             self.receiver_loop.?.setTopicSubsystem(ts);
         }
 
+        // Standalone topic IPC subscription for single-node brokers (topics
+        // enabled but no peers → UDP transport was skipped). Without this
+        // subscription co-located service publishers can never connect.
+        if (topics_cfg.enabled and self.aeron_udp_transport == null) {
+            var ipc_uri_buf: [64]u8 = undefined;
+            const ipc_channel_z = try std.fmt.bufPrintZ(&ipc_uri_buf, "aeron:ipc", .{});
+            const topic_ipc_stream_id: i32 = @as(i32, @intCast(topics_cfg.pub_stream_base)) + @as(i32, @intCast(self.config.node_id));
+            self.standalone_topic_ipc_subscription = try self.aeron_client.?.client.addSubscription(ipc_channel_z, topic_ipc_stream_id, &self.aeron_driver_agents.?);
+            self.receiver_loop.?.setStandaloneTopicIpcSubscription(&self.standalone_topic_ipc_subscription.?);
+        }
+
         try self.initBrokerThreads();
         self.broker_threads.?.setCpuAffinities(
             self.config.sender_cpu_affinity,
@@ -390,6 +407,13 @@ pub const BrokerApplication = struct {
             transport_ref.deinit();
         }
         self.aeron_udp_transport = null;
+    }
+
+    fn stopStandaloneTopicIpcSubscription(self: *Self) void {
+        if (self.standalone_topic_ipc_subscription) |*sub| {
+            sub.close() catch {};
+        }
+        self.standalone_topic_ipc_subscription = null;
     }
 
     fn initBrokerThreads(self: *Self) !void {

@@ -8,9 +8,9 @@
 
 const std = @import("std");
 const rq = @import("ringloom_queue");
+const ringloom_common = @import("ringloom_common");
 
-const topic_types = @import("topic_types.zig");
-const TopicConfig = topic_types.TopicConfig;
+const TopicConfig = ringloom_common.topics.TopicConfig;
 
 const RawQueue = rq.Queue([]const u8);
 

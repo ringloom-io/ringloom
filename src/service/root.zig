@@ -64,7 +64,8 @@ pub const topics = struct {
     pub const TopicPublisher = topic_publisher.TopicPublisher;
     pub const topic_subscription = @import("topics/topic_subscription.zig");
     pub const TopicSubscription = topic_subscription.TopicSubscription;
-    pub const topic_types = @import("topics/topic_types.zig");
+    pub const topic_publisher_registry = @import("topics/topic_publisher_registry.zig");
+    pub const TopicPublisherRegistry = topic_publisher_registry.TopicPublisherRegistry;
 };
 
 // ── Service configuration ────────────────────────────────────────────
@@ -102,9 +103,9 @@ comptime {
     _ = @import("config/service_config.zig");
 
     // Topics
-    _ = @import("topics/topic_types.zig");
     _ = @import("topics/topic_publisher.zig");
     _ = @import("topics/topic_subscription.zig");
+    _ = @import("topics/topic_publisher_registry.zig");
 }
 
 test "service module exports canonical service APIs" {

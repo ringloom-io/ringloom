@@ -19,6 +19,7 @@ const ControlAgent = control_agent_mod.ControlAgent;
 const ServiceAeronRuntime = @import("aeron_runtime.zig").ServiceAeronRuntime;
 const ServiceClient = @import("service_client.zig").ServiceClient;
 const ServiceClientRegistry = @import("service_client_registry.zig").ServiceClientRegistry;
+const topic_publisher_registry = @import("topics/topic_publisher_registry.zig");
 
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const ServiceMetadataFile = memory.ServiceMetadataFile;
@@ -79,6 +80,11 @@ pub const RingLoomEngine = struct {
     message_consumer_mode: MessageConsumerMode,
     aeron_runtime: *ServiceAeronRuntime,
 
+    // ── Topics ────────────────────────────────────────────────────────
+    /// Local topic publishers; the control agent routes ack-feedback (template
+    /// 15) and leader-change (template 13) frames to publishers via this.
+    topic_publishers: topic_publisher_registry.TopicPublisherRegistry,
+
     // ── Observability ─────────────────────────────────────────────────
     counters: CountersManager,
     service_counters: ServiceCounters,
@@ -117,6 +123,7 @@ pub const RingLoomEngine = struct {
         engine.node_id = meta.node_id;
         engine.config = config;
         engine.allocator = allocator;
+        engine.topic_publishers = topic_publisher_registry.TopicPublisherRegistry.init(allocator);
         engine.counters = CountersManager.init(
             meta.service_meta.getCounterValuesBuffer(),
             meta.service_meta.getCounterMetadataBuffer(),
@@ -199,6 +206,7 @@ pub const RingLoomEngine = struct {
             meta.broker_meta,
             &engine.service_registry,
             &engine.service_counters,
+            &engine.topic_publishers,
         );
         engine.control_agent = ctrl_agent;
 
@@ -263,6 +271,7 @@ pub const RingLoomEngine = struct {
         if (self.running.load()) {
             self.stop();
         }
+        self.topic_publishers.deinit();
         self.allocator.destroy(self.service_meta);
         self.allocator.destroy(self.broker_meta);
         self.allocator.destroy(self);

@@ -55,6 +55,22 @@ public final class RingloomStatus {
      */
     public static final int NOT_READY = 11;
     /**
+     * No current topic leader, or the leader endpoint is unresolved.
+     */
+    public static final int TOPIC_LEADER_UNAVAILABLE = 12;
+    /**
+     * Topics are not enabled on the broker or the runtime.
+     */
+    public static final int TOPIC_DISABLED = 13;
+    /**
+     * Topic registration collided with an existing topic's immutable config.
+     */
+    public static final int TOPIC_CONFIG_MISMATCH = 14;
+    /**
+     * The referenced topic is unknown to the broker.
+     */
+    public static final int TOPIC_UNKNOWN = 15;
+    /**
      * Unexpected native failure.
      */
     public static final int INTERNAL = 255;

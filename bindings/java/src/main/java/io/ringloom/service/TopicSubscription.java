@@ -25,6 +25,7 @@ public final class TopicSubscription implements AutoCloseable {
     private final MemorySegment nativeHandle;
     private final AtomicBoolean closed;
     private final String topic;
+    private final long topicId;
 
     // Preallocated out-parameter segments for zero-allocation poll.
     // Each is a single-element buffer the native side writes into.
@@ -44,6 +45,21 @@ public final class TopicSubscription implements AutoCloseable {
         this.outPayload = scratchArena.allocate(RingloomNative.ADDRESS);
         this.outLen = scratchArena.allocate(ValueLayout.JAVA_LONG);
         this.outIndex = scratchArena.allocate(ValueLayout.JAVA_LONG);
+        // Resolve the broker-assigned topic id once at construction. On older
+        // native builds without the accessor symbol this is 0 ("unavailable").
+        this.topicId = RingloomNative.topicSubscriptionId(nativeHandle);
+    }
+
+    /**
+     * The broker-assigned topic id for this subscription.
+     *
+     * <p>Resolved once at construction; stable for the lifetime of the handle.
+     * Returns {@code 0} on older native builds that lack the accessor.</p>
+     *
+     * @return the topic id, or {@code 0} if unavailable
+     */
+    public long topicId() {
+        return topicId;
     }
 
     /**

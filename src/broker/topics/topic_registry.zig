@@ -26,6 +26,10 @@ pub const TopicRecord = struct {
     local_role: LocalRole = .none,
     local_queue_open: bool = false,
     local_subscriber_count: u32 = 0,
+    /// Service id of the local producer that registered this publication, so ack
+    /// feedback (template 15) and leader-change (template 13) frames can be routed
+    /// to the right service control ring buffer. `-1` = no local producer.
+    producer_service_id: i32 = -1,
 };
 
 pub const RegisterError = error{

@@ -16,7 +16,7 @@ import java.nio.file.Path;
 
 final class RingloomNative {
 
-    static final int ABI_VERSION = 4;
+    static final int ABI_VERSION = 5;
     private static final String LIBRARY_BASE_NAME = "ringloom_service";
     private static final String CLASSPATH_LIBRARY_ROOT =
         "/io/ringloom/service/native";
@@ -145,6 +145,12 @@ final class RingloomNative {
     private static final MethodHandle TOPIC_POLL_HANDLE;
     private static final MethodHandle TOPIC_UNSUBSCRIBE_HANDLE;
     private static final MethodHandle TOPIC_SUBSCRIPTION_MAINTENANCE_POLL_HANDLE;
+
+    // ── Topic accessor handles (resolved optionally; ABI v5+) ──────────
+    private static final MethodHandle TOPIC_PUBLISHER_ID_HANDLE;
+    private static final MethodHandle TOPIC_PUBLISHER_LEADER_EPOCH_HANDLE;
+    private static final MethodHandle TOPIC_PUBLISHER_REPLICATED_COUNT_HANDLE;
+    private static final MethodHandle TOPIC_SUBSCRIPTION_ID_HANDLE;
 
     /** Whether all eight topic symbols were resolved from the native library. */
     static final boolean TOPIC_SYMBOLS_PRESENT;
@@ -539,7 +545,7 @@ final class RingloomNative {
                     ADDRESS,
                     ADDRESS,
                     ValueLayout.JAVA_LONG,
-                    ValueLayout.JAVA_BYTE,
+                    ValueLayout.JAVA_INT,
                     ADDRESS
                 )
             );
@@ -564,6 +570,25 @@ final class RingloomNative {
                     ADDRESS,
                     ValueLayout.JAVA_INT
                 )
+            );
+
+            // Topic accessors (ABI v5). Optional: older native builds lack them;
+            // callers gracefully degrade to 0 when absent.
+            TOPIC_PUBLISHER_ID_HANDLE = optionalDowncall(
+                "ringloom_topic_publisher_id",
+                FunctionDescriptor.of(ValueLayout.JAVA_LONG, ADDRESS)
+            );
+            TOPIC_PUBLISHER_LEADER_EPOCH_HANDLE = optionalDowncall(
+                "ringloom_topic_publisher_leader_epoch",
+                FunctionDescriptor.of(ValueLayout.JAVA_LONG, ADDRESS)
+            );
+            TOPIC_PUBLISHER_REPLICATED_COUNT_HANDLE = optionalDowncall(
+                "ringloom_topic_publisher_replicated_count",
+                FunctionDescriptor.of(ValueLayout.JAVA_LONG, ADDRESS)
+            );
+            TOPIC_SUBSCRIPTION_ID_HANDLE = optionalDowncall(
+                "ringloom_topic_subscription_id",
+                FunctionDescriptor.of(ValueLayout.JAVA_LONG, ADDRESS)
             );
 
             TOPIC_SYMBOLS_PRESENT =
@@ -1476,7 +1501,7 @@ final class RingloomNative {
                 client,
                 name,
                 nameLen,
-                (byte) start,
+                start,
                 outSubscription
             );
         } catch (Throwable throwable) {
@@ -1524,6 +1549,46 @@ final class RingloomNative {
                 "ringloom_topic_subscription_maintenance_poll",
                 throwable
             );
+        }
+    }
+
+    // ── Topic accessor wrappers ────────────────────────────────────────
+    // Each returns 0 when the accessor symbol is absent on an older native
+    // build (graceful degradation); callers treat 0 as "unavailable".
+
+    static long topicPublisherId(MemorySegment publisher) {
+        if (TOPIC_PUBLISHER_ID_HANDLE == null) return 0L;
+        try {
+            return (long) TOPIC_PUBLISHER_ID_HANDLE.invokeExact(publisher);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_topic_publisher_id", throwable);
+        }
+    }
+
+    static long topicPublisherLeaderEpoch(MemorySegment publisher) {
+        if (TOPIC_PUBLISHER_LEADER_EPOCH_HANDLE == null) return 0L;
+        try {
+            return (long) TOPIC_PUBLISHER_LEADER_EPOCH_HANDLE.invokeExact(publisher);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_topic_publisher_leader_epoch", throwable);
+        }
+    }
+
+    static long topicPublisherReplicatedCount(MemorySegment publisher) {
+        if (TOPIC_PUBLISHER_REPLICATED_COUNT_HANDLE == null) return 0L;
+        try {
+            return (long) TOPIC_PUBLISHER_REPLICATED_COUNT_HANDLE.invokeExact(publisher);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_topic_publisher_replicated_count", throwable);
+        }
+    }
+
+    static long topicSubscriptionId(MemorySegment subscription) {
+        if (TOPIC_SUBSCRIPTION_ID_HANDLE == null) return 0L;
+        try {
+            return (long) TOPIC_SUBSCRIPTION_ID_HANDLE.invokeExact(subscription);
+        } catch (Throwable throwable) {
+            throw propagate("ringloom_topic_subscription_id", throwable);
         }
     }
 

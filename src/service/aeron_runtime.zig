@@ -19,10 +19,15 @@ pub const ServiceAeronRuntime = struct {
         publication: ?ringloom_aeron.ExclusivePublication = null,
     };
 
+    /// Default topic-publish stream base (matches broker `topics.pub_stream_base`).
+    const topic_pub_stream_base: i32 = 50_000;
+
     allocator: std.mem.Allocator,
     directory: [:0]u8,
     client: ringloom_aeron.Client,
     direct_peers: std.ArrayList(DirectPeerPublication) = .empty,
+    /// Cached topic-leader IPC publication (opened lazily by `addIpcPublication`).
+    ipc_publication: ?ringloom_aeron.ExclusivePublication = null,
 
     const Self = @This();
 
@@ -83,6 +88,7 @@ pub const ServiceAeronRuntime = struct {
             self.allocator.free(peer.data_channel);
         }
         self.direct_peers.deinit(self.allocator);
+        if (self.ipc_publication) |*pub_| pub_.close() catch {};
         self.client.deinit();
         self.allocator.free(self.directory);
     }
@@ -119,6 +125,23 @@ pub const ServiceAeronRuntime = struct {
 
     pub fn directPeerCount(self: *const Self) usize {
         return self.direct_peers.items.len;
+    }
+
+    /// Opens (or returns the cached) Aeron IPC publication on the topic-publish
+    /// stream for `leader_node_id` (i.e. `pub_stream_base + leader_node_id`,
+    /// default base 50_000). Co-located topic brokers subscribe on this stream,
+    /// so a producer service publishes its frames here. The channel is the same
+    /// Aeron directory the runtime already connects to. Uses an exclusive
+    /// publication (single publisher), matching the broker's topic IPC bench and
+    /// the rest of the service's direct publications. Owned by the runtime.
+    pub fn addIpcPublication(self: *Self, leader_node_id: u8) ringloom_aeron.Error!?*ringloom_aeron.ExclusivePublication {
+        if (self.ipc_publication) |*pub_| return pub_;
+        const stream_id: i32 = topic_pub_stream_base + @as(i32, leader_node_id);
+        // Co-located broker subscribes on "aeron:ipc"; this is a fixed channel.
+        const channel: [:0]const u8 = "aeron:ipc";
+        const pub_ = try self.client.addExclusivePublication(channel, stream_id, null);
+        self.ipc_publication = pub_;
+        return &self.ipc_publication.?;
     }
 
     fn directPublicationForNode(self: *Self, target_node_id: i16) ringloom_aeron.Error!?*ringloom_aeron.ExclusivePublication {

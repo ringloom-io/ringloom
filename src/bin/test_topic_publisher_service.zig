@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const ringloom_service = @import("ringloom_service");
+const ringloom_common = @import("ringloom_common");
 
 fn parseStr(args: []const [:0]const u8, name: []const u8, default: []const u8) []const u8 {
     for (args, 0..) |a, i| {
@@ -55,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
     const tn: []const u8 = if (pc > 0) pos[0] else "bench";
     const mc: u64 = if (pc > 1) std.fmt.parseInt(u64, pos[1], 10) catch 10 else 10;
     const av: u8 = if (pc > 2) std.fmt.parseInt(u8, pos[2], 10) catch 0 else 0;
-    const am: ringloom_service.topics.topic_types.AckMode = if (av == 1) .replicate_once else .fire_and_forget;
+    const am: ringloom_common.topics.AckMode = if (av == 1) .replicate_once else .fire_and_forget;
 
     var pub_ = ringloom_service.topics.TopicPublisher{ .topic_id = std.hash.Wyhash.hash(0, tn), .leader_node_id = 1, .leader_epoch = 1 };
     defer pub_.deinit();

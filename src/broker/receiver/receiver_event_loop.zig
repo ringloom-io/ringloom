@@ -123,6 +123,10 @@ pub const ReceiverEventLoop = struct {
     broker_topic_ipc_assembler: ringloom_aeron.FragmentAssembler,
     /// Persistent topics subsystem (null when topics are disabled).
     topic_subsystem: ?*topics.TopicSubsystem = null,
+    /// Standalone topic IPC subscription for single-node brokers that have no
+    /// UDP transport (peer_endpoints is empty). When set, pollBrokerTopicIpc
+    /// falls back to this subscription instead of fetching it from the transport.
+    standalone_topic_ipc_subscription: ?*ringloom_aeron.Subscription = null,
     max_data_payload_length: usize,
 
     const Self = @This();
@@ -211,6 +215,13 @@ pub const ReceiverEventLoop = struct {
         self.topic_subsystem = subsystem;
     }
 
+    /// Sets the standalone topic IPC subscription used when the broker has no
+    /// UDP transport (single-node / no peers). The subscription is owned by the
+    /// caller (BrokerApplication) and must outlive the receiver loop.
+    pub fn setStandaloneTopicIpcSubscription(self: *Self, sub: ?*ringloom_aeron.Subscription) void {
+        self.standalone_topic_ipc_subscription = sub;
+    }
+
     pub fn deinit(self: *Self) void {
         self.broker_udp_assembler.deinit();
         self.broker_admin_udp_assembler.deinit();
@@ -280,10 +291,17 @@ pub const ReceiverEventLoop = struct {
 
     fn pollBrokerTopicIpc(self: *Self) u32 {
         if (self.topic_subsystem == null) return 0;
-        const transport_ref = self.broker_udp_transport orelse return 0;
-        const ipc_sub = transport_ref.topicIpcSubscriptionPtr() orelse return 0;
+        // Prefer the standalone subscription for single-node brokers, then fall
+        // back to the UDP transport (multi-node).
+        const ipc_sub: ?*ringloom_aeron.Subscription = if (self.standalone_topic_ipc_subscription) |s|
+            s
+        else if (self.broker_udp_transport) |transport_ref|
+            transport_ref.topicIpcSubscriptionPtr()
+        else
+            null;
+        const ipc_sub_ptr = ipc_sub orelse return 0;
         self.broker_topic_ipc_assembler.handler.context = self;
-        const fragments = self.broker_topic_ipc_assembler.poll(ipc_sub, constants.aeron_fragment_read_limit) catch |err| {
+        const fragments = self.broker_topic_ipc_assembler.poll(ipc_sub_ptr, constants.aeron_fragment_read_limit) catch |err| {
             log.err("broker Aeron topic IPC poll failed: {}", .{err});
             self.counters.increment(self.counter_ids.connection_errors);
             return 0;

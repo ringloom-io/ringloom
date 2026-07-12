@@ -15,6 +15,8 @@ const topic_config_mod = @import("topic_config.zig");
 const TopicId = topic_id_mod.TopicId;
 const TopicConfig = topic_config_mod.TopicConfig;
 
+const Index = rq.Index;
+
 const RawQueue = rq.Queue([]const u8);
 
 pub const TopicStoreError = error{
@@ -33,6 +35,11 @@ pub const TopicQueue = struct {
     epoch: u64,
     hwm_index: u64 = 0,
     replicated_hwm: u64 = 0,
+    /// Monotonic count of messages appended as leader. Reported in ack feedback
+    /// as `replicated_count` so producers can map their per-publish sequence
+    /// token to replication completion (the queue index resets across cycle
+    /// rollovers and cannot serve as a stable client token).
+    published_count: u64 = 0,
     /// Leader only: false until the failover catch-up barrier clears (spec 08).
     /// Replicas never accept publishes, so this stays false for them.
     accepting_writes: bool = false,
@@ -46,7 +53,19 @@ pub const TopicQueue = struct {
     pub fn append(self: *TopicQueue, payload: []const u8) !u64 {
         const idx = try self.queue.append(payload);
         if (idx > self.hwm_index) self.hwm_index = idx;
+        self.published_count += 1;
         return idx;
+    }
+
+    /// Number of leader appends replicated so far. Appends are strictly in-order,
+    /// so this is the count of appends with index <= replicated_hwm. Within a
+    /// single cycle (the common case, including the test broker) that is simply
+    /// `seqnum(hwm) + 1`; the result is capped at `published_count`.
+    pub fn replicatedCount(self: *const TopicQueue) u64 {
+        if (self.replicated_hwm == 0) return 0;
+        const seq: u64 = Index.seqnum(self.replicated_hwm);
+        const count: u64 = seq + 1;
+        return @min(count, self.published_count);
     }
 
     pub fn maintenancePoll(self: *TopicQueue, budget: u32) !rq.StepResult {

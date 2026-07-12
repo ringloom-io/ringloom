@@ -10,13 +10,12 @@ const std = @import("std");
 const ringloom_common = @import("ringloom_common");
 const ringloom_aeron = @import("ringloom_aeron");
 
-const topic_types = @import("topic_types.zig");
 const topic_data_header = ringloom_common.message.topic_data_header;
 const data_header = ringloom_common.message.data_header;
 const constants = ringloom_common.memory.constants;
 
-const AckMode = topic_types.AckMode;
-const TopicConfig = topic_types.TopicConfig;
+const AckMode = ringloom_common.topics.AckMode;
+const TopicConfig = ringloom_common.topics.TopicConfig;
 const TopicPublishHeader = topic_data_header.TopicPublishHeader;
 
 /// Registration status for a topic publication.
@@ -54,19 +53,29 @@ pub const TopicPublisher = struct {
     leader_node_id: u8,
     leader_epoch: u64,
     /// Aeron publication to the topic leader (IPC if co-located, UDP otherwise).
-    leader_pub: ?ringloom_aeron.Publication = null,
-    /// Highest index replicated to >=1 replica (for replicate_once acks).
+    leader_pub: ?ringloom_aeron.ExclusivePublication = null,
+    /// Highest queue index replicated to >=1 replica (for diagnostics). Advanced
+    /// from TopicAckFeedback (template 15) on the control thread.
     replicated_hwm: u64 = 0,
+    /// Monotonic count of this topic's publishes that have been replicated to
+    /// >=1 replica (or appended, single-node). Producers map their per-publish
+    /// sequence token against this count — see `next_token` / `isAcked`.
+    replicated_count: u64 = 0,
+    /// Per-topic monotonic publish sequence, assigned at offer time and returned
+    /// to the caller as the `out_index` token. Stable and client-comparable
+    /// (unlike the broker queue index, which resets across cycle rollovers).
+    next_token: u64 = 0,
 
     pub fn deinit(self: *TopicPublisher) void {
-        if (self.leader_pub) |*pub_| {
-            pub_.close() catch {};
-        }
+        // `leader_pub` is borrowed from the owning ServiceAeronRuntime, which
+        // closes it at runtime shutdown; do not close it here.
         self.* = undefined;
     }
 
     /// Non-blocking publish. Builds RingLoomDataHeader(flag_topic) +
     /// TopicPublishHeader(ack_mode) + payload and offers to the leader publication.
+    /// On success assigns the next per-topic sequence token, available via
+    /// `lastAssignedToken()` so the C ABI can return it as `out_index`.
     pub fn publish(
         self: *TopicPublisher,
         payload: []const u8,
@@ -74,7 +83,7 @@ pub const TopicPublisher = struct {
         ack_mode: AckMode,
     ) PublishResult {
         if (self.leader_pub == null) return .not_connected;
-        const pub_: *ringloom_aeron.Publication = &self.leader_pub.?;
+        const pub_: *ringloom_aeron.ExclusivePublication = &self.leader_pub.?;
 
         // Build the combined frame: data header + topic publish header + payload.
         const total = data_header.RingLoomDataHeader.encoded_length +
@@ -113,17 +122,46 @@ pub const TopicPublisher = struct {
 
         // 3. Offer to Aeron.
         const result = pub_.offer(buf[0..total]);
-        return switch (result) {
-            .position => .ok,
-            .back_pressured, .admin_action => .back_pressured,
-            .not_connected => .not_connected,
-            else => .failed,
-        };
+        switch (result) {
+            .position => {
+                self.next_token += 1;
+                return .ok;
+            },
+            .back_pressured, .admin_action => return .back_pressured,
+            .not_connected => return .not_connected,
+            else => return .failed,
+        }
     }
 
-    /// Check whether a replicate_once publish has been acknowledged.
-    /// True once replicated_hwm >= the index assigned to that publish.
-    pub fn isAcked(self: *const TopicPublisher, publish_index: u64) bool {
-        return self.replicated_hwm >= publish_index;
+    /// The sequence token assigned by the most recent successful `publish`.
+    /// The C ABI returns this as `out_index` for `replicate_once`.
+    pub fn lastAssignedToken(self: *const TopicPublisher) u64 {
+        return self.next_token;
+    }
+
+    /// Check whether a `replicate_once` publish has been acknowledged.
+    /// `token` is the per-publish sequence returned in `out_index`; true once
+    /// the broker's replicated count reaches it.
+    pub fn isAcked(self: *const TopicPublisher, token: u64) bool {
+        return self.replicated_count >= token;
+    }
+
+    /// Control-thread: apply throttled HWM feedback (template 15). Advances the
+    /// replicated count (and the diagnostic hwm) monotonically, ignoring stale
+    /// epochs. Producers' pending acks complete as `replicated_count` passes
+    /// their tokens.
+    pub fn applyAckFeedback(self: *TopicPublisher, leader_epoch: u64, replicated_hwm: u64, replicated_count: u64) void {
+        if (leader_epoch < self.leader_epoch) return; // stale feedback
+        if (replicated_hwm > self.replicated_hwm) self.replicated_hwm = replicated_hwm;
+        if (replicated_count > self.replicated_count) self.replicated_count = replicated_count;
+    }
+
+    /// Control-thread: apply a leader change (template 13). Re-targets the
+    /// publisher's leader identity; the Aeron publication is re-opened lazily by
+    /// the owning runtime when `leader_node_id` changes.
+    pub fn applyLeaderChanged(self: *TopicPublisher, leader_node_id: u8, leader_epoch: u64) void {
+        if (leader_epoch < self.leader_epoch) return; // stale
+        self.leader_node_id = leader_node_id;
+        self.leader_epoch = leader_epoch;
     }
 };

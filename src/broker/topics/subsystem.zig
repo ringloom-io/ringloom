@@ -72,6 +72,12 @@ pub const TopicSubsystem = struct {
     registry: TopicRegistry,
     election: TopicLeaderElection,
 
+    /// Returns an iterator over all topic records for periodic re-broadcast
+    /// (spec 02 §8). Caller must iterate on the control thread.
+    pub fn iterateTopics(self: *TopicSubsystem) TopicRegistry.Iterator {
+        return self.registry.iterator();
+    }
+
     pub fn init(allocator: std.mem.Allocator, opts: Options, publisher: Publisher, now_ns: i64) !*TopicSubsystem {
         const self = try allocator.create(TopicSubsystem);
         errdefer allocator.destroy(self);
@@ -135,13 +141,15 @@ pub const TopicSubsystem = struct {
     fn cmdOpenMaster(self: *TopicSubsystem, topic_id: TopicId, config: TopicConfig, epoch: u64) void {
         self.store_lock.lock();
         defer self.store_lock.unlock();
-        _ = self.ctrl_in.enqueue(.{ .open_master = .{ .topic_id = topic_id, .config = config, .epoch = epoch } });
+        // Open synchronously so subscribe() sees the queue immediately.
+        _ = self.store.openMaster(topic_id, config, epoch) catch {};
     }
 
     fn cmdOpenReplica(self: *TopicSubsystem, topic_id: TopicId, config: TopicConfig, epoch: u64) void {
         self.store_lock.lock();
         defer self.store_lock.unlock();
-        _ = self.ctrl_in.enqueue(.{ .open_replica = .{ .topic_id = topic_id, .config = config, .epoch = epoch } });
+        // Open synchronously so subscribe() sees the queue immediately.
+        _ = self.store.openReplica(topic_id, config, epoch) catch {};
     }
 
     fn cmdStartSink(self: *TopicSubsystem, topic_id: TopicId, leader_node: u8) void {
@@ -149,7 +157,13 @@ pub const TopicSubsystem = struct {
     }
 
     fn cmdPromote(self: *TopicSubsystem, topic_id: TopicId) void {
-        _ = self.ctrl_in.enqueue(.{ .promote_to_leader = .{ .topic_id = topic_id } });
+        self.store_lock.lock();
+        defer self.store_lock.unlock();
+        // Promote synchronously so publish() sees accepting_writes = true
+        // immediately after registration, without waiting for the engine.
+        if (self.store.get(topic_id)) |tq| {
+            tq.accepting_writes = true;
+        }
     }
 
     fn cmdResetReplica(self: *TopicSubsystem, topic_id: TopicId, leader_node: u8) void {
@@ -178,11 +192,18 @@ pub const TopicSubsystem = struct {
     /// Control-loop entry: a local producer registers a publication. When this
     /// node is the topic leader, validate/create the record, open the master
     /// queue, and signal callers to broadcast TopicCreated (spec 03 §3).
-    pub fn registerPublication(self: *TopicSubsystem, name: []const u8, config: TopicConfig, now_ns: i64) RegisterResult {
+    /// `producer_service_id` is the local service to route ack-feedback /
+    /// leader-change frames to; ignored when this node is not the topic leader.
+    pub fn registerPublication(self: *TopicSubsystem, name: []const u8, config: TopicConfig, now_ns: i64, producer_service_id: i32) RegisterResult {
         const id = topic_id_mod.topicIdOf(name);
         if (!self.enabled) {
             return .{ .topic_id = id, .leader_node_id = 0, .leader_epoch = 0, .effective_config = config, .status = .disabled, .newly_created = false };
         }
+        // If no topic leader has been elected yet (e.g. a freshly-started
+        // single-node broker before the leader-down interval elapses), let this
+        // topics-enabled node self-elect now so registration proceeds. This is
+        // a no-op once leadership is established.
+        self.ensureLeadershipElected(now_ns);
         const leader = self.election.getLeader();
         const epoch = self.election.getEpoch();
         if (leader == null or leader.? != self.local_node_id) {
@@ -211,6 +232,7 @@ pub const TopicSubsystem = struct {
             };
         };
         const rec = self.registry.getById(id).?;
+        rec.producer_service_id = producer_service_id;
         if (outcome == .created) {
             rec.local_role = .leader;
             rec.local_queue_open = true;
@@ -273,10 +295,13 @@ pub const TopicSubsystem = struct {
         }
         rec.local_subscriber_count += 1;
         // For earliest, the tailer opens at 0 (first retained entry).
-        // For latest, compute the current tip from the local store's HWM
-        // so the tailer picks up only new messages.
+        // For latest, start past the current tip so the tailer skips
+        // all pre-existing messages. The ringloom-queue tailer dispatches
+        // entries with index > start_index-1, so hwm+1 skips the last
+        // entry at hwm. When hwm is 0 the queue is empty; 0 is the
+        // correct start (tailer auto-seeks forward to the first cycle).
         const hwm = if (self.store.get(id)) |tq| tq.hwm_index else 0;
-        const start_index: u64 = if (earliest) 0 else hwm;
+        const start_index: u64 = if (earliest) 0 else if (hwm == 0) 0 else hwm + 1;
         return .{ .topic_id = id, .status = .ok, .start_index = start_index, .geometry = rec.config };
     }
 
@@ -374,9 +399,42 @@ pub const TopicSubsystem = struct {
         const r = self.election.checkLeaderDown(now_ns);
         if (r.became_leader) {
             // New term: fence every topic and require catch-up before writes.
-            self.registry.setLeaderForAll(self.local_node_id, r.leader_epoch);
+            self.applyNewLeadershipEpoch(r.leader_epoch);
         }
         return r;
+    }
+
+    /// Eagerly self-elect a topics-enabled local node when no leader is set. Used
+    /// at registration time so a freshly-started single-node broker (or the first
+    /// topics-enabled node) doesn't reject the first publication while waiting for
+    /// the leader-down interval to elapse. No-op once leadership is established.
+    fn ensureLeadershipElected(self: *TopicSubsystem, now_ns: i64) void {
+        if (!self.enabled) return;
+        if (self.election.getLeader() != null) return;
+        // Force a leadership decision now by checking with an expired deadline.
+        const r = self.election.checkLeaderDown(now_ns + 2 * topic_leader_election.LeaderDownIntervalNs);
+        if (r.became_leader) {
+            self.applyNewLeadershipEpoch(r.leader_epoch);
+        }
+    }
+
+    /// Propagate a newly-minted leadership term to both the registry records and
+    /// the open store queues. The store's `TopicQueue.epoch` stamps the
+    /// `leader_epoch` carried in ack-feedback (template 15) and fences inbound
+    /// repl frames; it must match the epoch producers see via TopicLeaderChanged,
+    /// or producers reject the feedback as stale and acks never complete.
+    fn applyNewLeadershipEpoch(self: *TopicSubsystem, leader_epoch: u64) void {
+        self.registry.setLeaderForAll(self.local_node_id, leader_epoch);
+        // Advance every open queue's epoch to the new term. Queues are opened with
+        // the epoch known at registration time, which may be 0 (before this node
+        // self-elects). The epoch is monotonic and only read alongside the registry
+        // (control thread) or as a monotonic fence (receiver thread), so a plain
+        // advancing store is safe here — same pattern as `cmdPromote`.
+        var it = self.store.openQueues();
+        while (it.next()) |tqp| {
+            const tq = tqp.*;
+            if (leader_epoch > tq.epoch) tq.epoch = leader_epoch;
+        }
     }
 
     /// Drain engine status (HWMs, barrier completion). Returns number drained.
@@ -431,7 +489,7 @@ test "disabled subsystem ignores publish/subscribe" {
     }, nullPublisher(), 0);
     defer sub.deinit();
 
-    const r = sub.registerPublication("orders", TopicConfig.fromName("FAST_DAILY", 4, false), 0);
+    const r = sub.registerPublication("orders", TopicConfig.fromName("FAST_DAILY", 4, false), 0, 1);
     try testing.expectEqual(@as(@TypeOf(r.status), .disabled), r.status);
 }
 
@@ -458,7 +516,7 @@ test "leader registers publication: creates record, opens+promotes master" {
     try testing.expect(sub.election.isLocalLeader());
 
     const cfg = TopicConfig.fromName("FAST_DAILY", 4, false);
-    const r = sub.registerPublication("orders", cfg, 1000);
+    const r = sub.registerPublication("orders", cfg, 1000, 1);
     try testing.expectEqual(@as(@TypeOf(r.status), .ok), r.status);
     try testing.expect(r.newly_created);
 

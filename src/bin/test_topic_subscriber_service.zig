@@ -15,8 +15,7 @@ const rq = @import("ringloom_queue");
 const RingLoomEngine = ringloom_service.RingLoomEngine;
 const ServiceConfig = ringloom_service.ServiceConfig;
 const TopicSubscription = ringloom_service.topics.TopicSubscription;
-const topic_types = ringloom_service.topics.topic_types;
-const TopicConfig = topic_types.TopicConfig;
+const TopicConfig = ringloom_common.topics.TopicConfig;
 
 fn parseStringArg(args: []const [:0]const u8, name: []const u8, default: []const u8) []const u8 {
     for (args, 0..) |arg, i| {

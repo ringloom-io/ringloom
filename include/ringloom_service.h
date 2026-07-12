@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define RINGLOOM_SERVICE_ABI_VERSION 4u
+#define RINGLOOM_SERVICE_ABI_VERSION 5u
 
 typedef struct ringloom_service ringloom_service_t;
 typedef struct ringloom_client ringloom_client_t;
@@ -29,6 +29,10 @@ typedef enum ringloom_status {
     RINGLOOM_ERR_CLAIM_NOT_ACTIVE = 9,
     RINGLOOM_ERR_MESSAGE_TOO_LONG = 10,
     RINGLOOM_NOT_READY = 11,
+    RINGLOOM_ERR_TOPIC_LEADER_UNAVAILABLE = 12,
+    RINGLOOM_ERR_TOPIC_DISABLED = 13,
+    RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH = 14,
+    RINGLOOM_ERR_TOPIC_UNKNOWN = 15,
     RINGLOOM_ERR_INTERNAL = 255
 } ringloom_status_t;
 
@@ -462,6 +466,22 @@ ringloom_status_t ringloom_topic_subscription_maintenance_poll(
 void ringloom_unsubscribe_topic(
     ringloom_topic_subscription_t *subscription
 );
+
+// ── Topic accessors (for producer ack tracking / dispatch keying) ──────
+
+// Returns the broker-assigned topic_id for a publisher.
+uint64_t ringloom_topic_publisher_id(const ringloom_topic_publisher_t *publisher);
+
+// Returns the publisher's current leader epoch (advances on leader change).
+uint64_t ringloom_topic_publisher_leader_epoch(const ringloom_topic_publisher_t *publisher);
+
+// Returns the count of this topic's publishes replicated to >=1 replica
+// (or appended, single-node). Producers compare their per-publish sequence
+// token against this to complete replicate_once acks.
+uint64_t ringloom_topic_publisher_replicated_count(const ringloom_topic_publisher_t *publisher);
+
+// Returns the broker-assigned topic_id for a subscription.
+uint64_t ringloom_topic_subscription_id(const ringloom_topic_subscription_t *subscription);
 
 #ifdef __cplusplus
 }

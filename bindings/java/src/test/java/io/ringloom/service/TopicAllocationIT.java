@@ -32,7 +32,7 @@ final class TopicAllocationIT {
         boolean success = false;
 
         try (
-            TestBroker broker = TestBroker.start(
+            TestBroker broker = TestBroker.startTopicsEnabled(
                 TestSupport.repoRoot(),
                 workspace
             );
@@ -117,7 +117,7 @@ final class TopicAllocationIT {
         boolean success = false;
 
         try (
-            TestBroker broker = TestBroker.start(
+            TestBroker broker = TestBroker.startTopicsEnabled(
                 TestSupport.repoRoot(),
                 workspace
             );
@@ -210,7 +210,7 @@ final class TopicAllocationIT {
         boolean success = false;
 
         try (
-            TestBroker broker = TestBroker.start(
+            TestBroker broker = TestBroker.startTopicsEnabled(
                 TestSupport.repoRoot(),
                 workspace
             );
@@ -281,7 +281,7 @@ final class TopicAllocationIT {
         boolean success = false;
 
         try (
-            TestBroker broker = TestBroker.start(
+            TestBroker broker = TestBroker.startTopicsEnabled(
                 TestSupport.repoRoot(),
                 workspace
             );
