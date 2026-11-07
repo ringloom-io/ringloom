@@ -1699,67 +1699,26 @@ export fn ringloom_register_topic_publication(
     const name_slice = if (name_len == 0) "" else name_ptr[0..name_len];
     const topic_cfg = topicConfigFromC(cfg_ptr);
 
-    // 1. Send RegisterTopicPublication (template 7) over the broker control RB.
-    control_agent_mod.registerTopicPublication(
-        engine.broker_meta,
-        engine.service_id,
-        topic_cfg,
-        name_slice,
-    ) catch return setLastError(.RINGLOOM_ERR_INTERNAL, "failed to send topic registration");
+    const publisher = engine.registerTopicPublication(topic_cfg, name_slice) catch |err| return switch (err) {
+        error.TopicConfigMismatch => setLastError(.RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH, "topic config mismatch or id collision"),
+        error.TopicDisabled => setLastError(.RINGLOOM_ERR_TOPIC_DISABLED, "topics disabled on broker"),
+        error.RegistrationTimeout => setLastError(.RINGLOOM_ERR_REGISTRATION_TIMEOUT, "topic registration timed out"),
+        error.SendFailed => setLastError(.RINGLOOM_ERR_INTERNAL, "failed to send topic registration"),
+        error.LeaderPublicationFailed => setLastError(.RINGLOOM_ERR_INTERNAL, "failed to open topic leader IPC publication"),
+        error.ControlAgentThreaded, error.RegistrationFailed => setLastError(.RINGLOOM_ERR_INTERNAL, "topic registration failed"),
+    };
 
-    // 2. Await the TopicPublicationResponse (template 8), polling the control RB.
-    const response = control_agent_mod.waitForTopicPublicationResponse(engine.service_meta, 5000) catch
-        return setLastError(.RINGLOOM_ERR_REGISTRATION_TIMEOUT, "topic registration timed out");
-
-    const ok_status: u8 = @intFromEnum(topic_messages.PublicationStatus.ok);
-    if (response.status != ok_status) {
-        return switch (response.status) {
-            @intFromEnum(topic_messages.PublicationStatus.config_mismatch) =>
-                setLastError(.RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH, "topic config mismatch"),
-            @intFromEnum(topic_messages.PublicationStatus.collision) =>
-                setLastError(.RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH, "topic id collision"),
-            @intFromEnum(topic_messages.PublicationStatus.disabled) =>
-                setLastError(.RINGLOOM_ERR_TOPIC_DISABLED, "topics disabled on broker"),
-            else => setLastError(.RINGLOOM_ERR_INTERNAL, "topic registration failed"),
-        };
-    }
-
-    // 3. Build the publisher with the real topic_id / leader identity and open
-    //    the leader IPC publication (co-located broker subscribes on
-    //    pub_stream_base + leader_node_id).
     const allocator = topic_publisher_handle_allocator.allocator();
     const handle = allocator.create(TopicPublisherHandle) catch
         return setLastError(.RINGLOOM_ERR_OUT_OF_MEMORY, "native allocation failed");
     handle.* = .{
         .allocator = allocator,
         .engine = engine,
-        .publisher = .{
-            .topic_id = response.topic_id,
-            .leader_node_id = @intCast(@max(0, response.leader_node_id)),
-            .leader_epoch = response.leader_epoch,
-        },
+        .publisher = publisher,
     };
-    if (response.leader_node_id > 0) {
-        // Open the leader IPC publication and wire it into the publisher so its
-        // publish() hot path can offer frames to the co-located broker.
-        const opened = engine.aeron_runtime.addIpcPublication(handle.publisher.leader_node_id) catch null;
-        if (opened) |pub_ptr| {
-            handle.publisher.leader_pub = pub_ptr.*;
-            // Wait for the exclusive IPC publication to link to the co-located
-            // broker's topic subscription (drive the conductor while waiting).
-            const connect_deadline = Clock.monotonicNanos() + 2000 * std.time.ns_per_ms;
-            while (Clock.monotonicNanos() < connect_deadline) {
-                _ = engine.aeron_runtime.doWork() catch {};
-                if (handle.publisher.leader_pub.?.isConnected()) break;
-                std.atomic.spinLoopHint();
-            }
-        } else {
-            return setLastError(.RINGLOOM_ERR_INTERNAL, "failed to open topic leader IPC publication");
-        }
-    }
-    // 4. Register in the engine's publisher registry so ack-feedback (template
+    // Register in the engine's publisher registry so ack-feedback (template
     //    15) and leader-change (template 13) frames reach this publisher.
-    engine.topic_publishers.register(response.topic_id, &handle.publisher) catch {};
+    engine.topic_publishers.register(&handle.publisher) catch {};
     out.* = @ptrCast(handle);
     return .RINGLOOM_OK;
 }
@@ -1822,7 +1781,7 @@ export fn ringloom_unregister_topic_publication(
     // Unregister from the engine's publisher registry so ack-feedback stops
     // targeting this (now-closing) publisher.
     if (handle.engine) |engine| {
-        engine.topic_publishers.unregister(handle.publisher.topic_id);
+        engine.topic_publishers.unregister(&handle.publisher);
         // Best-effort: notify the broker (template 11; broker no-ops on full mesh).
         control_agent_mod.unregisterTopicPublication(engine.broker_meta, engine.service_id, handle.publisher.topic_id) catch {};
     }
@@ -1878,7 +1837,7 @@ export fn ringloom_subscribe_topic(
     // 2. Open a tailer on the broker-supplied queue_dir. The response's queue_dir
     //    borrows into the control ring buffer; dup it onto a stable allocation.
     const allocator = topic_subscription_handle_allocator.allocator();
-    const queue_dir = allocator.dupe(u8, response.queue_dir) catch
+    const queue_dir = allocator.dupe(u8, response.queueDir()) catch
         return setLastError(.RINGLOOM_ERR_OUT_OF_MEMORY, "failed to copy queue_dir");
 
     const sub = topic_subscription_mod.TopicSubscription.open(
@@ -1961,9 +1920,11 @@ export fn ringloom_topic_publisher_leader_epoch(publisher: ?*const ringloom_topi
     return handle.publisher.leader_epoch;
 }
 
+/// Highest of this publisher's tokens acknowledged as replicated; every token
+/// <= the returned value is acked.
 export fn ringloom_topic_publisher_replicated_count(publisher: ?*const ringloom_topic_publisher) u64 {
     const handle = topicPublisherFromOpaque(@constCast(publisher)) orelse return 0;
-    return handle.publisher.replicated_count;
+    return handle.publisher.ackedSeq();
 }
 
 export fn ringloom_topic_subscription_id(subscription: ?*const ringloom_topic_subscription) u64 {

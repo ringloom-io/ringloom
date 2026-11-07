@@ -12,6 +12,7 @@ const topic_config_mod = @import("topic_config.zig");
 
 const TopicId = topic_id_mod.TopicId;
 const TopicConfig = topic_config_mod.TopicConfig;
+const TopicQueue = @import("topic_store.zig").TopicQueue;
 
 /// Session lifecycle state reported engine -> control for observability and the
 /// failover catch-up barrier.
@@ -28,10 +29,17 @@ pub const EngineCommand = union(enum) {
     open_master: struct { topic_id: TopicId, config: TopicConfig, epoch: u64 },
     /// Open a replica queue (full mesh: eager on TopicCreated).
     open_replica: struct { topic_id: TopicId, config: TopicConfig, epoch: u64 },
+    /// Add a queue the control loop already created on disk
+    /// (`TopicStore.openDetached`). Ownership passes to the engine, which adopts
+    /// it, or destroys it if the topic is already open. The control loop opens
+    /// on disk itself so local subscribers can open the files at once.
+    adopt_queue: struct { queue: *TopicQueue },
     /// Close and release a topic queue.
     close_queue: struct { topic_id: TopicId },
-    /// Update the fencing epoch for a topic (spec 08).
+    /// Update the fencing epoch for a topic (spec 08). Epochs only advance.
     set_epoch: struct { topic_id: TopicId, epoch: u64 },
+    /// Advance the fencing epoch of every open queue (new leadership term).
+    set_epoch_all: struct { epoch: u64 },
     /// Start (or restart) a replica sink toward the given leader node.
     start_sink: struct { topic_id: TopicId, leader_node: u8 },
     /// Failover catch-up barrier: pull up to target_index from from_node before
@@ -56,6 +64,16 @@ pub const EngineStatus = union(enum) {
     session_state: struct { topic_id: TopicId, peer: u8, state: SessionState },
     /// Barrier completion: master has caught up and is ready for promotion.
     barrier_complete: struct { topic_id: TopicId, index: u64 },
+    /// A producer's `replicate_once` publishes are replicated up to `acked_seq`
+    /// (spec 05 §3.1). Carries the queue's epoch and replicated HWM at the time
+    /// so the control loop can build feedback without reading receiver state.
+    producer_acked: struct {
+        topic_id: TopicId,
+        publisher_id: u64,
+        acked_seq: u64,
+        leader_epoch: u64,
+        replicated_hwm: u64,
+    },
 };
 
 /// Bounded SPSC ring of POD `T`. Single producer, single consumer, no locks.
@@ -97,7 +115,11 @@ pub fn SpscQueue(comptime T: type, comptime capacity: u32) type {
 }
 
 pub const default_capacity: u32 = 256;
-pub const EngineCommandQueue = SpscQueue(EngineCommand, default_capacity);
+/// Larger than the status queue: the control loop issues several commands per
+/// topic on registration and failover, and a dropped open/promote command
+/// leaves a topic unusable.
+pub const command_capacity: u32 = 1024;
+pub const EngineCommandQueue = SpscQueue(EngineCommand, command_capacity);
 pub const EngineStatusQueue = SpscQueue(EngineStatus, default_capacity);
 
 test "engine command queue POD round-trip" {

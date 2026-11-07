@@ -404,6 +404,8 @@ pub const ReceiverEventLoop = struct {
             .source_node = @intCast(frame.header.source_node_id),
             .source_service = @intCast(frame.header.source_service_id),
             .ack_mode = topics.AckMode.fromU8(pub_hdr.ack_mode) orelse .fire_and_forget,
+            .publisher_id = pub_hdr.publisher_id,
+            .publish_seq = pub_hdr.publish_seq,
             .payload = payload,
         });
     }

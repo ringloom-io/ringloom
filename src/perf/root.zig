@@ -1,7 +1,7 @@
 //! RingLoom Performance Benchmarks — module root.
 //!
 //! This file re-exports all performance benchmark modules so that
-//! `zig build test` (or a dedicated perf step) discovers every
+//! `zig build perf` discovers every
 //! benchmark test defined in the suite.
 //!
 //! Each sub-module contains one or more `test` blocks that use the

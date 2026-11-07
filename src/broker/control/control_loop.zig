@@ -196,12 +196,29 @@ pub const ControlLoop = struct {
     topic_barrier_replies: u32 = 0,
     /// Epoch under which the barrier was initiated.
     topic_barrier_epoch: u64 = 0,
-    /// Next time to emit throttled TopicAckFeedback (per-topic).
-    topic_next_ack_feedback_ns: std.AutoHashMap(topic_id_mod.TopicId, i64),
+    /// Per-producer replicate_once acks reported by the topic engine, awaiting
+    /// (re)transmission as TopicAckFeedback (spec 05 §3.1).
+    topic_pending_acks: std.AutoHashMap(topics.topic_ack_tracker.ProducerKey, PendingAck),
+    /// Next time to emit throttled TopicAckFeedback.
+    topic_next_ack_feedback_ns: i64 = 0,
     /// Throttle interval for ack feedback (ns).
     topic_ack_feedback_interval_ns: i64 = 200 * std.time.ns_per_us,
 
     const Self = @This();
+
+    /// Latest ack for one producer. Sent as soon as it changes, then re-sent
+    /// every `ack_resend_interval_ns` until `ack_linger_ns` after the last
+    /// change, so a lost admin frame cannot strand a producer's acks.
+    const PendingAck = struct {
+        leader_epoch: u64,
+        replicated_hwm: u64,
+        acked_seq: u64,
+        dirty: bool,
+        last_sent_ns: i64 = 0,
+        last_change_ns: i64,
+    };
+    const ack_resend_interval_ns: i64 = 10 * std.time.ns_per_ms;
+    const ack_linger_ns: i64 = 1 * std.time.ns_per_s;
 
     // ── Timing constants (imported from platform/constants.zig) ──
     const COMMAND_DRAIN_LIMIT: u32 = constants.command_drain_limit;
@@ -284,7 +301,7 @@ pub const ControlLoop = struct {
             .admin_udp_counters = AdminUdpCounters.allocate(opts.counters),
             .topic_subsystem = opts.topic_subsystem,
             .topic_barrier_max_index = std.AutoHashMap(topic_id_mod.TopicId, u64).init(opts.allocator),
-            .topic_next_ack_feedback_ns = std.AutoHashMap(topic_id_mod.TopicId, i64).init(opts.allocator),
+            .topic_pending_acks = std.AutoHashMap(topics.topic_ack_tracker.ProducerKey, PendingAck).init(opts.allocator),
             .topic_ack_feedback_interval_ns = opts.topic_ack_feedback_interval_ns,
         };
     }
@@ -355,17 +372,17 @@ pub const ControlLoop = struct {
                 work_count += self.checkBarrierCollection(ts, now_ns);
             }
 
-            // 3f. Drain topic engine status (HWMs for ack feedback, barrier completion).
-            if (self.topic_subsystem) |ts| {
-                work_count += ts.drainStatus(drainTopicStatusHandler, @as(*anyopaque, @ptrCast(self)));
-            }
-
-            // 3g. Emit throttled replicate_once ack feedback (spec 03 §6).
-            if (self.topic_subsystem) |ts| {
-                work_count += self.emitTopicAckFeedbackIfDue(ts, now_ns);
-            }
-
             self.next_timeout_check_ns = now_ns + TIMEOUT_CHECK_INTERVAL_NS;
+        }
+
+        // 3f. Drain topic engine status (producer acks, barrier completion) and
+        // 3g. emit replicate_once ack feedback (spec 03 §6). These run every
+        // iteration, not in the once-per-second block above: they sit on the
+        // replicate_once ack path, and the feedback has its own throttle
+        // (`topic_ack_feedback_interval_ns`).
+        if (self.topic_subsystem) |ts| {
+            work_count += ts.drainStatus(drainTopicStatusHandler, @as(*anyopaque, @ptrCast(self)));
+            work_count += self.emitTopicAckFeedbackIfDue(ts, now_ns);
         }
 
         // 4. Update monitoring counters
@@ -411,7 +428,7 @@ pub const ControlLoop = struct {
         self.allocated_routing_rbs.deinit();
 
         self.topic_barrier_max_index.deinit();
-        self.topic_next_ack_feedback_ns.deinit();
+        self.topic_pending_acks.deinit();
 
         self.service_registry.deinit();
     }
@@ -1537,15 +1554,22 @@ pub const ControlLoop = struct {
     // ─────────────────────────────────────────────────────────────
 
     fn handleRegisterTopicPublication(self: *Self, payload: []const u8) void {
-        const ts = self.topic_subsystem orelse return;
         const msg = topic_messages.decode(topic_messages.RegisterTopicPublicationMsg, payload) orelse return;
         const name = topic_messages.registerTopicName(payload);
         if (name.len == 0) return;
 
+        var buf: [512]u8 = undefined;
+        const ts = self.topic_subsystem orelse {
+            // Topics disabled on this broker: answer right away so the service
+            // fails with TOPIC_DISABLED instead of waiting out its timeout.
+            const n = topic_messages.encodePublicationResponse(&buf, topic_id_mod.topicIdOf(name), 0, 0, .disabled, msg.config);
+            _ = self.writeToServiceControl(@intCast(msg.local_service_id), buf[0..n]);
+            return;
+        };
+
         const result = ts.registerPublication(name, msg.config, platform.Clock.monotonicNanos(), msg.local_service_id);
 
         // Reply with TopicPublicationResponse.
-        var buf: [512]u8 = undefined;
         const status: topic_messages.PublicationStatus = switch (result.status) {
             .ok => .ok,
             .config_mismatch => .config_mismatch,
@@ -1576,10 +1600,16 @@ pub const ControlLoop = struct {
     }
 
     fn handleSubscribeTopic(self: *Self, payload: []const u8) void {
-        const ts = self.topic_subsystem orelse return;
         const msg = topic_messages.decode(topic_messages.SubscribeTopicMsg, payload) orelse return;
         const name = topic_messages.subscribeTopicName(payload);
         if (name.len == 0) return;
+        const ts = self.topic_subsystem orelse {
+            // Topics disabled on this broker: answer right away (see above).
+            var buf: [512]u8 = undefined;
+            const n = topic_messages.encodeSubscriptionResponse(&buf, topic_id_mod.topicIdOf(name), .disabled, 0, .{}, "");
+            _ = self.writeToServiceControl(@intCast(msg.local_service_id), buf[0..n]);
+            return;
+        };
 
         const earliest = msg.start_position == @intFromEnum(topic_messages.StartPosition.earliest);
         const result = ts.subscribe(name, earliest);
@@ -1609,9 +1639,10 @@ pub const ControlLoop = struct {
     }
 
     fn handleUnregisterTopicPublication(self: *Self, payload: []const u8) void {
-        _ = self;
-        _ = payload;
-        // Full mesh: topic lives on; no-op for now.
+        const ts = self.topic_subsystem orelse return;
+        const msg = topic_messages.decode(topic_messages.UnregisterTopicPublicationMsg, payload) orelse return;
+        // Full mesh: the topic itself lives on; only stop routing to this producer.
+        ts.removeLocalProducer(msg.topic_id, msg.local_service_id);
     }
 
     fn handleUnsubscribeTopic(self: *Self, payload: []const u8) void {
@@ -1665,6 +1696,19 @@ pub const ControlLoop = struct {
         const epoch = body.leader_epoch;
         _ = ts.election.onLeaderAnnouncement(body.new_leader, epoch, platform.Clock.monotonicNanos());
         ts.registry.setLeaderForAll(body.new_leader, epoch);
+        // Re-target every local producer at the new leader (template 13).
+        var it = ts.local_producers.keyIterator();
+        while (it.next()) |topic_id| {
+            self.notifyLocalProducersOfLeader(ts, topic_id.*, body.new_leader, epoch);
+        }
+    }
+
+    fn notifyLocalProducersOfLeader(self: *Self, ts: *topics.TopicSubsystem, topic_id: u64, leader_node: u8, epoch: u64) void {
+        var buf: [64]u8 = undefined;
+        const n = topic_messages.encodeTopicLeaderChanged(&buf, topic_id, @intCast(leader_node), epoch);
+        for (ts.localProducers(topic_id)) |p| {
+            _ = self.writeToServiceControl(p.service_id, buf[0..n]);
+        }
     }
 
     fn handleTopicAppliedQuery(self: *Self, data: [@sizeOf(topic_admin.TopicAppliedQueryBody)]u8) void {
@@ -1683,7 +1727,7 @@ pub const ControlLoop = struct {
 
     fn sendTopicAppliedReply(self: *Self, ts: *topics.TopicSubsystem, topic_id: u64) void {
         // Get the actual last_applied_index from the local store.
-        const last_applied: u64 = if (ts.store.get(topic_id)) |tq| tq.hwm_index else 0;
+        const last_applied: u64 = ts.localHwm(topic_id);
         const reply = topic_admin.TopicAppliedReplyBody{
             .topic_id = topic_id,
             .last_applied_index = last_applied,
@@ -1711,13 +1755,19 @@ pub const ControlLoop = struct {
         const ts = self.topic_subsystem orelse return;
         var body: topic_admin.TopicAckFeedbackBody = undefined;
         @memcpy(@as(*[@sizeOf(topic_admin.TopicAckFeedbackBody)]u8, @ptrCast(&body)), &data);
-        const rec = ts.registry.getById(body.topic_id) orelse return;
-        // Forward the throttled HWM feedback to the local producer service so its
-        // pending replicate_once acks can complete. No local producer → nothing to do.
-        if (rec.producer_service_id < 0) return;
+        // Relay the leader's feedback to this node's producers on the topic; the
+        // service owning `publisher_id` applies it, the others ignore it.
+        self.deliverAckFeedbackLocally(ts, body);
+    }
+
+    fn deliverAckFeedbackLocally(self: *Self, ts: *topics.TopicSubsystem, body: topic_admin.TopicAckFeedbackBody) void {
+        const producers = ts.localProducers(body.topic_id);
+        if (producers.len == 0) return;
         var buf: [64]u8 = undefined;
-        const n = topic_messages.encodeAckFeedback(&buf, body.topic_id, body.leader_epoch, body.replicated_hwm, body.replicated_count);
-        _ = self.writeToServiceControl(rec.producer_service_id, buf[0..n]);
+        const n = topic_messages.encodeAckFeedback(&buf, body.topic_id, body.leader_epoch, body.replicated_hwm, body.publisher_id, body.acked_seq);
+        for (producers) |p| {
+            _ = self.writeToServiceControl(p.service_id, buf[0..n]);
+        }
     }
 
     fn broadcastTopicCreated(
@@ -1796,16 +1846,7 @@ pub const ControlLoop = struct {
                 } });
                 // Notify local producers of the new topic leader (template 13) so
                 // they re-target publishes and stamp the new epoch on ack entries.
-                if (rec.producer_service_id >= 0) {
-                    var lc_buf: [64]u8 = undefined;
-                    const ln = topic_messages.encodeTopicLeaderChanged(
-                        &lc_buf,
-                        rec.topic_id,
-                        @intCast(self.local_node_id),
-                        result.leader_epoch,
-                    );
-                    _ = self.writeToServiceControl(rec.producer_service_id, lc_buf[0..ln]);
-                }
+                self.notifyLocalProducersOfLeader(ts, rec.topic_id, self.local_node_id, result.leader_epoch);
             }
             return 1;
         }
@@ -1826,8 +1867,8 @@ pub const ControlLoop = struct {
         var iter = ts.registry.iterator();
         while (iter.next()) |rec| {
             const max_peer = self.topic_barrier_max_index.get(rec.topic_id) orelse 0;
-            if (ts.store.get(rec.topic_id)) |tq| {
-                if (max_peer > tq.hwm_index) {
+            if (ts.isQueueOpen(rec.topic_id)) {
+                if (max_peer > ts.localHwm(rec.topic_id)) {
                     // Need to catch up from the most-advanced peer.
                     // from_node=0 means "use any peer" — the engine will
                     // use the AppliedReply with the highest index.
@@ -1856,13 +1897,19 @@ pub const ControlLoop = struct {
     fn drainTopicStatusHandler(ctx: *anyopaque, status: topic_commands.EngineStatus) void {
         const self: *ControlLoop = @ptrCast(@alignCast(ctx));
         switch (status) {
-            .replicated_hwm => |h| {
-                // Track for throttled ack feedback emission.
-                if (self.topic_subsystem) |ts| {
-                    if (ts.store.get(h.topic_id)) |tq| {
-                        tq.replicated_hwm = h.index;
-                    }
-                }
+            .producer_acked => |a| {
+                // Queue for throttled ack feedback emission.
+                const key = topics.topic_ack_tracker.ProducerKey{ .topic_id = a.topic_id, .publisher_id = a.publisher_id };
+                const now_ns = platform.Clock.monotonicNanos();
+                const gop = self.topic_pending_acks.getOrPut(key) catch return;
+                if (gop.found_existing and gop.value_ptr.acked_seq >= a.acked_seq and gop.value_ptr.leader_epoch >= a.leader_epoch) return;
+                gop.value_ptr.* = .{
+                    .leader_epoch = a.leader_epoch,
+                    .replicated_hwm = a.replicated_hwm,
+                    .acked_seq = a.acked_seq,
+                    .dirty = true,
+                    .last_change_ns = now_ns,
+                };
             },
             .barrier_complete => |b| {
                 // Barrier finished; promote this topic to accept writes.
@@ -1870,49 +1917,48 @@ pub const ControlLoop = struct {
                     _ = ts.ctrl_in.enqueue(.{ .promote_to_leader = .{ .topic_id = b.topic_id } });
                 }
             },
-            .master_hwm, .replica_applied, .session_state => {},
+            .master_hwm, .replica_applied, .replicated_hwm, .session_state => {},
         }
     }
 
-    /// Emit throttled TopicAckFeedback toward brokers with local producers.
+    /// Emit throttled per-producer TopicAckFeedback: broadcast to peer brokers
+    /// (which relay to their local producers) and deliver to local producers.
     fn emitTopicAckFeedbackIfDue(self: *Self, ts: *topics.TopicSubsystem, now_ns: i64) u32 {
-        const interval_ns = self.topic_ack_feedback_interval_ns;
+        if (self.topic_pending_acks.count() == 0) return 0;
+        if (now_ns < self.topic_next_ack_feedback_ns) return 0;
+        self.topic_next_ack_feedback_ns = now_ns + self.topic_ack_feedback_interval_ns;
+
         var work: u32 = 0;
+        var expired: [64]topics.topic_ack_tracker.ProducerKey = undefined;
+        var n_expired: usize = 0;
 
-        var iter = ts.store.openQueues();
-        while (iter.next()) |tqp| {
-            const tq = tqp.*;
-            if (tq.role != .leader) continue;
-            if (tq.replicated_hwm == 0) continue;
-
-            const next = self.topic_next_ack_feedback_ns.get(tq.topic_id) orelse 0;
-            if (now_ns < next) continue;
-
-            self.topic_next_ack_feedback_ns.put(tq.topic_id, now_ns + interval_ns) catch continue;
-
-            // 1. Broadcast to remote peers so replicas advance their HWM too.
-            self.broadcastAdminMessage(
-                topic_admin.TopicAckFeedbackBody,
-                topic_admin.TEMPLATE_TOPIC_ACK_FEEDBACK,
-                topic_admin.TopicAckFeedbackBody{
-                    .topic_id = tq.topic_id,
-                    .leader_epoch = tq.epoch,
-                    .replicated_hwm = tq.replicated_hwm,
-                    .replicated_count = tq.replicatedCount(),
-                },
-            );
-            // 2. Deliver directly to any local producer service so its pending
-            //    replicate_once acks complete without a round-trip through the
-            //    admin UDP channel.
-            if (ts.registry.getById(tq.topic_id)) |rec| {
-                if (rec.producer_service_id >= 0) {
-                    var buf: [64]u8 = undefined;
-                    const n = topic_messages.encodeAckFeedback(&buf, tq.topic_id, tq.epoch, tq.replicated_hwm, tq.replicatedCount());
-                    _ = self.writeToServiceControl(@intCast(rec.producer_service_id), buf[0..n]);
+        var it = self.topic_pending_acks.iterator();
+        while (it.next()) |kv| {
+            const key = kv.key_ptr.*;
+            const ack = kv.value_ptr;
+            if (!ack.dirty and now_ns - ack.last_change_ns >= ack_linger_ns) {
+                if (n_expired < expired.len) {
+                    expired[n_expired] = key;
+                    n_expired += 1;
                 }
+                continue;
             }
+            if (!ack.dirty and now_ns - ack.last_sent_ns < ack_resend_interval_ns) continue;
+
+            const body = topic_admin.TopicAckFeedbackBody{
+                .topic_id = key.topic_id,
+                .leader_epoch = ack.leader_epoch,
+                .replicated_hwm = ack.replicated_hwm,
+                .publisher_id = key.publisher_id,
+                .acked_seq = ack.acked_seq,
+            };
+            self.broadcastAdminMessage(topic_admin.TopicAckFeedbackBody, topic_admin.TEMPLATE_TOPIC_ACK_FEEDBACK, body);
+            self.deliverAckFeedbackLocally(ts, body);
+            ack.dirty = false;
+            ack.last_sent_ns = now_ns;
             work += 1;
         }
+        for (expired[0..n_expired]) |key| _ = self.topic_pending_acks.remove(key);
         return work;
     }
 

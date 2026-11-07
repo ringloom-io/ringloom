@@ -1,6 +1,9 @@
 # Testing Guide — RingLoom Broker
 
 Instructions for running end-to-end correctness tests and performance benchmarks.
+
+For repeatable performance runs, reports, comparisons and result updates, start
+with [the benchmark workflow](benchmarks.md).
 Intended for developers working on the library and for automated agents.
 
 > **Design reference:** See `docs/components/testing.md` and
@@ -135,7 +138,7 @@ scheduled nightly basis. These are the slowest tests.
 ### Option A: Automated harness (zig build)
 
 ```bash
-zig build perf
+zig build perf -Doptimize=ReleaseFast
 ```
 
 > Performance benchmarks are compiled with `ReleaseFast` optimization. They are
@@ -372,7 +375,7 @@ zig build test-testing
 zig build e2e
 
 # Build perf benchmarks (compiles all benchmarks; runner executes all)
-zig build perf
+zig build perf -Doptimize=ReleaseFast
 ```
 
 ---

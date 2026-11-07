@@ -91,7 +91,8 @@ public:
         int node_id = 1,
         int port = 19001,
         std::string group = "ringloom-java-test",
-        std::vector<std::string> peers = {})
+        std::vector<std::string> peers = {},
+        bool topics_enabled = false)
         : repo_root_(std::move(repo_root)),
           workspace_(std::move(workspace)),
           node_id_(node_id) {
@@ -107,6 +108,9 @@ public:
             " --daemon --bin-dir " + shellQuote(std::filesystem::path(broker_bin).parent_path().string());
         for (const std::string &peer : peers) {
             command += " --peer " + shellQuote(peer);
+        }
+        if (topics_enabled) {
+            command += " --topics";
         }
         env_ = parseEnv(runCommandCapture(command));
     }
@@ -403,86 +407,159 @@ void testTopicValueTypes() {
     require(result.copyPayload().empty(), "empty poll result should have empty copy");
 }
 
-void testTopicPublisher() {
+/// Single-node broker with persistent topics enabled.
+TestBroker topicBroker(const std::string &repo_root, const std::string &workspace) {
+    return TestBroker(repo_root, workspace, 1, 19001, "ringloom-java-test", {}, true);
+}
+
+/// Runs `body` against a fresh workspace, keeping it on failure for debugging.
+template <typename Body>
+void withWorkspace(const Body &body) {
     const std::string repo_root = getenvOr("RINGLOOM_PROJECT_ROOT", std::filesystem::current_path().string());
     const std::string workspace = createWorkspace();
-    bool success = false;
-
     try {
-        TestBroker broker(repo_root, workspace);
+        body(repo_root, workspace);
+    } catch (...) {
+        std::cerr << "Preserving RingLoom C++ workspace: " << workspace << '\n';
+        throw;
+    }
+    std::filesystem::remove_all(workspace);
+}
 
-        auto echo = ringloom::Service::start(serviceConfig("cpp-topic-pub", broker));
-        auto client = echo.createClient("cpp-topic-pub");
+/// Polls `subscription` until `expected` messages arrive or ~5s pass.
+std::vector<std::string> drainTopic(ringloom::TopicSubscription &subscription, std::size_t expected) {
+    std::vector<std::string> received;
+    ringloom::TopicPollResult result;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (received.size() < expected && std::chrono::steady_clock::now() < deadline) {
+        while (received.size() < expected && subscription.poll(result) == ringloom::Status::ok) {
+            if (result.hasMessage()) {
+                const auto bytes = result.copyPayload();
+                received.emplace_back(bytes.begin(), bytes.end());
+            }
+        }
+        if (received.size() < expected) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+    }
+    return received;
+}
 
-        // Register a topic publisher
+void testTopicPublisherAcks() {
+    withWorkspace([](const std::string &repo_root, const std::string &workspace) {
+        TestBroker broker = topicBroker(repo_root, workspace);
+        auto svc = ringloom::Service::start(serviceConfig("cpp-topic-pub", broker));
+        auto client = svc.createClient("cpp-topic-pub");
+
         auto publisher = client.registerTopicPublication("pub-test");
 
-        // Publish (may return not_connected since backend is stubbed)
         const std::string payload = "hello";
-        static_cast<void>(publisher.publish(payload.data(), payload.size()));
-        // Don't assert OK - the backend may be stubbed
+        require(publisher.publish(payload) == ringloom::Status::ok, "fire-and-forget publish should succeed");
 
-        // Publish with ack mode
-        std::uint64_t out_index = 0;
-        static_cast<void>(publisher.publish(payload.data(), payload.size(),
-            ringloom::TopicAckMode::replicate_once, 0, &out_index));
+        // replicate_once: the publish returns a token; a single-node broker acks
+        // on append, and the ack arrives through the service control plane.
+        std::uint64_t token = 0;
+        require(publisher.publish(payload, ringloom::TopicAckMode::replicate_once, 7, &token) == ringloom::Status::ok,
+                "replicate_once publish should succeed");
+        require(token > 0, "replicate_once publish should return a positive token");
 
-        // isAcked
-        static_cast<void>(publisher.isAcked(0));  // exercise the API
-
-        // publishOrThrow (may throw if not_connected, so catch)
-        try {
-            publisher.publishOrThrow(payload.data(), payload.size());
-        } catch (const ringloom::RingloomError&) {
-            // expected when backend is stubbed
+        bool acked = false;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!acked && std::chrono::steady_clock::now() < deadline) {
+            svc.pollControl(64);
+            acked = publisher.isAcked(token);
+            if (!acked) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
         }
+        require(acked, "replicate_once publish should be acked on a single-node broker");
+
+        publisher.publishOrThrow(payload.data(), payload.size());
 
         // Close idempotency
         publisher.close();
-        publisher.close();  // should not crash
+        publisher.close();
 
-        success = true;
         broker.stop();
-    } catch (...) {
-        std::cerr << "Preserving RingLoom C++ workspace: " << workspace << '\n';
-        throw;
-    }
-
-    if (success) {
-        std::filesystem::remove_all(workspace);
-    }
+    });
 }
 
-void testTopicSubscriptionStubbed() {
-    const std::string repo_root = getenvOr("RINGLOOM_PROJECT_ROOT", std::filesystem::current_path().string());
-    const std::string workspace = createWorkspace();
-    bool success = false;
+void testTopicPublishSubscribe() {
+    withWorkspace([](const std::string &repo_root, const std::string &workspace) {
+        TestBroker broker = topicBroker(repo_root, workspace);
+        auto svc = ringloom::Service::start(serviceConfig("cpp-topic", broker));
+        auto pub_client = svc.createClient("cpp-topic");
+        auto sub_client = svc.createClient("cpp-topic-sub");
 
-    try {
-        TestBroker broker(repo_root, workspace);
+        auto publisher = pub_client.registerTopicPublication("e2e-ff");
+        // Subscribing right after registration must work: the broker creates
+        // the queue on disk before replying.
+        auto subscription = sub_client.subscribeTopic("e2e-ff", ringloom::TopicStart::earliest);
 
-        auto echo = ringloom::Service::start(serviceConfig("cpp-topic-sub", broker));
-        auto client = echo.createClient("cpp-topic-sub");
-
-        // subscribeTopic should throw since subscription backend returns INTERNAL
-        bool threw = false;
-        try {
-            auto sub = client.subscribeTopic("sub-test");
-        } catch (const ringloom::RingloomError&) {
-            threw = true;
+        const std::vector<std::string> sent = {"msg-0", "msg-1", "msg-2", "msg-3", "msg-4"};
+        for (const std::string &message : sent) {
+            svc.pollControl(64);
+            require(publisher.publish(message) == ringloom::Status::ok, "topic publish should succeed");
         }
-        require(threw, "subscribeTopic should throw when subscription backend is stubbed");
 
-        success = true;
+        const std::vector<std::string> received = drainTopic(subscription, sent.size());
+        require(received == sent, "subscriber should receive every message in publish order");
+
+        subscription.close();
+        publisher.close();
         broker.stop();
-    } catch (...) {
-        std::cerr << "Preserving RingLoom C++ workspace: " << workspace << '\n';
-        throw;
-    }
+    });
+}
 
-    if (success) {
-        std::filesystem::remove_all(workspace);
-    }
+void testTopicLatestSubscriberSkipsHistory() {
+    withWorkspace([](const std::string &repo_root, const std::string &workspace) {
+        TestBroker broker = topicBroker(repo_root, workspace);
+        auto svc = ringloom::Service::start(serviceConfig("cpp-topic-latest", broker));
+        auto pub_client = svc.createClient("cpp-topic-latest");
+        auto sub_client = svc.createClient("cpp-topic-latest-sub");
+
+        auto publisher = pub_client.registerTopicPublication("e2e-latest");
+        require(publisher.publish(std::string_view("before")) == ringloom::Status::ok, "publish before subscribe");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        auto subscription = sub_client.subscribeTopic("e2e-latest", ringloom::TopicStart::latest);
+        require(publisher.publish(std::string_view("after")) == ringloom::Status::ok, "publish after subscribe");
+
+        const std::vector<std::string> received = drainTopic(subscription, 1);
+        require(received.size() == 1 && received[0] == "after",
+                "LATEST subscriber should only see messages published after it subscribed");
+
+        subscription.close();
+        publisher.close();
+        broker.stop();
+    });
+}
+
+void testTopicsDisabledFailsFast() {
+    withWorkspace([](const std::string &repo_root, const std::string &workspace) {
+        TestBroker broker(repo_root, workspace);  // topics disabled
+        auto svc = ringloom::Service::start(serviceConfig("cpp-topic-off", broker));
+        auto client = svc.createClient("cpp-topic-off");
+
+        const auto expectDisabled = [](const char *what, const auto &call) {
+            const auto started = std::chrono::steady_clock::now();
+            ringloom::Status status = ringloom::Status::ok;
+            try {
+                call();
+            } catch (const ringloom::RingloomError &error) {
+                status = error.status();
+            }
+            const auto elapsed = std::chrono::steady_clock::now() - started;
+            require(status == ringloom::Status::topic_disabled,
+                    std::string(what) + " should fail with topic_disabled, got " + ringloom::statusName(status));
+            // The registration timeout is 5s; the broker must answer instead.
+            require(elapsed < std::chrono::seconds(2), std::string(what) + " should fail fast, not time out");
+        };
+        expectDisabled("registerTopicPublication", [&] { client.registerTopicPublication("off-topic"); });
+        expectDisabled("subscribeTopic", [&] { client.subscribeTopic("off-topic"); });
+
+        broker.stop();
+    });
 }
 
 } // namespace
@@ -493,8 +570,10 @@ int main() {
         testTopicValueTypes();
         testLocalIpc();
         testRemoteAeron();
-        testTopicPublisher();
-        testTopicSubscriptionStubbed();
+        testTopicPublisherAcks();
+        testTopicPublishSubscribe();
+        testTopicLatestSubscriberSkipsHistory();
+        testTopicsDisabledFailsFast();
         std::cout << "C++ binding tests passed\n";
         return 0;
     } catch (const std::exception &ex) {

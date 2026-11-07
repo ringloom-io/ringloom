@@ -7,7 +7,7 @@ const test = require("node:test");
 const { AeronPublicationStatus, RingloomStatus, native } = require("..");
 
 test("loads native addon and exposes ABI basics", () => {
-  assert.equal(native.abiVersion(), 4);
+  assert.equal(native.abiVersion(), 5);
   assert.equal(native.statusName(RingloomStatus.OK), "ok");
   assert.match(native.statusName(RingloomStatus.INTERNAL), /internal/);
   assert.equal(

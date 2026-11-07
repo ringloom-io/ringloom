@@ -63,6 +63,9 @@ function startBroker(root, workspace, options = {}) {
   for (const peer of options.peers ?? []) {
     args.push("--peer", peer);
   }
+  if (options.topics) {
+    args.push("--topics");
+  }
   const output = childProcess.execFileSync("bash", args, {
     cwd: root,
     encoding: "utf8",
@@ -115,7 +118,11 @@ test("topic value types and status constants", () => {
   assert.equal(RingloomStatus.isOk(RingloomStatus.NOT_READY), false);
 });
 
-test("register topic publication and close is idempotent", () => {
+/**
+ * Runs `body(svc, broker)` against a fresh broker and service, keeping the
+ * workspace on failure for debugging.
+ */
+function withService(serviceName, brokerOptions, body) {
   const root = repoRoot();
   const workspace = fs.mkdtempSync(
     path.join(os.tmpdir(), "ringloom-node-topic-"),
@@ -124,11 +131,48 @@ test("register topic publication and close is idempotent", () => {
   let broker;
 
   try {
-    broker = startBroker(root, workspace);
+    broker = startBroker(root, workspace, brokerOptions);
+    const svc = RingloomService.start(serviceConfig(serviceName, broker));
+    try {
+      body(svc);
+      success = true;
+    } finally {
+      svc.close();
+    }
+  } finally {
+    if (broker) {
+      stopBroker(root, workspace);
+    }
+    if (success) {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    } else {
+      console.error(`Preserving RingLoom Node workspace: ${workspace}`);
+    }
+  }
+}
 
-    const svc = RingloomService.start(serviceConfig("node-topic-pub", broker));
+/** Polls `subscription` until `expected` messages arrive or ~5s pass. */
+function drain(subscription, expected) {
+  const received = [];
+  const deadline = Date.now() + 5_000;
+  while (received.length < expected && Date.now() < deadline) {
+    let result = subscription.poll();
+    while (received.length < expected && result.status === RingloomStatus.OK) {
+      if (result.payload) {
+        received.push(result.payload.toString("utf8"));
+      }
+      result = subscription.poll();
+    }
+    if (received.length < expected) {
+      sleep(25);
+    }
+  }
+  return received;
+}
+
+test("register topic publication and close is idempotent", () => {
+  withService("node-topic-pub", { topics: true }, (svc) => {
     const client = svc.createClient("node-topic-pub");
-
     try {
       const publisher = client.registerTopicPublication("test-topic");
       assert.equal(typeof publisher.publish, "function");
@@ -137,102 +181,116 @@ test("register topic publication and close is idempotent", () => {
       publisher.close();
 
       assert.throws(() => publisher.publish(Buffer.from("x")), /closed/i);
-
-      success = true;
     } finally {
       client.close();
-      svc.close();
     }
-  } finally {
-    if (broker) {
-      stopBroker(root, workspace);
-    }
-    if (success) {
-      fs.rmSync(workspace, { recursive: true, force: true });
-    } else {
-      console.error(`Preserving RingLoom Node workspace: ${workspace}`);
-    }
-  }
+  });
 });
 
-test("publisher publish and isAcked", () => {
-  const root = repoRoot();
-  const workspace = fs.mkdtempSync(
-    path.join(os.tmpdir(), "ringloom-node-topic-"),
-  );
-  let success = false;
-  let broker;
-
-  try {
-    broker = startBroker(root, workspace);
-
-    const svc = RingloomService.start(serviceConfig("node-topic-ack", broker));
+test("publisher publish and replicate_once ack", () => {
+  withService("node-topic-ack", { topics: true }, (svc) => {
     const client = svc.createClient("node-topic-ack");
-
     try {
       const publisher = client.registerTopicPublication("ack-test");
 
-      const status1 = publisher.publish(Buffer.from("hello"));
-      assert.equal(typeof status1, "number");
+      assert.equal(publisher.publish(Buffer.from("hello")), RingloomStatus.OK);
 
-      const status2 = publisher.publish(
+      const token = new BigUint64Array(1);
+      const status = publisher.publish(
         Buffer.from("hello"),
         TopicAckMode.REPLICATE_ONCE,
+        7,
+        token,
       );
-      assert.equal(typeof status2, "number");
+      assert.equal(status, RingloomStatus.OK);
+      assert.ok(token[0] > 0n, "replicate_once publish should return a token");
 
-      assert.equal(typeof publisher.isAcked(0), "boolean");
+      // A single-node broker acks on append; the ack arrives through the
+      // service control plane.
+      let acked = false;
+      const deadline = Date.now() + 5_000;
+      while (!acked && Date.now() < deadline) {
+        svc.pollControl(64);
+        acked = publisher.isAcked(Number(token[0]));
+        if (!acked) sleep(10);
+      }
+      assert.ok(acked, "replicate_once publish should be acked");
 
       publisher.close();
-      success = true;
     } finally {
       client.close();
-      svc.close();
     }
-  } finally {
-    if (broker) {
-      stopBroker(root, workspace);
-    }
-    if (success) {
-      fs.rmSync(workspace, { recursive: true, force: true });
-    } else {
-      console.error(`Preserving RingLoom Node workspace: ${workspace}`);
-    }
-  }
+  });
 });
 
-test("topic subscription poll returns error when stubbed", () => {
-  const root = repoRoot();
-  const workspace = fs.mkdtempSync(
-    path.join(os.tmpdir(), "ringloom-node-topic-"),
-  );
-  let success = false;
-  let broker;
-
-  try {
-    broker = startBroker(root, workspace);
-
-    const svc = RingloomService.start(serviceConfig("node-topic-sub", broker));
-    const client = svc.createClient("node-topic-sub");
-
+test("subscriber receives published messages in order", () => {
+  withService("node-topic", { topics: true }, (svc) => {
+    const pubClient = svc.createClient("node-topic");
+    const subClient = svc.createClient("node-topic-sub");
     try {
-      assert.throws(() => client.subscribeTopic("test"), /subscribe|internal/i);
+      const publisher = pubClient.registerTopicPublication("e2e-ff");
+      // Subscribing right after registration must work: the broker creates
+      // the queue on disk before replying.
+      const subscription = subClient.subscribeTopic("e2e-ff", TopicStart.EARLIEST);
+      try {
+        const sent = ["msg-0", "msg-1", "msg-2", "msg-3", "msg-4"];
+        for (const message of sent) {
+          svc.pollControl(64);
+          assert.equal(publisher.publish(Buffer.from(message)), RingloomStatus.OK);
+        }
+        assert.deepEqual(drain(subscription, sent.length), sent);
+      } finally {
+        subscription.close();
+        publisher.close();
+      }
+    } finally {
+      subClient.close();
+      pubClient.close();
+    }
+  });
+});
 
-      success = true;
+test("LATEST subscriber skips messages published before it subscribed", () => {
+  withService("node-topic-latest", { topics: true }, (svc) => {
+    const pubClient = svc.createClient("node-topic-latest");
+    const subClient = svc.createClient("node-topic-latest-sub");
+    try {
+      const publisher = pubClient.registerTopicPublication("e2e-latest");
+      assert.equal(publisher.publish(Buffer.from("before")), RingloomStatus.OK);
+      sleep(200);
+
+      const subscription = subClient.subscribeTopic("e2e-latest", TopicStart.LATEST);
+      try {
+        assert.equal(publisher.publish(Buffer.from("after")), RingloomStatus.OK);
+        assert.deepEqual(drain(subscription, 1), ["after"]);
+      } finally {
+        subscription.close();
+        publisher.close();
+      }
+    } finally {
+      subClient.close();
+      pubClient.close();
+    }
+  });
+});
+
+test("topic calls fail fast with TOPIC_DISABLED when the broker has topics off", () => {
+  withService("node-topic-off", {}, (svc) => {
+    const client = svc.createClient("node-topic-off");
+    try {
+      for (const call of [
+        () => client.registerTopicPublication("off-topic"),
+        () => client.subscribeTopic("off-topic"),
+      ]) {
+        const started = Date.now();
+        assert.throws(call, (err) => err.statusCode === RingloomStatus.TOPIC_DISABLED);
+        // The registration timeout is 5s; the broker must answer instead.
+        assert.ok(Date.now() - started < 2_000, "should fail fast, not time out");
+      }
     } finally {
       client.close();
-      svc.close();
     }
-  } finally {
-    if (broker) {
-      stopBroker(root, workspace);
-    }
-    if (success) {
-      fs.rmSync(workspace, { recursive: true, force: true });
-    } else {
-      console.error(`Preserving RingLoom Node workspace: ${workspace}`);
-    }
-  }
+  });
 });
 
 test("RingloomStatus NOT_READY and isOk", () => {

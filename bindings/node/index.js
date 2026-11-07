@@ -16,6 +16,10 @@ const RingloomStatus = Object.freeze({
   CLAIM_NOT_ACTIVE: 9,
   MESSAGE_TOO_LONG: 10,
   NOT_READY: 11,
+  TOPIC_LEADER_UNAVAILABLE: 12,
+  TOPIC_DISABLED: 13,
+  TOPIC_CONFIG_MISMATCH: 14,
+  TOPIC_UNKNOWN: 15,
   INTERNAL: 255,
   isOk(status) {
     return status === 0;

@@ -50,6 +50,9 @@ pub const PublishResult = enum(u8) {
 /// for sending messages to the topic leader.
 pub const TopicPublisher = struct {
     topic_id: u64,
+    /// Identifies this publisher to the leader, which tracks replicate_once acks
+    /// per publisher (see `newPublisherId`). Must be unique across the cluster.
+    publisher_id: u64,
     leader_node_id: u8,
     leader_epoch: u64,
     /// Aeron publication to the topic leader (IPC if co-located, UDP otherwise).
@@ -57,14 +60,30 @@ pub const TopicPublisher = struct {
     /// Highest queue index replicated to >=1 replica (for diagnostics). Advanced
     /// from TopicAckFeedback (template 15) on the control thread.
     replicated_hwm: u64 = 0,
-    /// Monotonic count of this topic's publishes that have been replicated to
-    /// >=1 replica (or appended, single-node). Producers map their per-publish
-    /// sequence token against this count — see `next_token` / `isAcked`.
-    replicated_count: u64 = 0,
-    /// Per-topic monotonic publish sequence, assigned at offer time and returned
-    /// to the caller as the `out_index` token. Stable and client-comparable
-    /// (unlike the broker queue index, which resets across cycle rollovers).
+    /// Highest of this publisher's sequence tokens that the leader reports as
+    /// replicated to >=1 replica (or appended, single-node). Written by the
+    /// control thread, read by the publishing thread.
+    acked_seq: std.atomic.Value(u64) = .init(0),
+    /// This publisher's publish sequence: the token of the most recent
+    /// successful publish. Sent in the frame as `publish_seq` and returned to
+    /// the caller as the `out_index` token.
     next_token: u64 = 0,
+
+    /// Returns a fresh, non-zero publisher id. Mixes wall-clock and monotonic
+    /// time, a process-wide counter and a per-call address, which makes
+    /// collisions across processes and hosts vanishingly unlikely.
+    pub fn newPublisherId() u64 {
+        const S = struct {
+            var counter: std.atomic.Value(u64) = .init(0);
+        };
+        var seed: [4]u64 = undefined;
+        seed[0] = @bitCast(ringloom_common.platform.Clock.epochMillis());
+        seed[1] = @bitCast(ringloom_common.platform.Clock.monotonicNanos());
+        seed[2] = S.counter.fetchAdd(1, .monotonic);
+        seed[3] = @intFromPtr(&seed);
+        const id = std.hash.Wyhash.hash(0x5249_4e47_4c4f_4f4d, std.mem.asBytes(&seed));
+        return if (id == 0) 1 else id;
+    }
 
     pub fn deinit(self: *TopicPublisher) void {
         // `leader_pub` is borrowed from the owning ServiceAeronRuntime, which
@@ -106,11 +125,16 @@ pub const TopicPublisher = struct {
         dh.payload_length = @intCast(TopicPublishHeader.encoded_length + payload.len);
 
         // 2. TopicPublishHeader.
+        // The token is committed only if the offer succeeds, so a retried
+        // publish after back-pressure reuses the same sequence.
+        const seq = self.next_token + 1;
         const tph = TopicPublishHeader{
             .topic_id = self.topic_id,
             .leader_epoch = self.leader_epoch,
             .correlation_id = correlation_id,
             .ack_mode = @intFromEnum(ack_mode),
+            .publisher_id = self.publisher_id,
+            .publish_seq = seq,
         };
 
         // Copy into buffer.
@@ -124,7 +148,7 @@ pub const TopicPublisher = struct {
         const result = pub_.offer(buf[0..total]);
         switch (result) {
             .position => {
-                self.next_token += 1;
+                self.next_token = seq;
                 return .ok;
             },
             .back_pressured, .admin_action => return .back_pressured,
@@ -141,19 +165,23 @@ pub const TopicPublisher = struct {
 
     /// Check whether a `replicate_once` publish has been acknowledged.
     /// `token` is the per-publish sequence returned in `out_index`; true once
-    /// the broker's replicated count reaches it.
+    /// the leader reports this publisher's acked sequence at or past it.
     pub fn isAcked(self: *const TopicPublisher, token: u64) bool {
-        return self.replicated_count >= token;
+        return self.ackedSeq() >= token;
     }
 
-    /// Control-thread: apply throttled HWM feedback (template 15). Advances the
-    /// replicated count (and the diagnostic hwm) monotonically, ignoring stale
-    /// epochs. Producers' pending acks complete as `replicated_count` passes
-    /// their tokens.
-    pub fn applyAckFeedback(self: *TopicPublisher, leader_epoch: u64, replicated_hwm: u64, replicated_count: u64) void {
+    /// Highest token acknowledged so far.
+    pub fn ackedSeq(self: *const TopicPublisher) u64 {
+        return self.acked_seq.load(.acquire);
+    }
+
+    /// Control-thread: apply ack feedback (template 15). Ignores feedback for
+    /// other publishers and from stale epochs; `acked_seq` only moves forward.
+    pub fn applyAckFeedback(self: *TopicPublisher, leader_epoch: u64, publisher_id: u64, replicated_hwm: u64, acked_seq: u64) void {
+        if (publisher_id != self.publisher_id) return;
         if (leader_epoch < self.leader_epoch) return; // stale feedback
         if (replicated_hwm > self.replicated_hwm) self.replicated_hwm = replicated_hwm;
-        if (replicated_count > self.replicated_count) self.replicated_count = replicated_count;
+        if (acked_seq > self.acked_seq.load(.monotonic)) self.acked_seq.store(acked_seq, .release);
     }
 
     /// Control-thread: apply a leader change (template 13). Re-targets the
@@ -165,3 +193,34 @@ pub const TopicPublisher = struct {
         self.leader_epoch = leader_epoch;
     }
 };
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+test "ack feedback for another publisher on the same topic is ignored" {
+    var p = TopicPublisher{ .topic_id = 7, .publisher_id = 0xA, .leader_node_id = 1, .leader_epoch = 2 };
+    p.next_token = 3;
+
+    p.applyAckFeedback(2, 0xB, 500, 3); // someone else's acks
+    try std.testing.expect(!p.isAcked(1));
+
+    p.applyAckFeedback(2, 0xA, 500, 2);
+    try std.testing.expect(p.isAcked(2));
+    try std.testing.expect(!p.isAcked(3));
+
+    p.applyAckFeedback(1, 0xA, 900, 3); // stale epoch
+    try std.testing.expect(!p.isAcked(3));
+
+    p.applyAckFeedback(2, 0xA, 400, 1); // never moves backwards
+    try std.testing.expect(p.isAcked(2));
+}
+
+test "newPublisherId is non-zero and distinct" {
+    var seen = std.AutoHashMap(u64, void).init(std.testing.allocator);
+    defer seen.deinit();
+    for (0..1000) |_| {
+        const id = TopicPublisher.newPublisherId();
+        try std.testing.expect(id != 0);
+        try std.testing.expect(!seen.contains(id));
+        try seen.put(id, {});
+    }
+}

@@ -2,9 +2,12 @@
 //!
 //! Measures how quickly the RingLoom system recovers from failures:
 //!
-//! 1. **Service recovery** — a service crashes, the broker detects the loss via
-//!    heartbeat timeout, and a replacement service registers successfully.
-//!    Total wall-clock time from crash to ready replacement is recorded.
+//! 1. **Service recovery** — a service crashes or is killed and the broker
+//!    detects the loss via heartbeat timeout. Records the measured detection
+//!    time (death → broker logs the heartbeat timeout) and the time until a
+//!    replacement service is registered. Detection is bounded below by the
+//!    service heartbeat timeout (`service_heartbeat_timeout_ms`, 10 s, in
+//!    common/platform/constants.zig), so changing it moves these numbers.
 //!
 //! 2. **Broker recovery** — in a two-broker topology the remote broker is
 //!    stopped and restarted.  The benchmark measures how long until cross-broker
@@ -28,7 +31,29 @@ const RecoverySummary = struct {
     average_recovery_time_ms: u64,
     max_recovery_time_ms: u64,
     total_recovery_time_ms: u64,
+    /// Death → broker logs the heartbeat timeout (average over iterations).
+    /// 0 for scenarios that do not measure detection.
+    detection_time_ms: u64 = 0,
 };
+
+/// Broker log line written when a local service misses its heartbeat
+/// deadline (service_heartbeat_checker.zig).
+const heartbeat_timeout_log = "heartbeat timeout: service";
+
+/// Waits until the broker has logged `heartbeat_timeout_log` at least
+/// `occurrences` times and returns the elapsed time since `since_ns`.
+/// Polls every millisecond so the measurement resolution is ~1 ms.
+fn waitForHeartbeatTimeout(broker: *testing_mod.ProcessHandle, occurrences: usize, since_ns: i64, timeout_ms: u64) !u64 {
+    const deadline_ns = Clock.monotonicNanosStable() + @as(i64, @intCast(timeout_ms)) * std.time.ns_per_ms;
+    while (Clock.monotonicNanosStable() < deadline_ns) {
+        _ = broker.drainAvailableOutput() catch {};
+        if (broker.stdout_capture.countOccurrences(heartbeat_timeout_log) >= occurrences) {
+            return @intCast(Clock.monotonicNanosStable() - since_ns);
+        }
+        platform.sleepNanos(std.time.ns_per_ms);
+    }
+    return error.Timeout;
+}
 
 fn writeRecoverySummary(
     allocator: std.mem.Allocator,
@@ -49,7 +74,8 @@ fn writeRecoverySummary(
         \\  "iterations": {d},
         \\  "average_recovery_time_ms": {d},
         \\  "max_recovery_time_ms": {d},
-        \\  "total_recovery_time_ms": {d}
+        \\  "total_recovery_time_ms": {d},
+        \\  "detection_time_ms": {d}
         \\}}
         \\
     , .{
@@ -60,6 +86,7 @@ fn writeRecoverySummary(
         summary.average_recovery_time_ms,
         summary.max_recovery_time_ms,
         summary.total_recovery_time_ms,
+        summary.detection_time_ms,
     });
     defer allocator.free(json);
 
@@ -112,9 +139,8 @@ test "service recovery time after crash" {
 
     const crash_detected_ns = Clock.monotonicNanosStable();
 
-    // Allow the broker's heartbeat checker to notice the dead service.
-    // Default heartbeat timeout is 10 s; we wait a bit longer to be safe.
-    platform.sleepNanos(12 * std.time.ns_per_s);
+    // Measure how long the broker takes to notice the dead service.
+    const detection_ns = try waitForHeartbeatTimeout(broker, 1, crash_detected_ns, 30_000);
 
     // Start a replacement service under the same logical name.
     const replacement = try harness.startService(.{
@@ -144,6 +170,7 @@ test "service recovery time after crash" {
         .average_recovery_time_ms = recovery_ms,
         .max_recovery_time_ms = recovery_ms,
         .total_recovery_time_ms = recovery_ms,
+        .detection_time_ms = detection_ns / std.time.ns_per_ms,
     });
 
     // Cleanup
@@ -169,12 +196,11 @@ test "service recovery time after kill" {
     try harness.waitForServiceReady(echo, 5000);
 
     // When — we forcefully kill the service.
+    const kill_ns = Clock.monotonicNanosStable();
     harness.killProcess(echo);
 
-    const kill_ns = Clock.monotonicNanosStable();
-
-    // Wait for the broker to notice via heartbeat timeout.
-    platform.sleepNanos(12 * std.time.ns_per_s);
+    // Measure how long the broker takes to notice via heartbeat timeout.
+    const detection_ns = try waitForHeartbeatTimeout(broker, 1, kill_ns, 30_000);
 
     // Start a replacement.
     const replacement = try harness.startService(.{
@@ -203,6 +229,7 @@ test "service recovery time after kill" {
         .average_recovery_time_ms = recovery_ms,
         .max_recovery_time_ms = recovery_ms,
         .total_recovery_time_ms = recovery_ms,
+        .detection_time_ms = detection_ns / std.time.ns_per_ms,
     });
 
     // Cleanup
@@ -462,6 +489,7 @@ test "rapid service restart recovery" {
     const iterations: u32 = 5;
     var total_recovery_ns: i128 = 0;
     var max_recovery_ns: u64 = 0;
+    var total_detection_ns: u64 = 0;
 
     for (0..iterations) |i| {
         const svc = try harness.startService(.{
@@ -471,12 +499,11 @@ test "rapid service restart recovery" {
         });
         try harness.waitForServiceReady(svc, 5000);
 
+        const iter_start = Clock.monotonicNanosStable();
         harness.killProcess(svc);
 
-        const iter_start = Clock.monotonicNanosStable();
-
-        // Heartbeat timeout before re-registration.
-        platform.sleepNanos(12 * std.time.ns_per_s);
+        // Wait for this iteration's heartbeat timeout before re-registering.
+        total_detection_ns += try waitForHeartbeatTimeout(broker, i + 1, iter_start, 30_000);
 
         const replacement = try harness.startService(.{
             .executable_name = "ringloom-test-echo-service",
@@ -514,6 +541,7 @@ test "rapid service restart recovery" {
         .average_recovery_time_ms = avg_ms,
         .max_recovery_time_ms = @intCast(@divFloor(max_recovery_ns, std.time.ns_per_ms)),
         .total_recovery_time_ms = @intCast(@divFloor(total_recovery_ns, std.time.ns_per_ms)),
+        .detection_time_ms = total_detection_ns / iterations / std.time.ns_per_ms,
     });
 
     // Cleanup

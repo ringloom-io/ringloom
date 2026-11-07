@@ -163,15 +163,8 @@ pub const ControlAgent = struct {
 
             TemplateId.topic_subscription_response => {
                 // Registration response for a pending subscribeTopic.
-                const m = topic_messages.decode(topic_messages.TopicSubscriptionResponseMsg, payload) orelse return;
                 if (pending_subscription_response) |ptr| {
-                    ptr.* = .{
-                        .topic_id = m.topic_id,
-                        .status = m.status,
-                        .start_index = m.start_index,
-                        .queue_dir = topic_messages.subscriptionResponseQueueDir(payload),
-                        .geometry = m.geometry,
-                    };
+                    ptr.* = PendingSubscriptionResponse.fromPayload(payload) orelse return;
                 }
             },
 
@@ -179,19 +172,16 @@ pub const ControlAgent = struct {
                 // Producer must re-target the new topic leader (spec 08).
                 const m = topic_messages.decode(topic_messages.TopicLeaderChangedMsg, payload) orelse return;
                 if (self.topic_publishers) |reg| {
-                    if (reg.get(m.topic_id)) |publisher| {
-                        publisher.applyLeaderChanged(@intCast(m.leader_node_id), m.leader_epoch);
-                    }
+                    reg.applyLeaderChanged(m.topic_id, @intCast(m.leader_node_id), m.leader_epoch);
                 }
             },
 
             TemplateId.topic_ack_feedback => {
-                // Throttled replicated HWM/count for replicate_once completion.
+                // Per-publisher replicate_once ack; ignored unless addressed to
+                // one of this service's publishers.
                 const m = topic_messages.decode(topic_messages.TopicAckFeedbackMsg, payload) orelse return;
                 if (self.topic_publishers) |reg| {
-                    if (reg.get(m.topic_id)) |publisher| {
-                        publisher.applyAckFeedback(m.leader_epoch, m.replicated_hwm, m.replicated_count);
-                    }
+                    _ = reg.applyAckFeedback(m.topic_id, m.publisher_id, m.leader_epoch, m.replicated_hwm, m.acked_seq);
                 }
             },
 
@@ -357,15 +347,39 @@ pub const PendingPublicationResponse = struct {
     status: u8,
 };
 
-/// Pending response data for subscribeTopic (template 10). `queue_dir` borrows
-/// into the control ring buffer memory for the duration of the wait loop; the
-/// caller copies it before returning.
+/// Pending response data for subscribeTopic (template 10). The queue directory
+/// is copied out of the message: the control ring buffer releases (and zeroes)
+/// a record as soon as its handler returns, so a slice into it would dangle.
 pub const PendingSubscriptionResponse = struct {
     topic_id: u64,
     status: u8,
     start_index: u64,
-    queue_dir: []const u8,
     geometry: ringloom_common.topics.TopicConfig,
+    queue_dir_buf: [max_queue_dir_len]u8 = undefined,
+    queue_dir_len: usize = 0,
+
+    /// Longest queue directory a response can carry (the broker encodes the
+    /// whole response into a 512-byte control message).
+    pub const max_queue_dir_len = 512;
+
+    pub fn fromPayload(payload: []const u8) ?PendingSubscriptionResponse {
+        const m = topic_messages.decode(topic_messages.TopicSubscriptionResponseMsg, payload) orelse return null;
+        const dir = topic_messages.subscriptionResponseQueueDir(payload);
+        if (dir.len > max_queue_dir_len) return null;
+        var r = PendingSubscriptionResponse{
+            .topic_id = m.topic_id,
+            .status = m.status,
+            .start_index = m.start_index,
+            .geometry = m.geometry,
+            .queue_dir_len = dir.len,
+        };
+        @memcpy(r.queue_dir_buf[0..dir.len], dir);
+        return r;
+    }
+
+    pub fn queueDir(self: *const PendingSubscriptionResponse) []const u8 {
+        return self.queue_dir_buf[0..self.queue_dir_len];
+    }
 };
 
 var pending_publication_response: ?*?PendingPublicationResponse = null;
@@ -527,15 +541,31 @@ fn publicationResponseHandler(_: i32, payload: []const u8) void {
 fn subscriptionResponseHandler(_: i32, payload: []const u8) void {
     const template_id = control_encoding.readTemplateId(payload);
     if (template_id == TemplateId.topic_subscription_response) {
-        const m = topic_messages.decode(topic_messages.TopicSubscriptionResponseMsg, payload) orelse return;
         if (pending_subscription_response) |ptr| {
-            ptr.* = .{
-                .topic_id = m.topic_id,
-                .status = m.status,
-                .start_index = m.start_index,
-                .queue_dir = topic_messages.subscriptionResponseQueueDir(payload),
-                .geometry = m.geometry,
-            };
+            ptr.* = PendingSubscriptionResponse.fromPayload(payload) orelse return;
         }
     }
+}
+
+test "subscription response queue_dir survives the ring buffer releasing the record" {
+    const allocator = std.testing.allocator;
+    const cap: usize = 4096;
+    const buf = try allocator.alignedAlloc(u8, .@"8", cap + ring_buffer.trailer_length);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+    var rb = try RingBuffer.init(buf, false, null, null);
+
+    const dir = "/dev/shm/topics/group/node-1/t_00000000deadbeef";
+    var msg: [512]u8 = undefined;
+    const n = topic_messages.encodeSubscriptionResponse(&msg, 0xdeadbeef, .ok, 7, .{}, dir);
+    try rb.write(1, msg[0..n]);
+
+    var response: ?PendingSubscriptionResponse = null;
+    pending_subscription_response = &response;
+    defer pending_subscription_response = null;
+    try std.testing.expectEqual(@as(u32, 1), rb.read(&subscriptionResponseHandler, 1));
+
+    // read() has returned, so the record's bytes are gone; the copy must not be.
+    try std.testing.expectEqualStrings(dir, response.?.queueDir());
+    try std.testing.expectEqual(@as(u64, 7), response.?.start_index);
 }

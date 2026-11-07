@@ -811,14 +811,17 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
 
     ringloom_topic_config_t native_cfg{};
     native_cfg.size = sizeof(ringloom_topic_config_t);
+    // Same defaults as the C++ and Java bindings (FAST_DAILY, keep all, no
+    // flags), whether or not a config object is passed.
+    std::string roll_scheme = "FAST_DAILY";
     if (info.Length() >= 2 && info[1].IsObject()) {
       Napi::Object cfg = info[1].As<Napi::Object>();
-      std::string roll_scheme = OptionalString(cfg, "rollScheme", "FAST_DAILY");
-      const auto copy_len = std::min(roll_scheme.size(), sizeof(native_cfg.roll_scheme));
-      std::memcpy(native_cfg.roll_scheme, roll_scheme.data(), copy_len);
+      roll_scheme = OptionalString(cfg, "rollScheme", "FAST_DAILY");
       native_cfg.retention_cycles = OptionalUint32(cfg, "retentionCycles", 0);
       native_cfg.flags = OptionalUint32(cfg, "flags", 0);
     }
+    const auto copy_len = std::min(roll_scheme.size(), sizeof(native_cfg.roll_scheme));
+    std::memcpy(native_cfg.roll_scheme, roll_scheme.data(), copy_len);
 
     ringloom_topic_publisher_t* publisher = nullptr;
     const ringloom_status_t status = ringloom_register_topic_publication(

@@ -69,8 +69,9 @@ public final class TopicPublisher implements AutoCloseable {
     }
 
     /**
-     * The count of this topic's publishes replicated to {@code >=1} replica
-     * (or appended, on a single-node broker).
+     * This publisher's highest sequence token replicated to {@code >=1} replica
+     * (or appended, on a single-node broker). Publishes from other publishers
+     * on the same topic do not count.
      *
      * <p>Polls the native handle each call; advances as the broker's throttled
      * ack feedback ({@code TopicAckFeedback}) lands. A {@code replicate_once}
@@ -78,7 +79,7 @@ public final class TopicPublisher implements AutoCloseable {
      * is {@code <= replicatedCount()} is considered acked — equivalent to
      * {@link #isAcked(long)}. Returns {@code 0} on older native builds.</p>
      *
-     * @return the replicated publish count, or {@code 0} if unavailable
+     * @return the highest acked sequence token, or {@code 0} if unavailable
      */
     public long replicatedCount() {
         ensureOpen();

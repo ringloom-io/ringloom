@@ -66,7 +66,14 @@ pub fn main(init: std.process.Init) !void {
     const mc: u64 = parseU64(args, "--message-count", 100000);
     const ms: usize = @intCast(parseU64(args, "--message-size", 128));
     const warmup: u64 = parseU64(args, "--warmup-count", 1000);
-    const ack_mode: u8 = @intCast(parseU64(args, "--ack-mode", 0)); // 0=fire_and_forget, 1=replicate_once
+    // This tool sends raw frames without a registered publisher identity, so
+    // the leader cannot track replicate_once acks for it. Use
+    // ringloom-test-topic-publisher-service (scripts/bench-topic.sh) for acks.
+    const ack_mode: u8 = 0;
+    if (parseU64(args, "--ack-mode", 0) != 0) {
+        try std.Io.File.stderr().writeStreamingAll(io, "ERROR: --ack-mode 1 is not supported here; use ringloom-test-topic-publisher-service\n");
+        std.process.exit(2);
+    }
     const admin_stream: i32 = parseInt(args, "--admin-stream-id", 20001);
     const latency_mode: bool = parseU64(args, "--latency", 0) != 0;
     const pace_us: u64 = parseU64(args, "--pace-us", 0); // inter-message delay (diagnostic)
@@ -171,27 +178,16 @@ pub fn main(init: std.process.Init) !void {
     const t1 = Clock.monotonicNanosStable();
     const dt_pub = t1 - t0;
 
-    // ── Wait for acks (replicate_once) ──────────────────────────
-    var dt_ack: i64 = 0;
-    const acked_count: u64 = mc; // single-node: acks on append
-    if (ack_mode == 1) {
-        // On a single-node topics-enabled broker, replicate_once acks
-        // are set on append (no replica to wait for).  The broker's
-        // receiver loop processes IPC publishes synchronously.
-        dt_ack = 0;
-    }
-
     // ── Output JSON ──────────────────────────────────────────────
     const dt_pub_abs: u64 = @intCast(if (dt_pub < 0) @as(i64, 0) else dt_pub);
-    const dt_ack_abs: u64 = @intCast(if (dt_ack < 0) @as(i64, 0) else dt_ack);
     const dms: f64 = @as(f64, @floatFromInt(dt_pub_abs)) / 1_000_000.0;
     const tput: f64 = if (dms > 0) @as(f64, @floatFromInt(mc)) / (dms / 1000.0) else 0;
 
     var jb: [512]u8 = undefined;
     const js = std.fmt.bufPrint(
         &jb,
-        "{{\"mc\":{d},\"ms\":{d},\"warmup\":{d},\"ack_mode\":{d},\"dt_ns\":{d},\"dt_us\":{d},\"dt_ack_ns\":{d},\"acked\":{d},\"tput\":{d}}}",
-        .{ mc, ms, warmup, ack_mode, dt_pub_abs, @as(u64, @intFromFloat(dms * 1000.0)), dt_ack_abs, acked_count, @as(u64, @intFromFloat(tput)) },
+        "{{\"mc\":{d},\"ms\":{d},\"warmup\":{d},\"ack_mode\":{d},\"dt_ns\":{d},\"dt_us\":{d},\"tput\":{d}}}",
+        .{ mc, ms, warmup, ack_mode, dt_pub_abs, @as(u64, @intFromFloat(dms * 1000.0)), @as(u64, @intFromFloat(tput)) },
     ) catch "{}";
     try std.Io.File.stdout().writeStreamingAll(io, "TOPIC_AERON_BENCH_JSON<<EOF\n");
     try std.Io.File.stdout().writeStreamingAll(io, js);

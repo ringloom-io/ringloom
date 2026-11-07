@@ -34,6 +34,10 @@ enum class Status : int {
     claim_not_active = RINGLOOM_ERR_CLAIM_NOT_ACTIVE,
     message_too_long = RINGLOOM_ERR_MESSAGE_TOO_LONG,
     not_ready = RINGLOOM_NOT_READY,
+    topic_leader_unavailable = RINGLOOM_ERR_TOPIC_LEADER_UNAVAILABLE,
+    topic_disabled = RINGLOOM_ERR_TOPIC_DISABLED,
+    topic_config_mismatch = RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH,
+    topic_unknown = RINGLOOM_ERR_TOPIC_UNKNOWN,
     internal = RINGLOOM_ERR_INTERNAL,
 };
 

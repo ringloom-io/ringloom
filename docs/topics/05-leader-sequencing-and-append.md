@@ -88,9 +88,9 @@ onPublish(view = {topic_id, leader_epoch, correlation_id, source_node, source_se
     tq.hwm_index = idx
     count topic_publish_accepted
     if view.ack_mode == replicate_once:
-        # remember (source_node) interest so ack feedback is addressed; the actual ack fires later
-        # when replicated_hwm advances (multi-node) or immediately for a single-node broker.
-        ackTracker.note(view.topic_id, view.source_node, idx)
+        # remember this producer's (publish_seq -> idx); its acked_seq advances later when
+        # replicated_hwm reaches idx (multi-node) or immediately for a single-node broker.
+        ackTracker.note((view.topic_id, view.publisher_id), view.publish_seq, idx)
         if store.replicaPeerCount(view.topic_id) == 0:   # single-node broker carve-out
             tq.replicated_hwm = idx                      # nothing to replicate to → acked on append
 ```
@@ -99,9 +99,13 @@ onPublish(view = {topic_id, leader_epoch, correlation_id, source_node, source_se
 
 The leader advances `tq.replicated_hwm` from replica ACK frames (spec 06 carries each sink's
 `applied_index`): `replicated_hwm = max index that ≥1 replica has applied`. A throttled task
-(interval `broker.topics.ack_feedback_interval_us`) emits `TopicAckFeedback{topic_id, epoch,
-replicated_hwm}` to brokers noted in `ackTracker` (spec 03 §6). On a single-node broker there is no
-replica, so `replicated_hwm` tracks `hwm_index` directly (acked on append).
+(interval `broker.topics.ack_feedback_interval_us`) emits per-producer `TopicAckFeedback{topic_id,
+epoch, replicated_hwm, publisher_id, acked_seq}` (spec 03 §6). Each step the engine retires a
+producer's tracked entries whose index ≤ `replicated_hwm`; `acked_seq` becomes the sequence of the
+last retired entry. Because a producer's sequences and the leader's indices both increase (indices
+stay monotonic across cycle rolls), this never acks a publish that is not replicated. On a
+single-node broker there is no replica, so `replicated_hwm` tracks `hwm_index` directly (acked on
+append).
 
 The total order is exactly the order the single-threaded **receiver loop** appends — i.e. Aeron's
 per-image arrival order across producers. Multiple producers interleave by arrival; within one

@@ -65,7 +65,7 @@ pattern, fixed-size, `padServiceName`-style name padding):
 | `TEMPLATE_TOPIC_LEADER_CHANGED` | `topic_id(0=all), new_leader, leader_epoch` | new topic leader → all | Failover announcement (spec 08). |
 | `TEMPLATE_TOPIC_APPLIED_QUERY` | `topic_id(0=all)` | new topic leader → topics-enabled peers | Catch-up barrier: ask each peer's `last_applied_index` (spec 08). |
 | `TEMPLATE_TOPIC_APPLIED_REPLY` | `topic_id, node, last_applied_index, leader_epoch` | peer → new topic leader | Reply used to pick the most-advanced replica (spec 08). |
-| `TEMPLATE_TOPIC_ACK_FEEDBACK` | `topic_id, leader_epoch, replicated_hwm` | topic leader → brokers with local producers | Throttled HWM ack for `replicate_once` (spec 04 §, spec 03 §6). |
+| `TEMPLATE_TOPIC_ACK_FEEDBACK` | `topic_id, leader_epoch, replicated_hwm, publisher_id, acked_seq` | topic leader → all peer brokers (relayed to local producers) | Throttled per-producer ack for `replicate_once` (spec 05 §3.1, spec 03 §6). |
 
 `topic_id = 0` in `TOPIC_LEADER_CHANGED` / `TOPIC_APPLIED_QUERY` means "applies to all topics" (used
 on topic-leader failover, since the single topic leader owns all topics).

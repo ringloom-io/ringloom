@@ -5,9 +5,21 @@
 //! this node is the topic leader, replica queues otherwise). Queues are opened
 //! with `spawn_helper_threads = false` so the broker's single prefetcher thread
 //! (spec 05 §4) owns all maintenance work.
+//!
+//! Threading rules for the queue map:
+//!   - Only the receiver thread adds or removes queues. `openMaster`,
+//!     `openReplica`, `adopt` and `close` take `lock` around the map change.
+//!     Another thread may create a queue on disk with `openDetached` and pass
+//!     it to the receiver thread to `adopt`.
+//!   - The receiver thread may read the map (`get`, `openQueues`) without the
+//!     lock, because nothing else changes it.
+//!   - Every other thread (control loop, prefetcher) must hold `lock` while it
+//!     looks up or iterates queues, and must not keep a `*TopicQueue` after
+//!     releasing it.
 
 const std = @import("std");
 const rq = @import("ringloom_queue");
+const SpinLock = @import("spin_lock.zig").SpinLock;
 
 const topic_id_mod = @import("topic_id.zig");
 const topic_config_mod = @import("topic_config.zig");
@@ -15,7 +27,6 @@ const topic_config_mod = @import("topic_config.zig");
 const TopicId = topic_id_mod.TopicId;
 const TopicConfig = topic_config_mod.TopicConfig;
 
-const Index = rq.Index;
 
 const RawQueue = rq.Queue([]const u8);
 
@@ -34,12 +45,8 @@ pub const TopicQueue = struct {
     dir: []u8, // owned
     epoch: u64,
     hwm_index: u64 = 0,
+    /// Leader: highest index applied by >=1 replica (or appended, single-node).
     replicated_hwm: u64 = 0,
-    /// Monotonic count of messages appended as leader. Reported in ack feedback
-    /// as `replicated_count` so producers can map their per-publish sequence
-    /// token to replication completion (the queue index resets across cycle
-    /// rollovers and cannot serve as a stable client token).
-    published_count: u64 = 0,
     /// Leader only: false until the failover catch-up barrier clears (spec 08).
     /// Replicas never accept publishes, so this stays false for them.
     accepting_writes: bool = false,
@@ -53,19 +60,7 @@ pub const TopicQueue = struct {
     pub fn append(self: *TopicQueue, payload: []const u8) !u64 {
         const idx = try self.queue.append(payload);
         if (idx > self.hwm_index) self.hwm_index = idx;
-        self.published_count += 1;
         return idx;
-    }
-
-    /// Number of leader appends replicated so far. Appends are strictly in-order,
-    /// so this is the count of appends with index <= replicated_hwm. Within a
-    /// single cycle (the common case, including the test broker) that is simply
-    /// `seqnum(hwm) + 1`; the result is capped at `published_count`.
-    pub fn replicatedCount(self: *const TopicQueue) u64 {
-        if (self.replicated_hwm == 0) return 0;
-        const seq: u64 = Index.seqnum(self.replicated_hwm);
-        const count: u64 = seq + 1;
-        return @min(count, self.published_count);
     }
 
     pub fn maintenancePoll(self: *TopicQueue, budget: u32) !rq.StepResult {
@@ -73,9 +68,17 @@ pub const TopicQueue = struct {
     }
 };
 
+/// Whether ringloom-queue knows the config's roll scheme (i.e. a queue with
+/// this config can be opened).
+pub fn isKnownRollScheme(config: TopicConfig) bool {
+    return rq.roll.findSchemeByName(config.rollSchemeName()) != null;
+}
+
 pub const TopicStore = struct {
     allocator: std.mem.Allocator,
     base_dir: []const u8, // borrowed; caller keeps it alive
+    /// Guards the queue map; see the threading rules at the top of this file.
+    lock: SpinLock = .{},
     queues: std.AutoHashMap(TopicId, *TopicQueue),
     write_runway_bytes: u64,
     read_runway_bytes: u64,
@@ -120,16 +123,16 @@ pub const TopicStore = struct {
         return std.fmt.allocPrint(self.allocator, "{s}/t_{x:0>16}", .{ self.base_dir, topic_id });
     }
 
-    fn openInternal(
+    /// Opens (creating if needed) a topic queue on disk without adding it to
+    /// the map. Safe on any thread; it touches only the new queue. Hand the
+    /// result to the receiver thread, which calls `adopt` (or `destroyDetached`).
+    pub fn openDetached(
         self: *TopicStore,
         topic_id: TopicId,
         config: TopicConfig,
         epoch: u64,
         role: Role,
-        create: bool,
     ) TopicStoreError!*TopicQueue {
-        if (self.queues.contains(topic_id)) return error.QueueAlreadyOpen;
-
         const scheme = rq.roll.findSchemeByName(config.rollSchemeName()) orelse
             return error.UnknownRollScheme;
 
@@ -141,10 +144,10 @@ pub const TopicStore = struct {
         // the prefetcher thread against the sink's cycle rolls (use-after-unmap
         // segfault). Disable the write runway for replicas; keep read prefetch.
         const is_replica = role == .replica;
-        const queue = RawQueue.open(.{
+        var queue = RawQueue.open(.{
             .dir = dir,
             .roll_scheme = scheme,
-            .create = create,
+            .create = true,
             .use_huge_pages = config.useHugePages(),
             .enable_prefetcher = true,
             .prefetch_runway_bytes = if (is_replica) 0 else self.write_runway_bytes,
@@ -160,9 +163,9 @@ pub const TopicStore = struct {
                 else => error.UnknownRollScheme,
             };
         };
+        errdefer queue.deinit();
 
         const tq = try self.allocator.create(TopicQueue);
-        errdefer self.allocator.destroy(tq);
         tq.* = .{
             .topic_id = topic_id,
             .role = role,
@@ -170,33 +173,64 @@ pub const TopicStore = struct {
             .dir = dir,
             .epoch = epoch,
         };
-
-        try self.queues.put(topic_id, tq);
         return tq;
     }
 
-    /// Opens (creating if needed) a master queue for a topic this node leads.
+    /// Receiver thread: adds a queue from `openDetached` to the map.
+    pub fn adopt(self: *TopicStore, tq: *TopicQueue) TopicStoreError!void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        const gop = try self.queues.getOrPut(tq.topic_id);
+        if (gop.found_existing) return error.QueueAlreadyOpen;
+        gop.value_ptr.* = tq;
+    }
+
+    /// Releases a queue that is not (or no longer) in the map.
+    pub fn destroyDetached(self: *TopicStore, tq: *TopicQueue) void {
+        tq.queue.deinit();
+        self.allocator.free(tq.dir);
+        self.allocator.destroy(tq);
+    }
+
+    fn openInternal(
+        self: *TopicStore,
+        topic_id: TopicId,
+        config: TopicConfig,
+        epoch: u64,
+        role: Role,
+    ) TopicStoreError!*TopicQueue {
+        if (self.queues.contains(topic_id)) return error.QueueAlreadyOpen;
+        const tq = try self.openDetached(topic_id, config, epoch, role);
+        errdefer self.destroyDetached(tq);
+        try self.adopt(tq);
+        return tq;
+    }
+
+    /// Receiver thread: opens (creating if needed) a master queue for a topic
+    /// this node leads.
     pub fn openMaster(self: *TopicStore, topic_id: TopicId, config: TopicConfig, epoch: u64) TopicStoreError!*TopicQueue {
-        return self.openInternal(topic_id, config, epoch, .leader, true);
+        return self.openInternal(topic_id, config, epoch, .leader);
     }
 
-    /// Opens (creating if needed) a replica queue. Full mesh: eager on TopicCreated.
+    /// Receiver thread: opens (creating if needed) a replica queue. Full mesh:
+    /// eager on TopicCreated.
     pub fn openReplica(self: *TopicStore, topic_id: TopicId, config: TopicConfig, epoch: u64) TopicStoreError!*TopicQueue {
-        return self.openInternal(topic_id, config, epoch, .replica, true);
+        return self.openInternal(topic_id, config, epoch, .replica);
     }
 
+    /// Receiver thread: removes and releases a queue.
     pub fn close(self: *TopicStore, topic_id: TopicId) void {
-        if (self.queues.fetchRemove(topic_id)) |kv| {
-            const tq = kv.value;
-            tq.queue.deinit();
-            self.allocator.free(tq.dir);
-            self.allocator.destroy(tq);
-        }
+        // Unlink under the lock. The prefetcher holds the lock for its whole
+        // pass, so once we own it no other thread is using this queue.
+        self.lock.lock();
+        const removed = self.queues.fetchRemove(topic_id);
+        self.lock.unlock();
+        if (removed) |kv| self.destroyDetached(kv.value);
     }
 
     pub const Iterator = std.AutoHashMap(TopicId, *TopicQueue).ValueIterator;
 
-    /// Iterates all open queues (used by the prefetcher thread, read-only).
+    /// Iterates all open queues. Off the receiver thread, hold `lock`.
     pub fn openQueues(self: *TopicStore) Iterator {
         return self.queues.valueIterator();
     }

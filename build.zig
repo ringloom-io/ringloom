@@ -331,7 +331,11 @@ pub fn build(b: *std.Build) void {
     // Separate from correctness tests. Longer-running and
     // environment-sensitive. NOT included in the default `test` step.
 
+    // `zig build perf -Dperf-filter="topic"` runs only benchmarks whose test
+    // name contains the filter.
+    const perf_filter = b.option([]const u8, "perf-filter", "Only run perf benchmarks whose name contains this text");
     const perf_tests = b.addTest(.{
+        .filters = if (perf_filter) |f| b.dupeStrings(&.{f}) else &.{},
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/perf/root.zig"),
             .target = target,
@@ -344,6 +348,7 @@ pub fn build(b: *std.Build) void {
         .use_llvm = use_llvm,
     });
     const run_perf_tests = b.addRunArtifact(perf_tests);
+    run_perf_tests.has_side_effects = true; // Every invocation must measure again.
 
     // perf tests also need broker + test services installed.
     run_perf_tests.step.dependOn(b.getInstallStep());
@@ -364,6 +369,7 @@ pub fn build(b: *std.Build) void {
         .use_llvm = use_llvm,
     });
     const run_ring_buffer_perf_tests = b.addRunArtifact(ring_buffer_perf_tests);
+    run_ring_buffer_perf_tests.has_side_effects = true; // Every invocation must measure again.
 
     const perf_ring_buffer_step = b.step("perf-ring-buffer", "Run raw ring-buffer microbenchmarks (ReleaseFast)");
     perf_ring_buffer_step.dependOn(&run_ring_buffer_perf_tests.step);
@@ -382,6 +388,7 @@ pub fn build(b: *std.Build) void {
         .use_llvm = use_llvm,
     });
     const run_plain_aeron_perf_tests = b.addRunArtifact(plain_aeron_perf_tests);
+    run_plain_aeron_perf_tests.has_side_effects = true; // Every invocation must measure again.
 
     const perf_aeron_step = b.step("perf-aeron", "Run plain Aeron remote transit benchmarks (ReleaseFast)");
     perf_aeron_step.dependOn(&run_plain_aeron_perf_tests.step);

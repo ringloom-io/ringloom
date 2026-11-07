@@ -43,17 +43,19 @@ pub const TopicPublishHeader = extern struct {
     ack_mode: u8,          // AckMode (spec 01): 0=fire_and_forget, 1=replicate_once
     flags: u8 = 0,
     _reserved: [6]u8 = .{0}**6,
-    // followed by the application payload bytes (length = data header payload_length - 24)
-    comptime { std.debug.assert(@sizeOf(TopicPublishHeader) == 32); }
+    publisher_id: u64,     // unique per publisher handle; keys replicate_once ack accounting
+    publish_seq: u64,      // per-publisher sequence 1, 2, 3, ... (the client's ack token)
+    // followed by the application payload bytes (length = data header payload_length - 48)
+    comptime { std.debug.assert(@sizeOf(TopicPublishHeader) == 48); }
 };
 ```
 
 The receiver decodes the `RingLoomDataHeader`, sees `flag_topic`, then reads the
 `TopicPublishHeader` from the payload, and hands `{topic_id, leader_epoch, correlation_id, ack_mode,
 payload}` to the topic engine's `onPublish` append path (spec 05), which appends directly to the
-master queue. For `ack_mode == replicate_once`, the leader records the assigned index so the ack HWM
-(spec 03 §6) can advance once a replica applies it. `source_node_id`/`source_service_id` identify the
-producer for diagnostics and for addressing throttled ack feedback.
+master queue. For `ack_mode == replicate_once`, the leader records `(publisher_id, publish_seq,
+assigned index)` so that producer's acks (spec 03 §6) advance once a replica applies that index.
+`source_node_id`/`source_service_id` identify the producer for diagnostics.
 
 > The legal-flags validation in `data_header.zig` (`legal_flags`) MUST be extended to permit
 > `flag_topic` or topic frames will be dropped as invalid.

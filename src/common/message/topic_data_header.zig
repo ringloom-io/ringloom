@@ -14,7 +14,7 @@
 const std = @import("std");
 
 /// Header that follows the `RingLoomDataHeader` on a topic publish frame.
-/// Exactly 32 bytes.
+/// Exactly 48 bytes.
 pub const TopicPublishHeader = extern struct {
     topic_id: u64 = 0,
     /// Epoch the producer believes is current (fenced at the leader, spec 08).
@@ -25,14 +25,20 @@ pub const TopicPublishHeader = extern struct {
     ack_mode: u8 = 0,
     flags: u8 = 0,
     _reserved: [6]u8 = [_]u8{0} ** 6,
+    /// Identifies the producing `TopicPublisher` (unique per publisher handle).
+    /// The leader keys `replicate_once` ack accounting on it (spec 05 §3.1).
+    publisher_id: u64 = 0,
+    /// Per-publisher publish sequence (1, 2, 3, ...). Also the token the client
+    /// hands back from publish; acks report the highest replicated sequence.
+    publish_seq: u64 = 0,
 
     comptime {
-        std.debug.assert(@sizeOf(TopicPublishHeader) == 32);
+        std.debug.assert(@sizeOf(TopicPublishHeader) == 48);
     }
 
     pub const encoded_length: usize = @sizeOf(TopicPublishHeader);
 
-    /// Encodes the header into `buf` (must be >= 32 bytes); returns bytes written.
+    /// Encodes the header into `buf` (must be >= 48 bytes); returns bytes written.
     pub fn encode(self: TopicPublishHeader, buf: []u8) usize {
         std.debug.assert(buf.len >= encoded_length);
         var tmp = self;
@@ -117,22 +123,26 @@ pub const TopicReplEnvelope = extern struct {
     }
 };
 
-test "TopicPublishHeader is 32 bytes and round-trips" {
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(TopicPublishHeader));
+test "TopicPublishHeader is 48 bytes and round-trips" {
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(TopicPublishHeader));
     var buf: [64]u8 = undefined;
     const h = TopicPublishHeader{
         .topic_id = 0xDEADBEEF,
         .leader_epoch = 5,
         .correlation_id = -7,
         .ack_mode = 1,
+        .publisher_id = 0xABCD_0123_4567_89EF,
+        .publish_seq = 42,
     };
     const n = h.encode(&buf);
-    try std.testing.expectEqual(@as(usize, 32), n);
+    try std.testing.expectEqual(@as(usize, 48), n);
     const d = try TopicPublishHeader.decode(buf[0..n]);
     try std.testing.expectEqual(h.topic_id, d.topic_id);
     try std.testing.expectEqual(h.leader_epoch, d.leader_epoch);
     try std.testing.expectEqual(h.correlation_id, d.correlation_id);
     try std.testing.expectEqual(h.ack_mode, d.ack_mode);
+    try std.testing.expectEqual(h.publisher_id, d.publisher_id);
+    try std.testing.expectEqual(h.publish_seq, d.publish_seq);
 }
 
 test "TopicReplEnvelope is 32 bytes and wraps a frame exactly" {

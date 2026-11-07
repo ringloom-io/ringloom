@@ -1,166 +1,115 @@
 #!/usr/bin/env bash
 #
-# bench-topic.sh — Benchmark persistent topics: measure Aeron topic publish
-# throughput to a running broker.  Builds RingLoomDataHeader(flag_topic) +
-# TopicPublishHeader + payload, offers via Aeron IPC, and measures end-to-end
-# throughput exactly as a real producer service does.
+# bench-topic.sh — Persistent topic publish benchmark (single broker).
+#
+# Runs ringloom-test-topic-publisher-service against a fresh topics-enabled
+# broker: it registers the topic, publishes through the leader's Aeron IPC
+# publication, and times until the broker has appended everything (see that
+# binary's header). Each run writes one JSON file:
+#
+#   <output-dir>/run-<N>/topic-publish-<ack_mode>-<size>B.json
+#
+# Fields: throughput_msgs_per_sec (appended by the broker), offer_msgs_per_sec
+# (frames into the publication), ack_wait_ns (last publish → final ack).
 #
 # Usage:
-#   ./scripts/bench-topic.sh [message_size] [runs]
+#   ./scripts/bench-topic.sh [--sizes "32 128 1024"] [--runs N] [--count N]
+#                            [--ack] [--output-dir DIR]
+#
+# Defaults: sizes "128", 3 runs, up to 100000 messages (+1000 warmup; capped at 64 MiB total payload), fire_and_forget,
+# output /tmp/ringloom-topic-bench. Summarise with:
+#   scripts/bench-report.py <output-dir>
 #
 # Prerequisites:
-#   zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=ReleaseFast
+#   zig build install test-bins -Doptimize=ReleaseFast
 
 set -euo pipefail
-
-MSG_COUNT=${TOPIC_BENCH_MSG_COUNT:-500000}
-MSG_SIZE=${1:-128}
-RUNS=${2:-5}
-ACK_MODE=0  # 0=fire_and_forget, 1=replicate_once
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --ack-mode) ACK_MODE="$2"; shift 2 ;;
-        --ack)      ACK_MODE=1; shift ;;
-        [0-9]*)     if [[ -z "${_saw_size:-}" ]]; then MSG_SIZE="$1"; _saw_size=1; else RUNS="$1"; fi; shift ;;
-        *)          shift ;;
-    esac
-done
-
-ACK_TAG=$([ "$ACK_MODE" == "1" ] && echo "replicate_once" || echo "fire_and_forget")
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN="$PROJECT_ROOT/zig-out/bin"
-BENCH_BIN="$BIN/ringloom-test-topic-aeron-bench"
-BROKER="$BIN/ringloom-broker"
-BEST_DIR="/tmp/ringloom-topic-bench"
+PUB_BIN="$BIN/ringloom-test-topic-publisher-service"
 
-for bin in "$BENCH_BIN" "$BROKER"; do
-    [[ -x "$bin" ]] || { echo "ERROR: $bin missing. Run: zig build install -Doptimize=ReleaseFast && zig build test-bins -Doptimize=ReleaseFast"; exit 1; }
+SIZES="128"
+RUNS=3
+COUNT=auto
+WARMUP=1000
+ACK_MODE=0
+OUT_DIR="/tmp/ringloom-topic-bench"
+FAILED=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --sizes)      SIZES="$2"; shift 2 ;;
+        --runs)       RUNS="$2"; shift 2 ;;
+        --count)      COUNT="$2"; shift 2 ;;
+        --ack)        ACK_MODE=1; shift ;;
+        --output-dir) OUT_DIR="$2"; shift 2 ;;
+        -h|--help)    sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) echo "Unknown option: $1 (see --help)"; exit 1 ;;
+    esac
 done
 
-SIZE_TAG="${MSG_SIZE}B"
+[[ "$RUNS" =~ ^[1-9][0-9]*$ && ( "$COUNT" == auto || "$COUNT" =~ ^[1-9][0-9]*$ ) ]] || { echo "runs and count must be positive integers"; exit 1; }
+for size in $SIZES; do
+    [[ "$size" =~ ^[1-9][0-9]*$ ]] || { echo "invalid payload size: $size"; exit 1; }
+done
 
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║     RingLoom Topic Publish Benchmark (Aeron IPC)            ║"
-echo "╠══════════════════════════════════════════════════════════════╣"
-printf "║  %-56s ║\n" "Payload:        $SIZE_TAG"
-printf "║  %-56s ║\n" "Messages:       $MSG_COUNT (+ 1000 warmup)"
-printf "║  %-56s ║\n" "Iterations:     $RUNS (best kept)"
-printf "║  %-56s ║\n" "Ack mode:       $ACK_TAG"
-printf "║  %-56s ║\n" "Path:           Aeron IPC offer() → broker receiver"
-echo "╚══════════════════════════════════════════════════════════════╝"
-echo ""
+for bin in "$PUB_BIN" "$BIN/ringloom-broker"; do
+    [[ -x "$bin" ]] || { echo "ERROR: $bin missing. Run: zig build install test-bins -Doptimize=ReleaseFast"; exit 1; }
+done
 
-ISOLATED_CPUS=$(cat /sys/devices/system/cpu/isolated 2>/dev/null || true)
-SMT_ACTIVE=$(cat /sys/devices/system/cpu/smt/active 2>/dev/null || true)
-[[ -z "$ISOLATED_CPUS" ]] && echo "NOTE: no isolated CPUs; jitter may be higher than optimal."
-[[ "$SMT_ACTIVE" == "1" ]]   && echo "NOTE: SMT active; disable in BIOS for cleaner numbers."
-HAS_TASKSET=0; command -v taskset >/dev/null 2>&1 && HAS_TASKSET=1
-echo ""
+MODE_TAG=$([[ "$ACK_MODE" == "1" ]] && echo replicate_once || echo fire_and_forget)
+echo "Topic publish benchmark: sizes=[$SIZES] runs=$RUNS count=$COUNT warmup=$WARMUP mode=$MODE_TAG"
+echo "Results: $OUT_DIR"
 
-best_tput=0; best_json=""; best_run=0
-mkdir -p "$BEST_DIR"
+WORK_DIR=""
+cleanup() {
+    if [[ -n "$WORK_DIR" ]]; then
+        bash "$SCRIPT_DIR/start-test-broker.sh" --workspace "$WORK_DIR" --node-id 1 --stop >/dev/null 2>&1 || true
+        rm -rf "$WORK_DIR"
+    fi
+}
+trap cleanup EXIT
 
 for run in $(seq 1 "$RUNS"); do
-    WORK_DIR=$(mktemp -d /tmp/ringloom-bench-topic-XXXXXX)
-    STORAGE="$WORK_DIR/storage"; AERON="$WORK_DIR/aeron"; LOGS="$WORK_DIR/logs"
-    mkdir -p "$STORAGE/ringloom-test/topics" "$AERON" "$LOGS"
-    trap "rm -rf $WORK_DIR" EXIT
+    mkdir -p "$OUT_DIR/run-$run"
+    for size in $SIZES; do
+        # The queue dependency has a fixed ~80 MiB daily cycle file. Keep
+        # default runs below 64 MiB including warmup and record overhead.
+        run_count="$COUNT"
+        if [[ "$run_count" == auto ]]; then
+            run_count=$((67108864 / (size + 8) - WARMUP - 1))
+            ((run_count > 100000)) && run_count=100000
+            ((run_count > 0)) || { echo "Payload too large for benchmark budget"; exit 1; }
+        fi
+        WORK_DIR=$(mktemp -d /tmp/ringloom-bench-topic-XXXXXX)
+        env_out=$(bash "$SCRIPT_DIR/start-test-broker.sh" --workspace "$WORK_DIR" --node-id 1 \
+            --port 19040 --group ringloom-bench --daemon --bin-dir "$BIN" --topics)
+        storage=$(echo "$env_out" | sed -n 's/^.*RINGLOOM_STORAGE_PATH=//p' | tr -d "'\"")
+        group=$(echo "$env_out" | sed -n 's/^.*RINGLOOM_GROUP=//p' | tr -d "'\"")
 
-    # Broker with topics enabled.
-    cat > "$WORK_DIR/broker.properties" << EOF
-broker.node.id=1
-broker.local.host.port=127.0.0.1:19040
-broker.group.name=ringloom-test
-broker.storage.path=$STORAGE
-broker.control.buffer.size=65536
-broker.messages.buffer.size=1048576
-broker.threading.mode=shared
-broker.idle.strategy=yielding
-broker.aeron.directory=$AERON
-broker.aeron.delete.directory.on.start=true
-broker.aeron.delete.directory.on.shutdown=true
-broker.topics.enabled=true
-broker.topics.path=$STORAGE/ringloom-test/topics
-broker.topics.pub.stream.base=50000
-EOF
-
-    BROKER_CORE=""; [[ $HAS_TASKSET -eq 1 ]] && BROKER_CORE="2"
-    if [[ -n "$BROKER_CORE" ]]; then
-        taskset -c "$BROKER_CORE" "$BROKER" --config "$WORK_DIR/broker.properties" > "$LOGS/broker.log" 2>&1 &
-    else
-        "$BROKER" --config "$WORK_DIR/broker.properties" > "$LOGS/broker.log" 2>&1 &
-    fi
-    BROKER_PID=$!
-    sleep 3
-
-    # Verify broker is alive.
-    if ! kill -0 "$BROKER_PID" 2>/dev/null; then
-        echo "  Run $run/$RUNS: broker failed to start"; kill "$BROKER_PID" 2>/dev/null || true; rm -rf "$WORK_DIR"; continue
-    fi
-
-    echo -n "  Run $run/$RUNS  ${SIZE_TAG} ... "
-
-    JSON=$(timeout 30 "$BENCH_BIN" \
-        --aeron-dir "$AERON" \
-        --pub-stream-id 50001 \
-        --topic-id 0xABCD \
-        --message-count "$MSG_COUNT" \
-        --message-size "$MSG_SIZE" \
-        --warmup-count 1000 \
-        --ack-mode "$ACK_MODE" 2>/dev/null || true)
-
-    kill "$BROKER_PID" 2>/dev/null || true; wait "$BROKER_PID" 2>/dev/null || true
-
-    if echo "$JSON" | grep -q "TOPIC_AERON_BENCH_JSON"; then
-        J=$(echo "$JSON" | sed -n '/TOPIC_AERON_BENCH_JSON<<EOF/,/EOF/p' | grep -v 'TOPIC_AERON_BENCH_JSON\|EOF')
-    else
-        echo "FAIL (no JSON)"; rm -rf "$WORK_DIR"; trap - EXIT; continue
-    fi
-
-    TPUT=$(echo "$J"  | python3 -c "import sys,json; print(json.load(sys.stdin)['tput'])"  2>/dev/null || echo "0")
-    DT_US=$(echo "$J"  | python3 -c "import sys,json; print(json.load(sys.stdin)['dt_us'])" 2>/dev/null || echo "0")
-
-    echo "${TPUT} msgs/sec  (${DT_US} us)"
-
-    TPUT_NUM=$(echo "$TPUT" | sed 's/\..*//')
-    if [[ "$TPUT_NUM" -gt "$best_tput" ]] 2>/dev/null; then
-        best_tput=$TPUT_NUM; best_json="$J"; best_run=$run; echo "    -> new best"
-    fi
-
-    rm -rf "$WORK_DIR"; trap - EXIT
+        result="$OUT_DIR/run-$run/topic-publish-$MODE_TAG-${size}B.json"
+        [[ ! -e "$result" ]] || { echo "Refusing to overwrite $result"; exit 1; }
+        if timeout 120 "$PUB_BIN" --storage-path "$storage" --group "$group" \
+            --service-name topic-bench --broker-node-id 1 --topic bench \
+            --count "$run_count" --warmup "$WARMUP" --size "$size" --ack-mode "$ACK_MODE" \
+            --result-file "$result" > "$WORK_DIR/publisher.log" 2>&1; then
+            python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(f\"  run {sys.argv[2]} {d['message_size']} B: {d['throughput_msgs_per_sec']:,} msgs/s appended, ack wait {d['ack_wait_ns']/1000:.0f} us\")" "$result" "$run"
+        else
+            FAILED=1
+            echo "  run $run ${size} B: FAILED (log below)"; tail -5 "$WORK_DIR/publisher.log"
+        fi
+        log_dir="$OUT_DIR/run-$run/logs-$MODE_TAG-${size}B"
+        mkdir -p "$log_dir"
+        cp "$WORK_DIR/publisher.log" "$log_dir/"
+        cp -R "$WORK_DIR/logs" "$WORK_DIR/config" "$log_dir/"
+        cleanup
+        WORK_DIR=""
+    done
 done
 
-[[ -z "$best_json" ]] && { echo "No successful runs."; exit 1; }
+echo ""
+python3 "$SCRIPT_DIR/bench-report.py" "$OUT_DIR"
 
-TPUT_FMT=$(echo "$best_json" | python3 -c "import sys,json; d=json.load(sys.stdin); n=d['tput']; print(f'{n:,}')" 2>/dev/null || echo "$best_tput")
-DT_US_FMT=$(echo "$best_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{d[\"dt_us\"]}')" 2>/dev/null || echo "0")
-COST_NS=$(echo "$best_json"  | python3 -c "import sys,json; d=json.load(sys.stdin); cost=d['dt_ns']/d['mc']; print(f'{cost:.0f}')" 2>/dev/null || echo "0")
-RATE_MB=$(echo "$best_json"  | python3 -c "import sys,json; d=json.load(sys.stdin); rate=d['tput']*d['ms']/(1024*1024); print(f'{rate:.2f}')" 2>/dev/null || echo "0")
-
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║               Results (best of $RUNS)                          ║"
-echo "╠══════════════════════════════════════════════════════════════╣"
-printf "║  %-56s ║\n" "Best run:       #$best_run"
-printf "║  %-56s ║\n" "Messages:       $MSG_COUNT (+ 1000 warmup)"
-printf "║  %-56s ║\n" "Payload:        $SIZE_TAG"
-printf "║  %-56s ║\n" "Throughput:     ${TPUT_FMT} msgs/sec"
-printf "║  %-56s ║\n" "Data rate:      ${RATE_MB} MiB/sec"
-printf "║  %-56s ║\n" "Elapsed:        ${DT_US_FMT} us"
-printf "║  %-56s ║\n" "Per-message:    ${COST_NS} ns"
-echo "╚══════════════════════════════════════════════════════════════╝"
-echo ""
-echo "$best_json" | python3 -m json.tool > "$BEST_DIR/topic-publish-${MSG_SIZE}B.json" 2>/dev/null || true
-echo "JSON → $BEST_DIR/topic-publish-${MSG_SIZE}B.json"
-echo ""
-echo "Compare sizes:"
-echo "  $0 32  $RUNS"
-echo "  $0 128 $RUNS"
-echo "  $0 512 $RUNS"
-echo "  $0 1024 $RUNS"
-echo "  $0 4096 $RUNS"
-echo ""
+exit "$FAILED"

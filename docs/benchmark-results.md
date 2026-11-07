@@ -3,12 +3,17 @@
 Tracked performance benchmark results for regression detection and improvement
 comparison. Update this file after each significant performance-related change.
 
+> **Repeatable workflow:** [Benchmark guide](benchmarks.md), including agent reruns and report generation.
+>
 > **How to run:** `scripts/run-benchmarks.sh` or `zig build perf`
 > (see `docs/testing.md` for full instructions)
 
 ---
 
-## Current Baseline
+## Historical baseline (2026-05-18)
+
+This snapshot predates the topic and recovery measurement corrections. See the
+new focused snapshot below; unchanged sections have not been refreshed.
 
 **Date:** 2026-05-18
 **Zig version:** 0.16.0
@@ -250,3 +255,119 @@ Topology: 1 broker + slow consumer (configurable delay) + ping producer
 <!-- Template for adding new entries:
 | YYYY-MM-DD | Description of change | e.g. "p99 latency -15%" | abc1234 |
 -->
+
+
+## Focused snapshot — 2026-11-07
+
+Ring and topic measurements after the stale-record zeroing and topic ack fixes,
+on the dirty working tree based on `4f44189bfd0090411e8a5969900278e9e7d34c3a`.
+These are exploratory shared-workstation results, not a claimed improvement over
+the historical snapshot. Other suites above remain historical.
+
+Command:
+
+```sh
+scripts/bench-all.sh --output-dir /tmp/ringloom-bench-review-002 --repeat 3 --suites 'ring topic'
+```
+
+Raw artifacts, logs and tracked-file diff are retained locally at
+`/tmp/ringloom-bench-review-002/` (temporary storage; archive before cleanup).
+The run uses single-broker topics, so replicate_once confirms local append,
+not remote replication or fsync. Fire-and-forget includes a final acked sentinel.
+1024-byte runs use 64,026 messages to stay below the queue cycle-file limit;
+smaller sizes use 100,000. Each has 1,000 warmup messages. Values below are field
+medians; columns can come from different runs. Some short-run metrics have large
+spread, so use these for reproducing behavior, not small regression claims.
+
+## Run metadata
+
+- **Date:** 2026-11-07T18:28:11.691608+00:00
+- **Commit:** 4f44189bfd0090411e8a5969900278e9e7d34c3a
+- **Working tree dirty:** True
+- **Repeats:** 3
+- **Environment overrides:** {}
+- **Zig version:** 0.16.0
+- **Build mode:** ReleaseFast
+- **Kernel:** 7.2.15-1-omarchy
+- **CPU:** AMD Ryzen 7 8845HS w/ Radeon 780M Graphics
+- **Online CPUs:** 16
+- **SMT active:** 1
+- **Isolated CPUs:** none
+- **CPU governor:** performance
+- **Load average (start):** 2.56 2.10 2.46 1/1871 130417
+- **Suites:** ring, topic
+
+Median of up to 3 runs per row. Percentiles are medians of per-run percentiles, not pooled samples.
+
+## Repeat variability
+
+| File | Runs | Largest metric spread |
+|------|------|-----------------------|
+| ring-buffer/single-threaded-read-64B.json | 3 | 71.4% |
+| ring-buffer/single-threaded-write-64B.json | 3 | 60.0% |
+| ring-buffer/spsc-handoff-64B.json | 3 | 24.6% |
+| ring-buffer/spsc-write-64B.json | 3 | 4.1% |
+| topic/topic-publish-fire_and_forget-1024B.json | 3 | 87.2% |
+| topic/topic-publish-fire_and_forget-128B.json | 3 | 21.5% |
+| topic/topic-publish-fire_and_forget-32B.json | 3 | 50.4% |
+| topic/topic-publish-replicate_once-1024B.json | 3 | 108.2% |
+| topic/topic-publish-replicate_once-128B.json | 3 | 119.0% |
+| topic/topic-publish-replicate_once-32B.json | 3 | 34.1% |
+
+## Ring Buffer Microbenchmarks (64 B, no broker)
+
+| Scenario | msgs/sec | p50 (ns) | p99 (ns) | max (ns) |
+|----------|----------|----------|----------|----------|
+| single-threaded-read-64B | 96,307,922 | 9 | 14 | 39 |
+| single-threaded-write-64B | 257,530,596 | 3 | 5 | 6 |
+| spsc-handoff-64B | 4,267,136 | 150 | 180 | 23,283 |
+| spsc-write-64B | 179,075,276 | 5 | 6 | 6 |
+
+## Topic Publish Throughput (single broker, Aeron IPC)
+
+| Message size | Ack mode | Published | Appended msgs/sec | Offer msgs/sec | Final ack wait (us) |
+|--------------|----------|-----------|-------------------|----------------|---------------------|
+| 32 B | fire_and_forget | 100,000 | 16,033,657 | 16,674,698 | 240 |
+| 32 B | replicate_once | 100,000 | 12,867,454 | 13,218,529 | 264 |
+| 128 B | fire_and_forget | 100,000 | 14,445,890 | 15,007,407 | 259 |
+| 128 B | replicate_once | 100,000 | 11,958,190 | 12,417,888 | 185 |
+| 1,024 B | fire_and_forget | 64,026 | 4,023,181 | 4,074,714 | 142 |
+| 1,024 B | replicate_once | 64,026 | 4,105,438 | 4,142,781 | 141 |
+
+### Recovery validation (one run)
+
+Command: `zig build perf -Dperf-filter=recovery -Doptimize=ReleaseFast --summary all`.
+All five cases passed. Logs: `/tmp/ringloom-review-recovery.log`; raw summaries:
+`/tmp/ringloom-perf-results/recovery/`. Same workstation and dirty revision as
+above; run immediately beforehand. This is validation of the corrected timer,
+not a repeated performance baseline. Service readiness is the endpoint for
+service cases. Broker recovery includes planned waits and successful send probes.
+
+#### Measured recovery
+
+| Scenario | Failure detected (ms) | Recovery complete (ms) | Iterations | Max (ms) |
+|----------|-----------------------|------------------------|------------|----------|
+| broker-restart-recovery | 0 | 11,367 | 1 | 11,367 |
+| rapid-service-restart | 11,824 | 11,875 | 5 | 11,980 |
+| service-crash-recovery | 12,920 | 12,974 | 1 | 12,974 |
+| service-kill-recovery | 11,929 | 11,980 | 1 | 11,980 |
+
+### Transport validation (one run)
+
+The service script completed all 20 paced/saturated local/remote cases; all ten
+paced receiver files report their full expected measured count (100,000, or
+50,000 for 4096-byte messages). The five plain-Aeron sizes also completed.
+Artifacts: `/tmp/ringloom-bench-review-transport/`, including its own metadata
+and generated tables. Command: `scripts/bench-all.sh --output-dir
+/tmp/ringloom-bench-review-transport --repeat 1 --suites 'ipc aeron'`.
+The wrapper was edited during this run, interrupting final collection; fresh
+Aeron JSON was copied and the report regenerated manually, as recorded in
+`collection-note.txt`. These single-run transport values are retained for
+validation and do not replace the repeated baseline.
+
+
+The final unchanged wrapper also completed a `ring backpressure` validation run:
+`scripts/bench-all.sh --output-dir /tmp/ringloom-bench-wrapper-final --repeat 1
+--suites 'ring backpressure'`. Its report and raw JSON are retained there. This
+verifies collection after the wrapper edits; it is separate from the three-run
+ring/topic snapshot above.

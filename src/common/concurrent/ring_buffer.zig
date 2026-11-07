@@ -371,18 +371,11 @@ pub const RingBuffer = struct {
                 messages_read += 1;
             }
 
-            // Clear only the guard word needed to prevent stale-positive reads on
-            // reuse; clearing payload bytes dirties cache lines for producers.
-            @atomicStore(i32, self.recordLengthPtr(record_offset), 0, .monotonic);
             bytes_consumed += aligned_length;
         }
 
         if (bytes_consumed > 0) {
-            // Advance head.
-            self.storeHeadPosition(head + @as(i64, @intCast(bytes_consumed)), .release);
-
-            // Wake writer if blocking.
-            self.awakeWriter();
+            self.releaseConsumed(head, head_index, bytes_consumed);
         }
 
         return messages_read;
@@ -423,7 +416,6 @@ pub const RingBuffer = struct {
             const msg_type_id = @atomicLoad(i32, self.recordMsgTypeIdPtr(record_offset), .monotonic);
 
             if (msg_type_id == constants.padding_msg_type_id) {
-                @atomicStore(i32, self.recordLengthPtr(record_offset), 0, .monotonic);
                 bytes_consumed += aligned_length;
                 continue;
             }
@@ -440,7 +432,6 @@ pub const RingBuffer = struct {
                 break;
             }
 
-            @atomicStore(i32, self.recordLengthPtr(record_offset), 0, .monotonic);
             bytes_consumed += aligned_length;
             messages_read += 1;
 
@@ -448,9 +439,8 @@ pub const RingBuffer = struct {
                 .abort => unreachable,
                 .break_ => break,
                 .commit => {
+                    self.releaseConsumed(head, head_index, bytes_consumed);
                     head += @as(i64, @intCast(bytes_consumed));
-                    self.storeHeadPosition(head, .release);
-                    self.awakeWriter();
                     head_index += bytes_consumed;
                     remaining_bytes -= bytes_consumed;
                     bytes_consumed = 0;
@@ -460,11 +450,24 @@ pub const RingBuffer = struct {
         }
 
         if (bytes_consumed > 0) {
-            self.storeHeadPosition(head + @as(i64, @intCast(bytes_consumed)), .release);
-            self.awakeWriter();
+            self.releaseConsumed(head, head_index, bytes_consumed);
         }
 
         return messages_read;
+    }
+
+    /// Zeroes the consumed region, then publishes the new head to producers.
+    ///
+    /// The whole region must be cleared, not just each record's length word:
+    /// record boundaries shift between laps, so a later header can land on old
+    /// payload bytes. A producer writes its header only after winning the tail
+    /// CAS, and in that window the reader must see 0 (not committed) rather than
+    /// stale payload bytes it would misread as a committed length. `unblock()`
+    /// relies on the same invariant when it scans for zeroed gaps.
+    fn releaseConsumed(self: *RingBuffer, head: i64, head_index: usize, bytes_consumed: usize) void {
+        @memset(self.buffer[head_index .. head_index + bytes_consumed], 0);
+        self.storeHeadPosition(head + @as(i64, @intCast(bytes_consumed)), .release);
+        self.awakeWriter();
     }
 
     // ── Try-Claim API ─────────────────────────────────────────────────
@@ -1079,4 +1082,64 @@ test "read with limit returns at most limit messages" {
     // Read remaining.
     const count2 = rb.read(&testCountHandler, 10);
     try std.testing.expectEqual(@as(u32, 2), count2);
+}
+
+/// Simulates a producer that has won the tail CAS for `bytes` but not yet
+/// written its (negative) record header.
+fn simulateClaimWithoutHeader(rb: *RingBuffer, bytes: i64) void {
+    _ = @atomicRmw(i64, rb.trailerFieldPtr(tail_position_offset), .Add, bytes, .acq_rel);
+}
+
+fn testCommitHandler(_: i32, _: []const u8) RingBuffer.ControlledReadAction {
+    test_messages_received += 1;
+    return .commit;
+}
+
+test "read does not misinterpret stale payload bytes as a header on a later lap" {
+    const allocator = std.testing.allocator;
+    const cap: usize = 1024;
+    const buf = try allocateAlignedBuffer(allocator, cap + trailer_length);
+    defer allocator.free(buf);
+    var rb = try RingBuffer.init(buf, false, null, null);
+
+    // Lap 1: fill the buffer with 128-byte records whose payload bytes form a
+    // positive i32 (0x01010101) at every 8-byte boundary.
+    const payload = [_]u8{1} ** 120;
+    for (0..cap / 128) |_| {
+        try rb.write(1, &payload);
+        _ = rb.read(&testNoopHandler, 10);
+    }
+
+    // Lap 2: one committed 8-byte record, followed by a claimed-but-unwritten
+    // record whose header position lies inside an old lap-1 payload.
+    try rb.write(2, &[_]u8{});
+    simulateClaimWithoutHeader(&rb, 16);
+
+    resetTestState();
+    try std.testing.expectEqual(@as(u32, 1), rb.read(&testCaptureHandler, 10));
+    try std.testing.expectEqual(@as(i32, 2), test_received_type);
+    // The reader stopped at the in-flight claim instead of skipping past it.
+    try std.testing.expectEqual(@as(i64, cap + 8), rb.consumerPosition());
+}
+
+test "controlledRead commit does not misinterpret stale payload bytes on a later lap" {
+    const allocator = std.testing.allocator;
+    const cap: usize = 1024;
+    const buf = try allocateAlignedBuffer(allocator, cap + trailer_length);
+    defer allocator.free(buf);
+    var rb = try RingBuffer.init(buf, false, null, null);
+
+    const payload = [_]u8{1} ** 120;
+    for (0..cap / 128) |_| {
+        try rb.write(1, &payload);
+        resetTestState();
+        try std.testing.expectEqual(@as(u32, 1), rb.controlledRead(&testCommitHandler, 10));
+    }
+
+    try rb.write(2, &[_]u8{});
+    simulateClaimWithoutHeader(&rb, 16);
+
+    resetTestState();
+    try std.testing.expectEqual(@as(u32, 1), rb.controlledRead(&testCommitHandler, 10));
+    try std.testing.expectEqual(@as(i64, cap + 8), rb.consumerPosition());
 }

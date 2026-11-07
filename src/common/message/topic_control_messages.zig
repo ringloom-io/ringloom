@@ -116,20 +116,22 @@ pub const TopicEndpointMsg = extern struct {
     endpoint_length: u16,
 };
 
-/// Ack high-water-mark feedback for `replicate_once` publishes (template 15).
+/// Ack feedback for `replicate_once` publishes (template 15), addressed to one
+/// producer.
 ///
-/// `replicated_hwm` is the highest ringloom-queue master index applied by ≥1
-/// replica (or the master append index on a single-node broker). `replicated_count`
-/// is the monotonic per-topic count of published messages that have been
-/// replicated — the service maps its per-publish sequence token against this
-/// count, since the queue index (`cycle<<32 | seqnum`) resets across cycle
-/// rollovers and cannot serve as a stable client token.
+/// `acked_seq` is the highest `publish_seq` from `publisher_id` whose entry has
+/// been applied by >=1 replica (or appended, on a single-node broker). Because
+/// a publisher's sequences and the leader's queue indices both only increase,
+/// every token <= `acked_seq` is acked. Services deliver the frame to the
+/// publisher with the matching `publisher_id` and ignore it otherwise.
+/// `replicated_hwm` is the topic-wide replicated queue index, for diagnostics.
 pub const TopicAckFeedbackMsg = extern struct {
     header: ControlMessageHeader, // template_id = 15
     topic_id: u64 align(1),
     leader_epoch: u64 align(1),
     replicated_hwm: u64 align(1),
-    replicated_count: u64 align(1),
+    publisher_id: u64 align(1),
+    acked_seq: u64 align(1),
 };
 
 comptime {
@@ -138,7 +140,7 @@ comptime {
     std.debug.assert(@sizeOf(SubscribeTopicMsg) == header_size + 8);
     std.debug.assert(@sizeOf(TopicSubscriptionResponseMsg) == header_size + 8 + 8 + 32 + 1 + 1 + 2);
     std.debug.assert(@sizeOf(UnregisterTopicPublicationMsg) == header_size + 4 + 8);
-    std.debug.assert(@sizeOf(TopicAckFeedbackMsg) == header_size + 8 + 8 + 8 + 8);
+    std.debug.assert(@sizeOf(TopicAckFeedbackMsg) == header_size + 8 + 8 + 8 + 8 + 8);
 }
 
 // ── Encode helpers ───────────────────────────────────────────────────────────
@@ -228,13 +230,14 @@ pub fn encodeSubscriptionResponse(
     return total;
 }
 
-pub fn encodeAckFeedback(buf: []u8, topic_id: u64, leader_epoch: u64, replicated_hwm: u64, replicated_count: u64) usize {
+pub fn encodeAckFeedback(buf: []u8, topic_id: u64, leader_epoch: u64, replicated_hwm: u64, publisher_id: u64, acked_seq: u64) usize {
     const msg = TopicAckFeedbackMsg{
         .header = .{ .template_id = TEMPLATE_TOPIC_ACK_FEEDBACK, .body_length = @intCast(@sizeOf(TopicAckFeedbackMsg) - header_size) },
         .topic_id = topic_id,
         .leader_epoch = leader_epoch,
         .replicated_hwm = replicated_hwm,
-        .replicated_count = replicated_count,
+        .publisher_id = publisher_id,
+        .acked_seq = acked_seq,
     };
     writeStruct(buf, TopicAckFeedbackMsg, msg);
     return @sizeOf(TopicAckFeedbackMsg);
@@ -345,10 +348,11 @@ test "publication response + ack feedback fixed-size encode" {
     try testing.expectEqual(@as(i16, 2), m.leader_node_id);
     try testing.expectEqual(@as(u64, 5), m.leader_epoch);
 
-    const n2 = encodeAckFeedback(&buf, 7, 5, 4096, 128);
+    const n2 = encodeAckFeedback(&buf, 7, 5, 4096, 0xFEED, 128);
     const a = decode(TopicAckFeedbackMsg, buf[0..n2]).?;
     try testing.expectEqual(@as(u64, 4096), a.replicated_hwm);
-    try testing.expectEqual(@as(u64, 128), a.replicated_count);
+    try testing.expectEqual(@as(u64, 0xFEED), a.publisher_id);
+    try testing.expectEqual(@as(u64, 128), a.acked_seq);
 }
 
 test "unregister + unsubscribe round-trip" {

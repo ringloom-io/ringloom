@@ -24,7 +24,7 @@ extern structs, flyweight over ring-buffer memory). Template IDs 1–6 are taken
 | 12 | `UnsubscribeTopicMsg` | S→B | Subscriber stops; may close the replica if last subscriber. |
 | 13 | `TopicLeaderChangedMsg` | B→S | Producer must re-target leader/epoch (failover, spec 08). |
 | 14 | `TopicEndpointMsg` | B→S | Topic-leader node → Aeron endpoint/stream mapping for publishing. |
-| 15 | `TopicAckFeedbackMsg` | B→S | Throttled `{topic_id, leader_epoch, replicated_hwm}` for `replicate_once` (§6). |
+| 15 | `TopicAckFeedbackMsg` | B→S | Throttled `{topic_id, leader_epoch, replicated_hwm, publisher_id, acked_seq}` for `replicate_once` (§6). |
 
 ## 2. Key encodings (extern struct sketches)
 
@@ -125,10 +125,15 @@ record. This avoids two brokers creating the same topic with different configs r
 ## 6. Publish acknowledgement (`replicate_once`)
 
 Ack mode is chosen **per publish** (carried in `TopicPublishHeader`, spec 04). For `replicate_once`,
-the topic leader emits **throttled** `TEMPLATE_TOPIC_ACK_FEEDBACK{topic_id, leader_epoch,
-replicated_hwm}` admin frames toward brokers that have local producers for the topic (interval =
-`broker.topics.ack_feedback_interval_us`). Each such broker forwards the HWM to its local producer
-services as `TopicAckFeedbackMsg` (template 15) over the control RB.
+the topic leader emits **throttled**, **per-producer** `TEMPLATE_TOPIC_ACK_FEEDBACK{topic_id,
+leader_epoch, replicated_hwm, publisher_id, acked_seq}` admin frames to peer brokers and delivers the
+same feedback to its own local producers (interval = `broker.topics.ack_feedback_interval_us`; each
+producer's latest ack is re-sent every 10 ms for 1 s after it changes, to survive a lost frame).
+Every broker forwards it to all of its local producer services for the topic as
+`TopicAckFeedbackMsg` (template 15) over the control RB; a service applies it only to the publisher
+whose `publisher_id` matches. `acked_seq` is the highest `publish_seq` from that publisher whose
+entry is replicated, so every token ≤ `acked_seq` is acked. Publishes by other producers on the same
+topic never count toward it.
 
 `replicated_hwm` is the highest master index that **≥1 replica** has applied (multi-node), or the
 master append index on a single-node broker (no replica to wait for). The producer client completes

@@ -100,6 +100,9 @@ pub fn main(init: std.process.Init) !void {
     var e2e: HopStats = .{};
     var pub_to_a: HopStats = .{}; // send → broker-A receiver ingress
     var a_to_sub: HopStats = .{}; // broker-A ingress → subscriber receive
+    // Every end-to-end sample, for percentiles (8 bytes per expected message).
+    var samples: std.ArrayList(u64) = try .initCapacity(alloc, @intCast(expected));
+    defer samples.deinit(alloc);
 
     // Spin-then-sleep idle: spin briefly to catch the next message with low
     // latency, then back off to a short sleep so a slow producer doesn't burn
@@ -124,6 +127,7 @@ pub fn main(init: std.process.Init) !void {
                 const recv_ns: u64 = @intCast(Clock.monotonicNanosStable());
                 if (recv_ns > send_ns) {
                     e2e.record(recv_ns - send_ns);
+                    samples.append(alloc, recv_ns - send_ns) catch {};
                 }
                 // Per-hop split requires the broker-A ingress stamp (magic marker).
                 // The topic leader stamps only receiver ingress (no dequeue stage),
@@ -150,22 +154,40 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ── Output JSON ──────────────────────────────────────────
-    var jb: [768]u8 = undefined;
+    std.mem.sort(u64, samples.items, {}, std.sort.asc(u64));
+    var jb: [1024]u8 = undefined;
     const js = std.fmt.bufPrint(
         &jb,
         "{{\"received\":{d},\"expected\":{d}," ++
+            "\"lat_p50_ns\":{d},\"lat_p99_ns\":{d},\"lat_p99_9_ns\":{d}," ++
             "\"lat_avg_ns\":{d},\"lat_min_ns\":{d},\"lat_max_ns\":{d}," ++
             "\"pub_to_a_avg_ns\":{d},\"pub_to_a_min_ns\":{d},\"pub_to_a_max_ns\":{d}," ++
             "\"a_to_sub_avg_ns\":{d},\"a_to_sub_min_ns\":{d},\"a_to_sub_max_ns\":{d}}}",
         .{
             received,
             expected,
-            e2e.avg(),          e2e.minOrZero(),          e2e.max,
-            pub_to_a.avg(),     pub_to_a.minOrZero(),     pub_to_a.max,
-            a_to_sub.avg(),     a_to_sub.minOrZero(),     a_to_sub.max,
+            percentile(samples.items, 500),
+            percentile(samples.items, 990),
+            percentile(samples.items, 999),
+            e2e.avg(),
+            e2e.minOrZero(),
+            e2e.max,
+            pub_to_a.avg(),
+            pub_to_a.minOrZero(),
+            pub_to_a.max,
+            a_to_sub.avg(),
+            a_to_sub.minOrZero(),
+            a_to_sub.max,
         },
     ) catch "{}";
     try std.Io.File.stdout().writeStreamingAll(io, "TOPIC_SUB_JSON<<EOF\n");
     try std.Io.File.stdout().writeStreamingAll(io, js);
     try std.Io.File.stdout().writeStreamingAll(io, "\nEOF\n");
+}
+
+/// Nearest-rank percentile of sorted `values`; `per_mille` is 0..1000.
+fn percentile(values: []const u64, per_mille: u64) u64 {
+    if (values.len == 0) return 0;
+    const rank = (values.len * per_mille + 999) / 1000;
+    return values[@min(values.len - 1, if (rank == 0) 0 else rank - 1)];
 }

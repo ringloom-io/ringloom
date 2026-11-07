@@ -20,6 +20,8 @@ const ServiceAeronRuntime = @import("aeron_runtime.zig").ServiceAeronRuntime;
 const ServiceClient = @import("service_client.zig").ServiceClient;
 const ServiceClientRegistry = @import("service_client_registry.zig").ServiceClientRegistry;
 const topic_publisher_registry = @import("topics/topic_publisher_registry.zig");
+const TopicPublisher = @import("topics/topic_publisher.zig").TopicPublisher;
+const topic_messages = ringloom_common.message.topic_control_messages;
 
 const BrokerMetadataFile = memory.BrokerMetadataFile;
 const ServiceMetadataFile = memory.ServiceMetadataFile;
@@ -292,6 +294,73 @@ pub const RingLoomEngine = struct {
         self.service_counters.increment(.subscriptions_sent);
 
         return client;
+    }
+
+    pub const RegisterTopicError = error{
+        /// The control agent runs on its own thread; it would race this call
+        /// for the response (the control ring buffer has a single consumer).
+        ControlAgentThreaded,
+        SendFailed,
+        RegistrationTimeout,
+        TopicConfigMismatch,
+        TopicDisabled,
+        RegistrationFailed,
+        LeaderPublicationFailed,
+    };
+
+    /// Registers a topic publication with the broker and returns a publisher
+    /// connected to the topic leader (spec 03 §3, spec 09).
+    ///
+    /// Requires `control_agent_mode = .manual`: this call reads the broker's
+    /// response from the control ring buffer itself. Keep the returned
+    /// publisher at a stable address and pass it to
+    /// `topic_publishers.register` so ack feedback and leader changes reach it.
+    pub fn registerTopicPublication(
+        self: *Self,
+        config: ringloom_common.topics.TopicConfig,
+        name: []const u8,
+    ) RegisterTopicError!TopicPublisher {
+        if (self.control_agent_runner != null) return error.ControlAgentThreaded;
+
+        // 1. RegisterTopicPublication (template 7) over the broker control RB.
+        control_agent_mod.registerTopicPublication(self.broker_meta, self.service_id, config, name) catch
+            return error.SendFailed;
+
+        // 2. TopicPublicationResponse (template 8).
+        const response = control_agent_mod.waitForTopicPublicationResponse(self.service_meta, 5000) catch
+            return error.RegistrationTimeout;
+        if (response.status != @intFromEnum(topic_messages.PublicationStatus.ok)) {
+            return switch (response.status) {
+                @intFromEnum(topic_messages.PublicationStatus.config_mismatch),
+                @intFromEnum(topic_messages.PublicationStatus.collision),
+                => error.TopicConfigMismatch,
+                @intFromEnum(topic_messages.PublicationStatus.disabled) => error.TopicDisabled,
+                else => error.RegistrationFailed,
+            };
+        }
+
+        // 3. Publisher with the broker-assigned identity, plus the IPC
+        //    publication to the co-located broker (pub_stream_base + leader).
+        var publisher = TopicPublisher{
+            .topic_id = response.topic_id,
+            .publisher_id = TopicPublisher.newPublisherId(),
+            .leader_node_id = @intCast(@max(0, response.leader_node_id)),
+            .leader_epoch = response.leader_epoch,
+        };
+        if (response.leader_node_id > 0) {
+            const opened = self.aeron_runtime.addIpcPublication(publisher.leader_node_id) catch null;
+            const pub_ptr = opened orelse return error.LeaderPublicationFailed;
+            publisher.leader_pub = pub_ptr.*;
+            // Wait for the exclusive publication to link to the broker's topic
+            // subscription, driving the conductor while waiting.
+            const connect_deadline = Clock.monotonicNanos() + 2000 * std.time.ns_per_ms;
+            while (Clock.monotonicNanos() < connect_deadline) {
+                _ = self.aeron_runtime.doWork() catch {};
+                if (publisher.leader_pub.?.isConnected()) break;
+                std.atomic.spinLoopHint();
+            }
+        }
+        return publisher;
     }
 
     /// Register a message handler for incoming messages.

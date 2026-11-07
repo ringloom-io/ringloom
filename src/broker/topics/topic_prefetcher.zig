@@ -7,10 +7,9 @@
 //! metadata — never queue contents — so the single-writer invariant holds.
 //!
 //! The store is owned by the receiver loop; the prefetcher reads the queue set.
-//! Because queues may be opened/closed concurrently by the receiver thread, the
-//! store iteration is guarded by a lightweight mutex that the receiver also takes
-//! around structural mutations (open/close). maintenancePoll itself is safe to
-//! run alongside appends on a given queue.
+//! Because the receiver thread may open/close queues concurrently, each pass
+//! holds the store's lock, which the store also takes around open/close.
+//! maintenancePoll itself is safe to run alongside appends on a given queue.
 
 const std = @import("std");
 const topic_store = @import("topic_store.zig");
@@ -19,21 +18,7 @@ const TopicStore = topic_store.TopicStore;
 
 const maintenance_budget: u32 = 32;
 
-/// Minimal spinlock guarding structural store mutation (open/close) against the
-/// prefetcher's iteration. Held only briefly; contention is rare.
-pub const SpinLock = struct {
-    flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
-    pub fn lock(self: *SpinLock) void {
-        while (self.flag.swap(true, .acquire)) {
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    pub fn unlock(self: *SpinLock) void {
-        self.flag.store(false, .release);
-    }
-};
+pub const SpinLock = @import("spin_lock.zig").SpinLock;
 
 pub const TopicPrefetcher = struct {
     store: *TopicStore,
@@ -43,10 +28,10 @@ pub const TopicPrefetcher = struct {
     cpu_affinity: i32 = -1,
     idle_sleep_ns: u64 = 50 * std.time.ns_per_us,
 
-    pub fn init(store: *TopicStore, mutex: *SpinLock, cpu_affinity: i32) TopicPrefetcher {
+    pub fn init(store: *TopicStore, cpu_affinity: i32) TopicPrefetcher {
         return .{
             .store = store,
-            .mutex = mutex,
+            .mutex = &store.lock,
             .running = std.atomic.Value(bool).init(false),
             .cpu_affinity = cpu_affinity,
         };
@@ -116,14 +101,13 @@ test "prefetcher poll runs maintenance without mutating queue contents" {
 
     var store = TopicStore.init(allocator, base, 1 << 20, 1 << 20);
     defer store.deinit();
-    var mutex = SpinLock{};
 
     const cfg = TopicConfig.fromName("FAST_DAILY", 4, false);
     const m = try store.openMaster(1, cfg, 1);
     _ = try m.append("a");
     _ = try m.append("b");
 
-    var pf = TopicPrefetcher.init(&store, &mutex, -1);
+    var pf = TopicPrefetcher.init(&store, -1);
     _ = pf.pollOnce(); // should not crash or alter contents
 
     var tailer = try m.queue.tailer(0);

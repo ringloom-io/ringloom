@@ -50,12 +50,13 @@ test "topic replicate_once ack completes on single node broker" {
     const broker = try harness.startBroker(.{ .topics_enabled = true });
     try harness.waitForBrokerReady(broker, 5000);
 
-    // Publisher sends 5 messages with replicate_once (single-node acks on append).
-    // This validates the broker's ack infrastructure starts correctly.
+    // Publisher registers "trades" and sends 5 replicate_once messages; it
+    // exits non-zero unless the broker acks the last one (single-node brokers
+    // ack on append).
     const publisher = try harness.startService(.{
         .executable_name = "ringloom-test-topic-publisher-service",
         .service_name = "topic-pub-ack",
-        .extra_args = &.{ "trades", "5", "1" },
+        .extra_args = &.{ "--topic", "trades", "--count", "5", "--ack-mode", "1" },
     });
     try harness.waitForServiceReady(publisher, 5000);
 

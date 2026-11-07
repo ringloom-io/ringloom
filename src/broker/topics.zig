@@ -18,6 +18,7 @@ pub const topic_commands = @import("topics/topic_commands.zig");
 pub const topic_store = @import("topics/topic_store.zig");
 pub const repl_channel = @import("topics/repl_channel.zig");
 pub const repl_session = @import("topics/repl_session.zig");
+pub const topic_ack_tracker = @import("topics/topic_ack_tracker.zig");
 pub const topic_engine = @import("topics/topic_engine.zig");
 pub const topic_prefetcher = @import("topics/topic_prefetcher.zig");
 pub const topic_registry = @import("topics/topic_registry.zig");
@@ -44,6 +45,7 @@ comptime {
     _ = @import("topics/topic_store.zig");
     _ = @import("topics/repl_channel.zig");
     _ = @import("topics/repl_session.zig");
+    _ = @import("topics/topic_ack_tracker.zig");
     _ = @import("topics/topic_engine.zig");
     _ = @import("topics/topic_prefetcher.zig");
     _ = @import("topics/topic_registry.zig");

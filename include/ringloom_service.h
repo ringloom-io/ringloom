@@ -475,9 +475,9 @@ uint64_t ringloom_topic_publisher_id(const ringloom_topic_publisher_t *publisher
 // Returns the publisher's current leader epoch (advances on leader change).
 uint64_t ringloom_topic_publisher_leader_epoch(const ringloom_topic_publisher_t *publisher);
 
-// Returns the count of this topic's publishes replicated to >=1 replica
-// (or appended, single-node). Producers compare their per-publish sequence
-// token against this to complete replicate_once acks.
+// Returns this publisher's highest sequence token acknowledged as replicated
+// to >=1 replica (or appended, single-node). Every token <= this value is
+// acked; publishes from other publishers on the same topic do not count.
 uint64_t ringloom_topic_publisher_replicated_count(const ringloom_topic_publisher_t *publisher);
 
 // Returns the broker-assigned topic_id for a subscription.

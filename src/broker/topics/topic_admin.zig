@@ -73,10 +73,11 @@ pub const TopicAckFeedbackBody = extern struct {
     topic_id: u64 align(1),
     leader_epoch: u64 align(1),
     replicated_hwm: u64 align(1),
-    /// Monotonic count of published messages that have been replicated to ≥1
-    /// replica (or appended, single-node). Producers map their per-publish
-    /// sequence token against this count.
-    replicated_count: u64 align(1),
+    /// Producer this feedback is addressed to (`TopicPublishHeader.publisher_id`).
+    publisher_id: u64 align(1),
+    /// Highest `publish_seq` from `publisher_id` replicated to >=1 replica (or
+    /// appended, single-node). Every token <= `acked_seq` is acked.
+    acked_seq: u64 align(1),
 };
 
 pub fn padTopicName(name: []const u8) [topic_name_max]u8 {

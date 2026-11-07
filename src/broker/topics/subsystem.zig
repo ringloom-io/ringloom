@@ -3,11 +3,13 @@
 //! exposes the hooks the control loop and receiver loop call.
 //!
 //! Thread split (matches the broker's loops):
-//!   - control thread owns `registry` + `election` (metadata authority, spec 02/08)
+//!   - control thread owns `registry`, `election` and `local_producers`
+//!     (metadata authority, spec 02/08)
 //!   - receiver thread owns `store` + `repl` + `engine` (sole queue writer, spec 05)
 //!   - one prefetcher thread does maintenancePoll (spec 05 §4)
-//! The two sides communicate only through the POD command/status SPSC queues, so
-//! there are no shared-mutable hazards beyond the store lock the prefetcher takes.
+//! The control thread changes receiver state only through the POD command queue
+//! (`ctrl_in`) and learns about it through the status queue (`ctrl_out`). When
+//! it must read the store directly it holds `store.lock` (see topic_store.zig).
 
 const std = @import("std");
 const common = @import("ringloom_common");
@@ -32,13 +34,22 @@ const Publisher = repl_channel.Publisher;
 const TopicEngine = topic_engine.TopicEngine;
 const PublishView = topic_engine.PublishView;
 const TopicPrefetcher = topic_prefetcher.TopicPrefetcher;
-const SpinLock = topic_prefetcher.SpinLock;
 const TopicRegistry = topic_registry.TopicRegistry;
 const TopicLeaderElection = topic_leader_election.TopicLeaderElection;
 const EngineCommandQueue = commands.EngineCommandQueue;
 const EngineStatusQueue = commands.EngineStatusQueue;
 const TopicReplEnvelope = common.message.topic_data_header.TopicReplEnvelope;
+const EngineCommand = commands.EngineCommand;
 
+const log = std.log.scoped(.topics);
+
+/// A local service that registered a publication on a topic, with the number of
+/// publisher handles it holds there. Ack feedback and leader changes for the
+/// topic go to every such service; each service picks out its own publishers.
+pub const LocalProducer = struct {
+    service_id: i32,
+    publications: u32,
+};
 /// Configuration slice the subsystem needs (subset of BrokerConfig.topics).
 pub const Options = struct {
     enabled: bool,
@@ -62,7 +73,6 @@ pub const TopicSubsystem = struct {
     ctrl_out: EngineStatusQueue,
 
     // Receiver-thread components.
-    store_lock: SpinLock,
     store: TopicStore,
     repl: ReplHub,
     engine: TopicEngine,
@@ -71,6 +81,9 @@ pub const TopicSubsystem = struct {
     // Control-thread components.
     registry: TopicRegistry,
     election: TopicLeaderElection,
+    /// Local producer services per topic, recorded whether or not this node
+    /// leads the topic (remote leaders' feedback is relayed to them too).
+    local_producers: std.AutoHashMap(TopicId, std.ArrayList(LocalProducer)),
 
     /// Returns an iterator over all topic records for periodic re-broadcast
     /// (spec 02 §8). Caller must iterate on the control thread.
@@ -88,22 +101,30 @@ pub const TopicSubsystem = struct {
         self.io = opts.io;
         self.ctrl_in = .{};
         self.ctrl_out = .{};
-        self.store_lock = .{};
         self.store = TopicStore.init(allocator, opts.base_dir, opts.write_runway_bytes, opts.read_runway_bytes);
         self.repl = ReplHub.init(allocator, opts.local_node_id, publisher, &self.store);
         self.engine = TopicEngine.init(allocator, &self.store, &self.repl, &self.ctrl_in, &self.ctrl_out);
-        self.prefetcher = TopicPrefetcher.init(&self.store, &self.store_lock, opts.prefetcher_cpu_affinity);
+        self.prefetcher = TopicPrefetcher.init(&self.store, opts.prefetcher_cpu_affinity);
         self.registry = TopicRegistry.init(allocator);
         self.election = TopicLeaderElection.init(opts.local_node_id, opts.enabled, now_ns);
+        self.local_producers = std.AutoHashMap(TopicId, std.ArrayList(LocalProducer)).init(allocator);
         return self;
     }
 
     pub fn deinit(self: *TopicSubsystem) void {
         self.prefetcher.stop();
+        // Release queues handed to the engine that it never adopted.
+        while (self.ctrl_in.dequeue()) |cmd| switch (cmd) {
+            .adopt_queue => |a| self.store.destroyDetached(a.queue),
+            else => {},
+        };
         self.engine.deinit();
         self.repl.deinit();
         self.store.deinit();
         self.registry.deinit();
+        var lp = self.local_producers.valueIterator();
+        while (lp.next()) |list| list.deinit(self.allocator);
+        self.local_producers.deinit();
         const a = self.allocator;
         a.destroy(self);
     }
@@ -138,46 +159,94 @@ pub const TopicSubsystem = struct {
 
     // ── Control-thread command emitters (registry side → engine) ───────────
 
-    fn cmdOpenMaster(self: *TopicSubsystem, topic_id: TopicId, config: TopicConfig, epoch: u64) void {
-        self.store_lock.lock();
-        defer self.store_lock.unlock();
-        // Open synchronously so subscribe() sees the queue immediately.
-        _ = self.store.openMaster(topic_id, config, epoch) catch {};
-    }
-
-    fn cmdOpenReplica(self: *TopicSubsystem, topic_id: TopicId, config: TopicConfig, epoch: u64) void {
-        self.store_lock.lock();
-        defer self.store_lock.unlock();
-        // Open synchronously so subscribe() sees the queue immediately.
-        _ = self.store.openReplica(topic_id, config, epoch) catch {};
-    }
-
-    fn cmdStartSink(self: *TopicSubsystem, topic_id: TopicId, leader_node: u8) void {
-        _ = self.ctrl_in.enqueue(.{ .start_sink = .{ .topic_id = topic_id, .leader_node = leader_node } });
-    }
-
-    fn cmdPromote(self: *TopicSubsystem, topic_id: TopicId) void {
-        self.store_lock.lock();
-        defer self.store_lock.unlock();
-        // Promote synchronously so publish() sees accepting_writes = true
-        // immediately after registration, without waiting for the engine.
-        if (self.store.get(topic_id)) |tq| {
-            tq.accepting_writes = true;
+    /// Posts a command to the receiver-thread engine. The engine applies
+    /// pending commands every loop iteration and before handling a publish, so
+    /// a producer that publishes right after registration sees the queue.
+    fn sendCommand(self: *TopicSubsystem, cmd: EngineCommand) void {
+        if (!self.ctrl_in.enqueue(cmd)) {
+            log.warn("topic engine command queue full; dropped {s} command", .{@tagName(cmd)});
         }
     }
 
-    fn cmdResetReplica(self: *TopicSubsystem, topic_id: TopicId, leader_node: u8) void {
-        self.store_lock.lock();
-        defer self.store_lock.unlock();
-        _ = self.ctrl_in.enqueue(.{ .reset_replica = .{ .topic_id = topic_id, .leader_node = leader_node } });
+    fn cmdOpenMaster(self: *TopicSubsystem, topic_id: TopicId, config: TopicConfig, epoch: u64) void {
+        self.openOnDiskAndHandOver(topic_id, config, epoch, .leader);
     }
 
-    fn cmdSetEpoch(self: *TopicSubsystem, topic_id: TopicId, epoch: u64) void {
-        _ = self.ctrl_in.enqueue(.{ .set_epoch = .{ .topic_id = topic_id, .epoch = epoch } });
+    fn cmdOpenReplica(self: *TopicSubsystem, topic_id: TopicId, config: TopicConfig, epoch: u64) void {
+        self.openOnDiskAndHandOver(topic_id, config, epoch, .replica);
     }
 
-    fn cmdCatchUpBarrier(self: *TopicSubsystem, topic_id: TopicId, from_node: u8, target_index: u64) void {
-        _ = self.ctrl_in.enqueue(.{ .catch_up_barrier = .{ .topic_id = topic_id, .from_node = from_node, .target_index = target_index } });
+    /// Creates the queue on disk now, so a local subscriber told to open its
+    /// directory can do so right away, then hands it to the engine, which owns
+    /// the queue map.
+    fn openOnDiskAndHandOver(self: *TopicSubsystem, topic_id: TopicId, config: TopicConfig, epoch: u64, role: topic_store.Role) void {
+        if (self.isQueueOpen(topic_id)) return;
+        const tq = self.store.openDetached(topic_id, config, epoch, role) catch |err| {
+            log.warn("failed to open topic queue {x}: {s}", .{ topic_id, @errorName(err) });
+            return;
+        };
+        if (!self.ctrl_in.enqueue(.{ .adopt_queue = .{ .queue = tq } })) {
+            log.warn("topic engine command queue full; dropped open of topic {x}", .{topic_id});
+            self.store.destroyDetached(tq);
+        }
+    }
+
+    fn cmdStartSink(self: *TopicSubsystem, topic_id: TopicId, leader_node: u8) void {
+        self.sendCommand(.{ .start_sink = .{ .topic_id = topic_id, .leader_node = leader_node } });
+    }
+
+    fn cmdPromote(self: *TopicSubsystem, topic_id: TopicId) void {
+        self.sendCommand(.{ .promote_to_leader = .{ .topic_id = topic_id } });
+    }
+
+    // ── Local producers (control thread) ───────────────────────────────────
+
+    pub fn addLocalProducer(self: *TopicSubsystem, topic_id: TopicId, service_id: i32) void {
+        const gop = self.local_producers.getOrPut(topic_id) catch return;
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        for (gop.value_ptr.items) |*p| {
+            if (p.service_id == service_id) {
+                p.publications += 1;
+                return;
+            }
+        }
+        gop.value_ptr.append(self.allocator, .{ .service_id = service_id, .publications = 1 }) catch {};
+    }
+
+    pub fn removeLocalProducer(self: *TopicSubsystem, topic_id: TopicId, service_id: i32) void {
+        const list = self.local_producers.getPtr(topic_id) orelse return;
+        for (list.items, 0..) |*p, i| {
+            if (p.service_id != service_id) continue;
+            p.publications -= 1;
+            if (p.publications == 0) _ = list.swapRemove(i);
+            break;
+        }
+        if (list.items.len == 0) {
+            list.deinit(self.allocator);
+            _ = self.local_producers.remove(topic_id);
+        }
+    }
+
+    /// Local services that publish to `topic_id` (borrowed; control thread only).
+    pub fn localProducers(self: *TopicSubsystem, topic_id: TopicId) []const LocalProducer {
+        const list = self.local_producers.getPtr(topic_id) orelse return &.{};
+        return list.items;
+    }
+
+    // ── Store reads from the control thread ────────────────────────────────
+
+    /// The topic queue's local high-water mark, or 0 if it is not open.
+    pub fn localHwm(self: *TopicSubsystem, topic_id: TopicId) u64 {
+        self.store.lock.lock();
+        defer self.store.lock.unlock();
+        return if (self.store.get(topic_id)) |tq| tq.hwm_index else 0;
+    }
+
+    /// Whether the topic's queue is open locally.
+    pub fn isQueueOpen(self: *TopicSubsystem, topic_id: TopicId) bool {
+        self.store.lock.lock();
+        defer self.store.lock.unlock();
+        return self.store.get(topic_id) != null;
     }
 
     pub const RegisterResult = struct {
@@ -192,12 +261,19 @@ pub const TopicSubsystem = struct {
     /// Control-loop entry: a local producer registers a publication. When this
     /// node is the topic leader, validate/create the record, open the master
     /// queue, and signal callers to broadcast TopicCreated (spec 03 §3).
-    /// `producer_service_id` is the local service to route ack-feedback /
-    /// leader-change frames to; ignored when this node is not the topic leader.
+    /// On success (or not_leader) `producer_service_id` is added to the topic's
+    /// local producers, so ack-feedback and leader-change frames reach it.
     pub fn registerPublication(self: *TopicSubsystem, name: []const u8, config: TopicConfig, now_ns: i64, producer_service_id: i32) RegisterResult {
         const id = topic_id_mod.topicIdOf(name);
         if (!self.enabled) {
             return .{ .topic_id = id, .leader_node_id = 0, .leader_epoch = 0, .effective_config = config, .status = .disabled, .newly_created = false };
+        }
+        // Reject a config no queue can be opened with, before it is recorded:
+        // otherwise the topic exists without a queue and later registrations
+        // with a valid config fail as mismatched.
+        if (!topic_store.isKnownRollScheme(config)) {
+            log.warn("rejecting topic '{s}': unknown roll scheme '{s}'", .{ name, config.rollSchemeName() });
+            return .{ .topic_id = id, .leader_node_id = 0, .leader_epoch = 0, .effective_config = config, .status = .config_mismatch, .newly_created = false };
         }
         // If no topic leader has been elected yet (e.g. a freshly-started
         // single-node broker before the leader-down interval elapses), let this
@@ -208,6 +284,7 @@ pub const TopicSubsystem = struct {
         const epoch = self.election.getEpoch();
         if (leader == null or leader.? != self.local_node_id) {
             // Not the topic leader: caller proxies creation to the leader (spec 03 §5).
+            self.addLocalProducer(id, producer_service_id);
             return .{
                 .topic_id = id,
                 .leader_node_id = leader orelse 0,
@@ -232,7 +309,7 @@ pub const TopicSubsystem = struct {
             };
         };
         const rec = self.registry.getById(id).?;
-        rec.producer_service_id = producer_service_id;
+        self.addLocalProducer(id, producer_service_id);
         if (outcome == .created) {
             rec.local_role = .leader;
             rec.local_queue_open = true;
@@ -300,7 +377,7 @@ pub const TopicSubsystem = struct {
         // entries with index > start_index-1, so hwm+1 skips the last
         // entry at hwm. When hwm is 0 the queue is empty; 0 is the
         // correct start (tailer auto-seeks forward to the first cycle).
-        const hwm = if (self.store.get(id)) |tq| tq.hwm_index else 0;
+        const hwm = self.localHwm(id);
         const start_index: u64 = if (earliest) 0 else if (hwm == 0) 0 else hwm + 1;
         return .{ .topic_id = id, .status = .ok, .start_index = start_index, .geometry = rec.config };
     }
@@ -317,9 +394,7 @@ pub const TopicSubsystem = struct {
     /// recreates empty, and restarts the sink.
     pub fn resetReplicaToLeader(self: *TopicSubsystem, topic_id: TopicId) void {
         const rec = self.registry.getById(topic_id) orelse return;
-        self.store_lock.lock();
-        defer self.store_lock.unlock();
-        _ = self.ctrl_in.enqueue(.{ .reset_replica = .{
+        self.sendCommand(.{ .reset_replica = .{
             .topic_id = topic_id,
             .leader_node = rec.leader_node_id,
             .config = rec.config,
@@ -349,7 +424,7 @@ pub const TopicSubsystem = struct {
             const topic_id = std.fmt.parseInt(TopicId, hex_str, 16) catch continue;
 
             // Skip if the queue is already open in the store.
-            if (self.store.get(topic_id) != null) continue;
+            if (self.isQueueOpen(topic_id)) continue;
 
             // Try to read the queue's metadata to recover its geometry.
             const config = self.readQueueConfigFromDir(dir, entry.name) orelse continue;
@@ -427,14 +502,9 @@ pub const TopicSubsystem = struct {
         self.registry.setLeaderForAll(self.local_node_id, leader_epoch);
         // Advance every open queue's epoch to the new term. Queues are opened with
         // the epoch known at registration time, which may be 0 (before this node
-        // self-elects). The epoch is monotonic and only read alongside the registry
-        // (control thread) or as a monotonic fence (receiver thread), so a plain
-        // advancing store is safe here — same pattern as `cmdPromote`.
-        var it = self.store.openQueues();
-        while (it.next()) |tqp| {
-            const tq = tqp.*;
-            if (leader_epoch > tq.epoch) tq.epoch = leader_epoch;
-        }
+        // self-elects). The engine owns queue state, so ask it to do this; it
+        // applies the command before any later publish.
+        self.sendCommand(.{ .set_epoch_all = .{ .epoch = leader_epoch } });
     }
 
     /// Drain engine status (HWMs, barrier completion). Returns number drained.
@@ -562,4 +632,160 @@ test "applyTopicCreated on a follower opens a replica + sink" {
     // Subscribe returns ok with the replica geometry.
     const sr = sub.subscribe("orders", true);
     try testing.expectEqual(@as(@TypeOf(sr.status), .ok), sr.status);
+}
+
+fn testSubsystem(allocator: std.mem.Allocator, base: []const u8, node: u8) !*TopicSubsystem {
+    return TopicSubsystem.init(allocator, .{
+        .enabled = true,
+        .base_dir = base,
+        .write_runway_bytes = 1 << 20,
+        .read_runway_bytes = 1 << 20,
+        .prefetcher_cpu_affinity = -1,
+        .local_node_id = node,
+        .io = undefined,
+    }, nullPublisher(), 0);
+}
+
+test "every local producer of a topic is tracked, not just the latest" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmpBase(allocator, &tmp);
+    defer allocator.free(base);
+    const sub = try testSubsystem(allocator, base, 1);
+    defer sub.deinit();
+    _ = sub.checkLeadership(10 * std.time.ns_per_s);
+
+    const cfg = TopicConfig.fromName("FAST_DAILY", 4, false);
+    const id = topic_id_mod.topicIdOf("orders");
+    _ = sub.registerPublication("orders", cfg, 1000, 3);
+    _ = sub.registerPublication("orders", cfg, 1000, 4);
+    _ = sub.registerPublication("orders", cfg, 1000, 4); // second handle in service 4
+
+    try testing.expectEqual(@as(usize, 2), sub.localProducers(id).len);
+
+    // Service 4 closes one of its two publishers: still a producer.
+    sub.removeLocalProducer(id, 4);
+    try testing.expectEqual(@as(usize, 2), sub.localProducers(id).len);
+    sub.removeLocalProducer(id, 4);
+    try testing.expectEqual(@as(usize, 1), sub.localProducers(id).len);
+    try testing.expectEqual(@as(i32, 3), sub.localProducers(id)[0].service_id);
+    sub.removeLocalProducer(id, 3);
+    try testing.expectEqual(@as(usize, 0), sub.localProducers(id).len);
+}
+
+test "producers registering on a non-leader node are tracked for feedback relay" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmpBase(allocator, &tmp);
+    defer allocator.free(base);
+    const sub = try testSubsystem(allocator, base, 2);
+    defer sub.deinit();
+    // Node 1 is the topic leader.
+    _ = sub.election.onLeaderAnnouncement(1, 5, 0);
+
+    const r = sub.registerPublication("orders", TopicConfig.fromName("FAST_DAILY", 4, false), 1000, 9);
+    try testing.expectEqual(@as(@TypeOf(r.status), .not_leader), r.status);
+    try testing.expectEqual(@as(usize, 1), sub.localProducers(r.topic_id).len);
+}
+
+test "registration only queues store changes; the receiver thread applies them" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmpBase(allocator, &tmp);
+    defer allocator.free(base);
+    const sub = try testSubsystem(allocator, base, 1);
+    defer sub.deinit();
+    _ = sub.checkLeadership(10 * std.time.ns_per_s);
+
+    const r = sub.registerPublication("orders", TopicConfig.fromName("FAST_DAILY", 4, false), 1000, 1);
+    try testing.expectEqual(@as(@TypeOf(r.status), .ok), r.status);
+    // The control thread did not touch the queue map, but the queue already
+    // exists on disk so a local subscriber can open it straight away.
+    try testing.expectEqual(@as(u32, 0), sub.store.count());
+    const dir = try sub.queueDir(allocator, r.topic_id);
+    defer allocator.free(dir);
+    var qdir = try std.Io.Dir.cwd().openDir(testing.io, dir, .{});
+    qdir.close(testing.io);
+
+    // The producer's first publish arrives before the receiver's next step().
+    sub.onPublish(.{ .topic_id = r.topic_id, .leader_epoch = r.leader_epoch, .correlation_id = 0, .source_node = 1, .source_service = 1, .ack_mode = .fire_and_forget, .payload = "first" });
+    try testing.expectEqual(@as(u64, 1), sub.engine.counters.publish_accepted.load(.monotonic));
+    try testing.expectEqual(r.leader_epoch, sub.store.get(r.topic_id).?.epoch);
+}
+
+test "store open/close on the receiver thread is safe against prefetcher and control readers" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmpBase(allocator, &tmp);
+    defer allocator.free(base);
+    const sub = try testSubsystem(allocator, base, 1);
+    defer sub.deinit();
+
+    // Real prefetcher thread iterating the store and polling every queue.
+    sub.prefetcher.idle_sleep_ns = 0;
+    try sub.prefetcher.start();
+
+    // A "control thread" reading the store the way the control loop does.
+    const Reader = struct {
+        fn run(s: *TopicSubsystem, stop: *std.atomic.Value(bool)) void {
+            while (!stop.load(.acquire)) {
+                var t: TopicId = 1;
+                while (t <= 4) : (t += 1) {
+                    _ = s.localHwm(t);
+                    _ = s.isQueueOpen(t);
+                }
+            }
+        }
+    };
+    var stop = std.atomic.Value(bool).init(false);
+    const reader = try std.Thread.spawn(.{}, Reader.run, .{ sub, &stop });
+
+    // "Receiver thread": open, append to, and close queues repeatedly. Before
+    // the fix, close freed queues the prefetcher could still be polling.
+    const cfg = TopicConfig.fromName("FAST_DAILY", 4, false);
+    var round: u32 = 0;
+    while (round < 50) : (round += 1) {
+        var t: TopicId = 1;
+        while (t <= 4) : (t += 1) {
+            try testing.expect(sub.ctrl_in.enqueue(.{ .open_master = .{ .topic_id = t, .config = cfg, .epoch = 1 } }));
+        }
+        _ = sub.receiverStep();
+        t = 1;
+        while (t <= 4) : (t += 1) _ = try sub.store.get(t).?.append("x");
+        t = 1;
+        while (t <= 4) : (t += 1) {
+            try testing.expect(sub.ctrl_in.enqueue(.{ .close_queue = .{ .topic_id = t } }));
+        }
+        _ = sub.receiverStep();
+    }
+
+    stop.store(true, .release);
+    reader.join();
+    sub.prefetcher.stop();
+    try testing.expectEqual(@as(u32, 0), sub.store.count());
+}
+
+test "registration with an unknown roll scheme is rejected and not recorded" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmpBase(allocator, &tmp);
+    defer allocator.free(base);
+    const sub = try testSubsystem(allocator, base, 1);
+    defer sub.deinit();
+    _ = sub.checkLeadership(10 * std.time.ns_per_s);
+
+    // An all-zero config (empty roll scheme name) used to be accepted.
+    const bad = sub.registerPublication("orders", .{}, 1000, 1);
+    try testing.expectEqual(@as(@TypeOf(bad.status), .config_mismatch), bad.status);
+    try testing.expect(sub.registry.getById(bad.topic_id) == null);
+    try testing.expectEqual(@as(usize, 0), sub.localProducers(bad.topic_id).len);
+
+    // A valid registration for the same topic then succeeds.
+    const good = sub.registerPublication("orders", TopicConfig.fromName("FAST_DAILY", 4, false), 1000, 1);
+    try testing.expectEqual(@as(@TypeOf(good.status), .ok), good.status);
 }
