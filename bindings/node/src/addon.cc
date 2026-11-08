@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
+#include <memory>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -468,6 +470,8 @@ class BufferClaimWrap final : public Napi::ObjectWrap<BufferClaimWrap> {
 
 Napi::FunctionReference BufferClaimWrap::constructor;
 
+#include "kv.inc"
+
 class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
  public:
   static Napi::FunctionReference constructor;
@@ -486,6 +490,7 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
       InstanceMethod("clearLifecycleHandler", &ClientWrap::ClearLifecycleHandler),
       InstanceMethod("close", &ClientWrap::Close),
       InstanceMethod("registerTopicPublication", &ClientWrap::RegisterTopicPublication),
+      InstanceMethod("_openKv", &ClientWrap::OpenKv),
       InstanceMethod("subscribeTopic", &ClientWrap::SubscribeTopic),
     });
     constructor = Napi::Persistent(func);
@@ -506,6 +511,11 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
   ~ClientWrap() override {
     CloseNative();
   }
+
+  std::shared_ptr<size_t> kv_count = std::make_shared<size_t>(0);
+  std::shared_ptr<size_t> service_kv_count;
+  std::shared_ptr<KvRegistry> kv_registry;
+  Napi::ObjectReference service_owner;
 
   ringloom_status_t InstallLifecycleHandler() {
     if (client_ == nullptr) {
@@ -793,6 +803,68 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
     return env.Undefined();
   }
 
+  Napi::Value OpenKv(const Napi::CallbackInfo& i) {
+    auto env = i.Env();
+    if (!RequireOpen(env, closed_, "RingloomClient")) return env.Undefined();
+    if (i.Length() != 4 || !i[0].IsBoolean() || !i[1].IsString() || !i[2].IsObject() || !i[3].IsObject()) {
+      Napi::TypeError::New(env, "invalid KV open arguments").ThrowAsJavaScriptException(); return env.Undefined();
+    }
+    bool writer = i[0].As<Napi::Boolean>().Value();
+    std::string name = i[1].As<Napi::String>().Utf8Value();
+    if (name.empty() || name.size() > 64 || name.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") != std::string::npos) {
+      Napi::TypeError::New(env, "KV name must contain 1..64 ASCII letters, digits, '.', '_' or '-'").ThrowAsJavaScriptException(); return env.Undefined();
+    }
+    auto cfg = i[2].As<Napi::Object>(); auto opts = i[3].As<Napi::Object>();
+    auto r = std::make_shared<KvResource>();
+    r->owner = Napi::Persistent(i.This().As<Napi::Object>());
+    r->client_count = kv_count; ++*kv_count;
+    r->service_count = service_kv_count; if (service_kv_count) ++*service_kv_count;
+    int status;
+    if (writer) {
+      ringloom_kv_store_config_t c; ringloom_kv_store_config_init(&c);
+      ringloom_kv_writer_options_t o; ringloom_kv_writer_options_init(&o);
+#define KV_OPT(obj, js, dest, max) { uint64_t n = dest; if (!KvOption(obj, js, max, &n)) return env.Undefined(); dest = n; }
+      KV_OPT(cfg, "formatVersion", c.format_version, UINT16_MAX);
+      KV_OPT(cfg, "maxKeyLen", c.max_key_len, UINT16_MAX);
+      KV_OPT(cfg, "maxValueLen", c.max_value_len, UINT32_MAX);
+      KV_OPT(cfg, "defaultTtlMs", c.default_ttl_ms, UINT64_MAX);
+      KV_OPT(cfg, "mapSizeHint", c.map_size_hint, UINT64_MAX);
+      KV_OPT(cfg, "flags", c.flags, UINT32_MAX);
+      auto roll = cfg.Get("topicRollScheme");
+      if (!roll.IsUndefined()) {
+        if (!roll.IsString()) { Napi::TypeError::New(env, "topicRollScheme must be a string").ThrowAsJavaScriptException(); return env.Undefined(); }
+        auto text = roll.As<Napi::String>().Utf8Value();
+        if (text.empty() || text.size() > 16 || text.find('\0') != std::string::npos) { Napi::RangeError::New(env, "topicRollScheme must be 1..16 bytes without NUL").ThrowAsJavaScriptException(); return env.Undefined(); }
+        std::memset(c.topic_roll_scheme, 0, sizeof(c.topic_roll_scheme)); std::memcpy(c.topic_roll_scheme, text.data(), text.size());
+      }
+      KV_OPT(opts, "acquire", o.acquire, 1);
+      KV_OPT(opts, "openTimeoutMs", o.open_timeout_ms, UINT32_MAX);
+      KV_OPT(opts, "maxFrameLength", o.max_frame_length, UINT32_MAX);
+      auto callback = opts.Get("onState");
+      if (!callback.IsUndefined()) {
+        if (!callback.IsFunction()) { Napi::TypeError::New(env, "onState must be a function").ThrowAsJavaScriptException(); return env.Undefined(); }
+        r->on_state = Napi::Persistent(callback.As<Napi::Function>()); o.on_state = KvWrap::State; o.user_data = r.get();
+      }
+      status = ringloom_kv_open_writer(client_, name.c_str(), &c, &o, &r->writer);
+    } else {
+      ringloom_kv_reader_options_t o; ringloom_kv_reader_options_init(&o);
+      KV_OPT(opts, "waitReadyTimeoutMs", o.wait_ready_timeout_ms, UINT32_MAX);
+      KV_OPT(opts, "ttlClock", o.ttl_clock, 1);
+      KV_OPT(opts, "maxReaders", o.max_readers, UINT32_MAX);
+      auto prefault = opts.Get("prefault");
+      if (!prefault.IsUndefined()) {
+        if (!prefault.IsBoolean()) { Napi::TypeError::New(env, "prefault must be boolean").ThrowAsJavaScriptException(); return env.Undefined(); }
+        o.prefault = prefault.As<Napi::Boolean>().Value();
+      }
+      status = ringloom_kv_open_reader(client_, name.c_str(), &o, &r->reader);
+    }
+#undef KV_OPT
+    if (status) { ThrowStatusError(env, writer ? "kv_open_writer" : "kv_open_reader", status); return env.Undefined(); }
+    if (env.IsExceptionPending()) return env.Undefined();
+    if (kv_registry) kv_registry->push_back(r);
+    return KvWrap::New(env, r);
+  }
+
   Napi::Value RegisterTopicPublication(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     if (!RequireOpen(env, closed_, "RingloomClient")) {
@@ -869,6 +941,7 @@ class ClientWrap final : public Napi::ObjectWrap<ClientWrap> {
   }
 
   Napi::Value Close(const Napi::CallbackInfo& info) {
+    if (*kv_count) { Napi::Error::New(info.Env(), "close KV handles before closing their client").ThrowAsJavaScriptException(); return info.Env().Undefined(); }
     CloseNative();
     return info.Env().Undefined();
   }
@@ -1028,6 +1101,8 @@ class ServiceWrap final : public Napi::ObjectWrap<ServiceWrap> {
   }
 
  private:
+  std::shared_ptr<size_t> kv_count_ = std::make_shared<size_t>(0);
+  std::shared_ptr<KvRegistry> kv_registry_ = std::make_shared<KvRegistry>();
   ringloom_service_t* service_;
   bool closed_;
 
@@ -1123,6 +1198,8 @@ class ServiceWrap final : public Napi::ObjectWrap<ServiceWrap> {
     if (ThrowIfNonOk(env, "ringloom_service_poll_control", status)) {
       return env.Undefined();
     }
+    DrainKvStates(*kv_registry_, env);
+    if (env.IsExceptionPending()) return env.Undefined();
     return Napi::Number::New(env, count);
   }
 
@@ -1150,6 +1227,9 @@ class ServiceWrap final : public Napi::ObjectWrap<ServiceWrap> {
 
     Napi::Object object = ClientWrap::constructor.New({Napi::External<ringloom_client_t>::New(env, client)});
     auto* wrapper = Napi::ObjectWrap<ClientWrap>::Unwrap(object);
+    wrapper->service_owner = Napi::Persistent(info.This().As<Napi::Object>());
+    wrapper->service_kv_count = kv_count_;
+    wrapper->kv_registry = kv_registry_;
     const ringloom_status_t install_status = wrapper->InstallLifecycleHandler();
     if (install_status != RINGLOOM_OK) {
       wrapper->DestroyAfterFailedInit();
@@ -1226,6 +1306,7 @@ class ServiceWrap final : public Napi::ObjectWrap<ServiceWrap> {
   }
 
   Napi::Value Close(const Napi::CallbackInfo& info) {
+    if (*kv_count_) { Napi::Error::New(info.Env(), "close KV handles before closing their service").ThrowAsJavaScriptException(); return info.Env().Undefined(); }
     CloseNative();
     return info.Env().Undefined();
   }
@@ -1261,6 +1342,7 @@ Napi::Value AeronPublicationStatusNameValue(const Napi::CallbackInfo& info) {
 }
 
 Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
+  KvWrap::Init(env, exports);
   BufferClaimWrap::Init(env, exports);
   ClientWrap::Init(env, exports);
   TopicPublisherWrap::Init(env, exports);

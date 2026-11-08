@@ -9,6 +9,7 @@ const common = @import("ringloom_common");
 
 pub const AckMode = common.topics.topic_config.AckMode;
 pub const flag_use_huge_pages = common.topics.topic_config.flag_use_huge_pages;
+pub const flag_kv_store = common.topics.topic_config.flag_kv_store;
 pub const TopicConfig = common.topics.topic_config.TopicConfig;
 pub const ValidateError = common.topics.topic_config.ValidateError;
 pub const validateAgainstExisting = common.topics.topic_config.validateAgainstExisting;

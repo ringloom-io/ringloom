@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Repeated, serial benchmark runs with metadata and a generated report.
-# Usage: scripts/bench-all.sh --output-dir DIR [--repeat N] [--suites "ring ipc topic backpressure recovery aeron"]
+# Usage: scripts/bench-all.sh --output-dir DIR [--repeat N] [--suites "ring ipc topic kv backpressure recovery aeron"]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=""
 REPEAT=3
-SUITES="ring ipc topic backpressure recovery aeron"
+SUITES="ring ipc topic kv backpressure recovery aeron"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --output-dir) OUT="$2"; shift 2 ;;
@@ -17,7 +17,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$OUT" && "$REPEAT" =~ ^[1-9][0-9]*$ && -n "$SUITES" ]] || { echo "Specify --output-dir DIR and a positive --repeat" >&2; exit 1; }
 for suite in $SUITES; do
-    case "$suite" in ring|ipc|topic|backpressure|recovery|aeron) ;; *) echo "Unknown suite: $suite" >&2; exit 1 ;; esac
+    case "$suite" in ring|ipc|topic|kv|backpressure|recovery|aeron) ;; *) echo "Unknown suite: $suite" >&2; exit 1 ;; esac
 done
 # Low-level Zig benchmarks use fixed /tmp paths and ports. Serialize wrapper runs.
 exec 9>/tmp/ringloom-benchmark.lock
@@ -75,6 +75,8 @@ for run in $(seq 1 "$REPEAT"); do
             ipc) bash scripts/run-benchmarks.sh --output-dir "$dir/ipc" > "$dir/ipc.log" 2>&1 ;;
             topic) bash scripts/bench-topic.sh --runs 1 --sizes "32 128 1024" --output-dir "$dir/topic" > "$dir/topic.log" 2>&1
                    bash scripts/bench-topic.sh --runs 1 --sizes "32 128 1024" --ack --output-dir "$dir/topic" >> "$dir/topic.log" 2>&1 ;;
+            kv) zig build perf -Dperf-filter=kv -Doptimize=ReleaseFast > "$dir/kv.log" 2>&1
+                copy_fresh /tmp/ringloom-perf-results/kv "$dir/kv" "$OUT/.started" ;;
             backpressure) zig build perf -Dperf-filter=backpressure -Doptimize=ReleaseFast > "$dir/backpressure.log" 2>&1
                           copy_fresh /tmp/ringloom-perf-results/backpressure "$dir/backpressure" "$OUT/.started" ;;
             recovery) zig build perf -Dperf-filter=recovery -Doptimize=ReleaseFast > "$dir/recovery.log" 2>&1

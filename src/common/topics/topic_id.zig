@@ -22,9 +22,30 @@ pub fn topicIdOf(name: []const u8) TopicId {
     return std.hash.Wyhash.hash(0, name);
 }
 
+/// Topic-name prefix reserved for the replicated KV subsystem
+/// (docs/kv-store-spec.md §4.1). Ordinary create/publish/subscribe requests for
+/// names with this prefix are rejected with `TOPIC_NAME_RESERVED`; the KV
+/// subsystem opts in explicitly (see `msg_flag_allow_reserved` in
+/// `topic_control_messages.zig`).
+pub const reserved_kv_prefix = "__kv.";
+
+/// True when `name` is in the reserved KV namespace.
+pub fn isReservedName(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, reserved_kv_prefix);
+}
+
 /// True when `id` is a usable (non-reserved) topic id.
 pub fn isValid(id: TopicId) bool {
     return id != invalid_topic_id;
+}
+
+test "isReservedName matches only the __kv. prefix" {
+    try std.testing.expect(isReservedName("__kv.prices"));
+    try std.testing.expect(isReservedName("__kv."));
+    try std.testing.expect(!isReservedName("__kv"));
+    try std.testing.expect(!isReservedName("_kv.x"));
+    try std.testing.expect(!isReservedName("orders"));
+    try std.testing.expect(!isReservedName("x__kv.y"));
 }
 
 test "topicIdOf is stable across calls" {

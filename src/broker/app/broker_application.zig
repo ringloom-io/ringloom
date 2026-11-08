@@ -82,6 +82,7 @@ pub const BrokerApplication = struct {
 
     /// Persistent topics subsystem (null when topics are disabled).
     topic_subsystem: ?*topics.TopicSubsystem = null,
+    kv_subsystem: ?*@import("../kv/kv_subsystem.zig").KvSubsystem = null,
 
     /// Standalone topic IPC subscription for single-node brokers (topics
     /// enabled but no peers → no UDP transport). Owned by the application;
@@ -155,6 +156,10 @@ pub const BrokerApplication = struct {
         self.stopAeronClient();
         self.stopAeronDriver();
 
+        if (self.kv_subsystem) |ks| {
+            ks.destroy();
+            self.kv_subsystem = null;
+        }
         if (self.topic_subsystem) |ts| {
             ts.deinit();
             self.topic_subsystem = null;
@@ -284,8 +289,23 @@ pub const BrokerApplication = struct {
             .fc_normal_refresh_interval_ms = self.config.fc_normal_refresh_interval_ms,
             .aeron_agent = aeron_assignment.control,
             .topic_subsystem = self.topic_subsystem,
+            .max_frame_length = self.config.max_frame_length,
             .topic_ack_feedback_interval_ns = @as(i64, @intCast(topics_cfg.ack_feedback_interval_us)) * std.time.ns_per_us,
         });
+
+        self.control_loop.?.kv_max_stores = self.config.kv.max_stores;
+        if (self.config.kv.enabled) {
+            const ts = self.topic_subsystem orelse return error.KvRequiresTopics;
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = try self.config.kv.resolvePath(self.config.storage_path, &path_buf);
+            const ks = try @import("../kv/kv_subsystem.zig").KvSubsystem.create(self.allocator, ts, self.config.kv, path, self.config.group_name, self.config.node_id);
+            self.kv_subsystem = ks;
+            try ks.bindCounters(&self.counters.?);
+            try ks.start();
+            errdefer ks.stop();
+            self.control_loop.?.kv_subsystem = ks;
+            self.control_loop.?.setKvLocalStores(ks.localStores());
+        }
 
         self.sender_loop = SenderEventLoop.init();
         self.sender_loop.?.setAeronAgent(aeron_assignment.sender);
@@ -338,6 +358,7 @@ pub const BrokerApplication = struct {
             self.broker_threads = null;
         }
 
+        if (self.kv_subsystem) |ks| ks.stop();
         self.started = false;
     }
 

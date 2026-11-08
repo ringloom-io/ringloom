@@ -23,7 +23,7 @@ pub const ringloom_client = opaque {};
 pub const ringloom_message_consumer = opaque {};
 pub const ringloom_metrics_reader = opaque {};
 
-pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 5;
+pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 6;
 const max_error_message_length = error_state_mod.max_error_message_length;
 const claim_handle_record_length = std.math.minInt(i32);
 
@@ -44,6 +44,15 @@ pub const ringloom_status_t = enum(c_int) {
     RINGLOOM_ERR_TOPIC_DISABLED = 13,
     RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH = 14,
     RINGLOOM_ERR_TOPIC_UNKNOWN = 15,
+    RINGLOOM_KV_MISSING = 32,
+    RINGLOOM_ERR_KV_BUFFER_TOO_SMALL = 33,
+    RINGLOOM_ERR_KV_NOT_WRITER = 34,
+    RINGLOOM_ERR_KV_HELD_BY_OTHER = 35,
+    RINGLOOM_ERR_KV_NOT_AVAILABLE_LOCALLY = 36,
+    RINGLOOM_ERR_KV_ENGINE_MISMATCH = 37,
+    RINGLOOM_ERR_KV_KEY_TOO_LARGE = 38,
+    RINGLOOM_ERR_KV_VALUE_TOO_LARGE = 39,
+    RINGLOOM_ERR_KV_BATCH_FULL = 40,
     RINGLOOM_ERR_INTERNAL = 255,
 };
 
@@ -1948,6 +1957,15 @@ export fn ringloom_status_string(status: Status) [*:0]const u8 {
         .RINGLOOM_ERR_TOPIC_DISABLED => "topic_disabled",
         .RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH => "topic_config_mismatch",
         .RINGLOOM_ERR_TOPIC_UNKNOWN => "topic_unknown",
+        .RINGLOOM_KV_MISSING => "RINGLOOM_KV_MISSING",
+        .RINGLOOM_ERR_KV_BUFFER_TOO_SMALL => "RINGLOOM_ERR_KV_BUFFER_TOO_SMALL",
+        .RINGLOOM_ERR_KV_NOT_WRITER => "RINGLOOM_ERR_KV_NOT_WRITER",
+        .RINGLOOM_ERR_KV_HELD_BY_OTHER => "RINGLOOM_ERR_KV_HELD_BY_OTHER",
+        .RINGLOOM_ERR_KV_NOT_AVAILABLE_LOCALLY => "RINGLOOM_ERR_KV_NOT_AVAILABLE_LOCALLY",
+        .RINGLOOM_ERR_KV_ENGINE_MISMATCH => "RINGLOOM_ERR_KV_ENGINE_MISMATCH",
+        .RINGLOOM_ERR_KV_KEY_TOO_LARGE => "RINGLOOM_ERR_KV_KEY_TOO_LARGE",
+        .RINGLOOM_ERR_KV_VALUE_TOO_LARGE => "RINGLOOM_ERR_KV_VALUE_TOO_LARGE",
+        .RINGLOOM_ERR_KV_BATCH_FULL => "RINGLOOM_ERR_KV_BATCH_FULL",
         .RINGLOOM_ERR_INTERNAL => "internal",
     };
 }
@@ -2078,4 +2096,393 @@ test "client target layout matches expected offsets" {
     try std.testing.expectEqual(@as(usize, 4), @offsetOf(ringloom_client_target_t, "target_node_id"));
     try std.testing.expectEqual(@as(usize, 6), @offsetOf(ringloom_client_target_t, "is_leader"));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(ringloom_client_target_t));
+}
+
+// ── Replicated KV stores (ABI 6) ──────────────────────────────────────
+const kv_api = @import("kv.zig");
+pub const ringloom_kv_reader = opaque {};
+pub const ringloom_kv_session = opaque {};
+pub const ringloom_kv_writer = opaque {};
+pub const ringloom_kv_store_config_t = kv_api.KvStoreConfig;
+pub const ringloom_kv_reader_options_t = extern struct {
+    size: u32 = @sizeOf(@This()),
+    wait_ready_timeout_ms: u32 = 0,
+    prefault: u8 = 0,
+    ttl_clock: u8 = 0,
+    _pad: [2]u8 = @splat(0),
+    max_readers: u32 = 1024,
+};
+pub const ringloom_kv_state_fn = ?*const fn (?*anyopaque, u8, u64) callconv(.c) void;
+pub const ringloom_kv_writer_options_t = extern struct {
+    size: u32 = @sizeOf(@This()),
+    acquire: u8 = 0,
+    _pad: [3]u8 = @splat(0),
+    open_timeout_ms: u32 = 5000,
+    max_frame_length: u32 = ringloom_common.platform.constants.default_max_frame_length,
+    on_state: ringloom_kv_state_fn = null,
+    user_data: ?*anyopaque = null,
+};
+pub const ringloom_kv_status_t = extern struct {
+    size: u32 = @sizeOf(@This()),
+    state: u8,
+    replication_live: u8,
+    _pad: [2]u8 = @splat(0),
+    generation: u64,
+    applied_index: u64,
+    applied_leader_epoch: u64,
+    applied_at_ns: u64,
+    local_log_tip_index: u64,
+    lag_entries: u64,
+    heartbeat_age_ms: u64,
+    generation_switches: u64,
+};
+pub const ringloom_kv_visit_fn = ?*const fn (?*anyopaque, [*]const u8, usize, [*]const u8, usize) callconv(.c) c_int;
+const KvCWriter = struct {
+    writer: *kv_api.KvWriter,
+    callback: ringloom_kv_state_fn,
+    user_data: ?*anyopaque,
+};
+const kv_allocator = std.heap.page_allocator;
+fn kvReader(p: ?*ringloom_kv_reader) ?*kv_api.KvReader {
+    return if (p) |v| @ptrCast(@alignCast(v)) else null;
+}
+fn kvSession(p: ?*ringloom_kv_session) ?*kv_api.KvReadSession {
+    return if (p) |v| @ptrCast(@alignCast(v)) else null;
+}
+fn kvWriter(p: ?*ringloom_kv_writer) ?*KvCWriter {
+    return if (p) |v| @ptrCast(@alignCast(v)) else null;
+}
+fn kvError(err: anyerror) Status {
+    return setLastErrorFmt(switch (err) {
+        error.OutOfMemory => .RINGLOOM_ERR_OUT_OF_MEMORY,
+        error.InvalidName, error.InvalidConfig, error.StoreDirTooLong => .RINGLOOM_ERR_INVALID_ARGUMENT,
+        error.Timeout => .RINGLOOM_ERR_REGISTRATION_TIMEOUT,
+        error.NotReady => .RINGLOOM_NOT_READY,
+        error.KvNotAvailableLocally => .RINGLOOM_ERR_KV_NOT_AVAILABLE_LOCALLY,
+        error.UnknownStore => .RINGLOOM_ERR_TOPIC_UNKNOWN,
+        error.EngineMismatch => .RINGLOOM_ERR_KV_ENGINE_MISMATCH,
+        error.HeldByOther => .RINGLOOM_ERR_KV_HELD_BY_OTHER,
+        error.ConfigMismatch => .RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH,
+        error.LeaderUnavailable, error.LeaderPublicationFailed => .RINGLOOM_ERR_TOPIC_LEADER_UNAVAILABLE,
+        error.TopicsDisabled => .RINGLOOM_ERR_TOPIC_DISABLED,
+        error.NotWriter => .RINGLOOM_ERR_KV_NOT_WRITER,
+        else => .RINGLOOM_ERR_INTERNAL,
+    }, "KV: {s}", .{@errorName(err)});
+}
+fn kvInvalid() Status {
+    return setLastError(.RINGLOOM_ERR_INVALID_ARGUMENT, "invalid KV argument or option size");
+}
+fn kvBytes(p: ?[*]const u8, n: usize) ?[]const u8 {
+    if (n == 0) return &.{};
+    return if (p) |v| v[0..n] else null;
+}
+fn kvWriteResult(r: kv_api.KvWriteResult, seq: ?*u64) Status {
+    if (seq) |s| s.* = 0;
+    return switch (r) {
+        .ok => |n| blk: {
+            if (seq) |s| s.* = n;
+            break :blk .RINGLOOM_OK;
+        },
+        .back_pressured => setLastError(.RINGLOOM_ERR_BACKPRESSURE, "KV back pressured"),
+        .not_writer => setLastError(.RINGLOOM_ERR_KV_NOT_WRITER, "KV lease is not granted"),
+        .leader_unavailable => setLastError(.RINGLOOM_ERR_TOPIC_LEADER_UNAVAILABLE, "KV leader unavailable"),
+        .key_too_large => setLastError(.RINGLOOM_ERR_KV_KEY_TOO_LARGE, "KV key empty or too large"),
+        .value_too_large => setLastError(.RINGLOOM_ERR_KV_VALUE_TOO_LARGE, "KV value too large"),
+        .batch_full => setLastError(.RINGLOOM_ERR_KV_BATCH_FULL, "KV frame capacity exceeded"),
+    };
+}
+export fn ringloom_kv_open_reader(client: ?*ringloom_client, name: ?[*:0]const u8, opts: ?*const ringloom_kv_reader_options_t, out: ?*?*ringloom_kv_reader) Status {
+    clearLastError();
+    const dest = out orelse return kvInvalid();
+    dest.* = null;
+    const h = requireActiveClient(client) orelse return kvInvalid();
+    const n = name orelse return kvInvalid();
+    var options = kv_api.KvReaderOptions{};
+    if (opts) |o| {
+        if (o.size < @sizeOf(ringloom_kv_reader_options_t) or o.prefault > 1 or o.ttl_clock > 1 or o.max_readers == 0) return kvInvalid();
+        options = .{ .wait_ready_timeout_ms = o.wait_ready_timeout_ms, .prefault = o.prefault != 0, .ttl_clock = @fromBackingInt(o.ttl_clock), .max_readers = o.max_readers };
+    }
+    const engine = h.service.engine orelse return kvError(error.EngineNotRunning);
+    dest.* = @ptrCast(engine.openKvReader(std.mem.sliceTo(n, 0), options) catch |err| return kvError(err));
+    return .RINGLOOM_OK;
+}
+export fn ringloom_kv_reader_status(reader: ?*const ringloom_kv_reader, out: ?*ringloom_kv_status_t) Status {
+    clearLastError();
+    const p = reader orelse return kvInvalid();
+    const r: *const kv_api.KvReader = @ptrCast(@alignCast(p));
+    const dest = out orelse return kvInvalid();
+    if (dest.size < @sizeOf(ringloom_kv_status_t)) return kvInvalid();
+    const s = r.status();
+    dest.* = .{ .state = @truncate(@backingInt(s.state)), .replication_live = @intFromBool(s.replication_live), .generation = s.generation, .applied_index = s.applied_index, .applied_leader_epoch = s.applied_leader_epoch, .applied_at_ns = s.applied_at_ns, .local_log_tip_index = s.local_log_tip_index, .lag_entries = s.lag_entries, .heartbeat_age_ms = s.heartbeat_age_ms, .generation_switches = s.generation_switches };
+    return .RINGLOOM_OK;
+}
+export fn ringloom_kv_session_new(reader: ?*ringloom_kv_reader, out: ?*?*ringloom_kv_session) Status {
+    clearLastError();
+    const dest = out orelse return kvInvalid();
+    dest.* = null;
+    const r = kvReader(reader) orelse return kvInvalid();
+    const s = kv_allocator.create(kv_api.KvReadSession) catch return kvError(error.OutOfMemory);
+    s.* = r.newSession() catch |err| {
+        kv_allocator.destroy(s);
+        return kvError(err);
+    };
+    dest.* = @ptrCast(s);
+    return .RINGLOOM_OK;
+}
+export fn ringloom_kv_get(session: ?*ringloom_kv_session, key: ?[*]const u8, key_len: usize, out: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    clearLastError();
+    const len = out_len orelse return kvInvalid();
+    len.* = 0;
+    const s = kvSession(session) orelse return kvInvalid();
+    const k = kvBytes(key, key_len) orelse return kvInvalid();
+    var empty: [0]u8 = .{};
+    const buffer = if (out) |v| v[0..out_cap] else if (out_cap == 0) &empty else return kvInvalid();
+    return switch (s.get(k, buffer)) {
+        .found => |n| blk: {
+            len.* = n;
+            break :blk .RINGLOOM_OK;
+        },
+        .missing => .RINGLOOM_KV_MISSING,
+        .not_ready => .RINGLOOM_NOT_READY,
+        .buffer_too_small => |n| blk: {
+            len.* = n;
+            break :blk .RINGLOOM_ERR_KV_BUFFER_TOO_SMALL;
+        },
+    };
+}
+export fn ringloom_kv_view(session: ?*ringloom_kv_session, key: ?[*]const u8, key_len: usize, out_val: ?*?[*]const u8, out_len: ?*usize) Status {
+    clearLastError();
+    const value = out_val orelse return kvInvalid();
+    value.* = null;
+    const len = out_len orelse return kvInvalid();
+    len.* = 0;
+    const s = kvSession(session) orelse return kvInvalid();
+    const k = kvBytes(key, key_len) orelse return kvInvalid();
+    return switch (s.view(k)) {
+        .found => |v| blk: {
+            value.* = v.ptr;
+            len.* = v.len;
+            break :blk .RINGLOOM_OK;
+        },
+        .missing => .RINGLOOM_KV_MISSING,
+        .not_ready => .RINGLOOM_NOT_READY,
+    };
+}
+export fn ringloom_kv_release(session: ?*ringloom_kv_session) void {
+    if (kvSession(session)) |s| s.release();
+}
+const KvVisit = struct {
+    callback: *const fn (?*anyopaque, [*]const u8, usize, [*]const u8, usize) callconv(.c) c_int,
+    ctx: ?*anyopaque,
+    fn visit(self: *@This(), key: []const u8, value: []const u8) bool {
+        return self.callback(self.ctx, key.ptr, key.len, value.ptr, value.len) != 0;
+    }
+};
+export fn ringloom_kv_for_each(session: ?*ringloom_kv_session, callback: ringloom_kv_visit_fn, ctx: ?*anyopaque) Status {
+    clearLastError();
+    const s = kvSession(session) orelse return kvInvalid();
+    var visitor = KvVisit{ .callback = callback orelse return kvInvalid(), .ctx = ctx };
+    return switch (s.forEach(&visitor, KvVisit.visit).status) {
+        .done, .stopped => .RINGLOOM_OK,
+        .not_ready => .RINGLOOM_NOT_READY,
+        .failed => kvError(error.EngineFailure),
+    };
+}
+export fn ringloom_kv_session_free(session: ?*ringloom_kv_session) void {
+    if (kvSession(session)) |s| {
+        s.deinit();
+        kv_allocator.destroy(s);
+    }
+}
+export fn ringloom_kv_close_reader(reader: ?*ringloom_kv_reader) void {
+    if (kvReader(reader)) |r| r.close();
+}
+fn kvStateChanged(ctx: ?*anyopaque, state: kv_api.KvWriterState, epoch: u64) void {
+    const h: *KvCWriter = @ptrCast(@alignCast(ctx.?));
+    if (h.callback) |cb| cb(h.user_data, @backingInt(state), epoch);
+}
+export fn ringloom_kv_open_writer(client: ?*ringloom_client, name: ?[*:0]const u8, cfg: ?*const ringloom_kv_store_config_t, opts: ?*const ringloom_kv_writer_options_t, out: ?*?*ringloom_kv_writer) Status {
+    clearLastError();
+    const dest = out orelse return kvInvalid();
+    dest.* = null;
+    const c = requireActiveClient(client) orelse return kvInvalid();
+    const n = name orelse return kvInvalid();
+    const config = cfg orelse return kvInvalid();
+    if (config.size < @sizeOf(ringloom_kv_store_config_t)) return kvInvalid();
+    const h = kv_allocator.create(KvCWriter) catch return kvError(error.OutOfMemory);
+    h.* = .{ .writer = undefined, .callback = null, .user_data = null };
+    var options = kv_api.KvWriterOptions{};
+    if (opts) |o| {
+        if (o.size < @sizeOf(ringloom_kv_writer_options_t) or o.acquire > 1) {
+            kv_allocator.destroy(h);
+            return kvInvalid();
+        }
+        options.acquire = @fromBackingInt(o.acquire);
+        options.open_timeout_ms = o.open_timeout_ms;
+        options.max_frame_length = o.max_frame_length;
+        h.callback = o.on_state;
+        h.user_data = o.user_data;
+    }
+    options.on_state = kvStateChanged;
+    options.on_state_user_data = h;
+    const engine = c.service.engine orelse {
+        kv_allocator.destroy(h);
+        return kvError(error.EngineNotRunning);
+    };
+    h.writer = engine.openKvWriter(std.mem.sliceTo(n, 0), config.*, options) catch |err| {
+        kv_allocator.destroy(h);
+        return kvError(err);
+    };
+    dest.* = @ptrCast(h);
+    return .RINGLOOM_OK;
+}
+export fn ringloom_kv_put(writer: ?*ringloom_kv_writer, key: ?[*]const u8, key_len: usize, value: ?[*]const u8, value_len: usize, ttl_ms: i64, ack_mode: u8, out_seq: ?*u64) Status {
+    clearLastError();
+    if (out_seq) |s| s.* = 0;
+    const w = kvWriter(writer) orelse return kvInvalid();
+    const k = kvBytes(key, key_len) orelse return kvInvalid();
+    const v = kvBytes(value, value_len) orelse return kvInvalid();
+    if (ttl_ms < -1) return kvInvalid();
+    const ack = kv_api.AckMode.fromU8(ack_mode) orelse return kvInvalid();
+    return kvWriteResult(w.writer.put(k, v, .{ .ttl_ms = if (ttl_ms == -1) null else @intCast(ttl_ms), .ack_mode = ack }), out_seq);
+}
+export fn ringloom_kv_delete(writer: ?*ringloom_kv_writer, key: ?[*]const u8, key_len: usize, ack_mode: u8, out_seq: ?*u64) Status {
+    clearLastError();
+    if (out_seq) |s| s.* = 0;
+    const w = kvWriter(writer) orelse return kvInvalid();
+    const k = kvBytes(key, key_len) orelse return kvInvalid();
+    const ack = kv_api.AckMode.fromU8(ack_mode) orelse return kvInvalid();
+    return kvWriteResult(w.writer.delete(k, .{ .ack_mode = ack }), out_seq);
+}
+export fn ringloom_kv_clear(writer: ?*ringloom_kv_writer, ack_mode: u8, out_seq: ?*u64) Status {
+    clearLastError();
+    if (out_seq) |s| s.* = 0;
+    const w = kvWriter(writer) orelse return kvInvalid();
+    const ack = kv_api.AckMode.fromU8(ack_mode) orelse return kvInvalid();
+    return kvWriteResult(w.writer.clear(.{ .ack_mode = ack }), out_seq);
+}
+export fn ringloom_kv_begin_batch(writer: ?*ringloom_kv_writer) Status {
+    clearLastError();
+    const w = kvWriter(writer) orelse return kvInvalid();
+    switch (w.writer.state()) {
+        .granted => {},
+        .reasserting => return .RINGLOOM_ERR_TOPIC_LEADER_UNAVAILABLE,
+        else => return .RINGLOOM_ERR_KV_NOT_WRITER,
+    }
+    w.writer.beginBatch();
+    return .RINGLOOM_OK;
+}
+export fn ringloom_kv_commit_batch(writer: ?*ringloom_kv_writer, ack_mode: u8, out_seq: ?*u64) Status {
+    clearLastError();
+    if (out_seq) |s| s.* = 0;
+    const w = kvWriter(writer) orelse return kvInvalid();
+    const ack = kv_api.AckMode.fromU8(ack_mode) orelse return kvInvalid();
+    return kvWriteResult(w.writer.commitBatch(.{ .ack_mode = ack }), out_seq);
+}
+export fn ringloom_kv_is_acked(writer: ?*ringloom_kv_writer, seq: u64) c_int {
+    const w = kvWriter(writer) orelse return 0;
+    return @intFromBool(w.writer.isAcked(seq));
+}
+export fn ringloom_kv_writer_state(writer: ?*const ringloom_kv_writer) c_int {
+    const p = writer orelse return -1;
+    const h: *const KvCWriter = @ptrCast(@alignCast(p));
+    return @backingInt(h.writer.state());
+}
+export fn ringloom_kv_close_writer(writer: ?*ringloom_kv_writer) void {
+    if (kvWriter(writer)) |h| {
+        h.writer.close();
+        kv_allocator.destroy(h);
+    }
+}
+export fn ringloom_kv_store_config_init(out: ?*ringloom_kv_store_config_t) void {
+    if (out) |v| {
+        v.* = .{};
+    }
+}
+export fn ringloom_kv_reader_options_init(out: ?*ringloom_kv_reader_options_t) void {
+    if (out) |v| v.* = .{};
+}
+export fn ringloom_kv_writer_options_init(out: ?*ringloom_kv_writer_options_t) void {
+    if (out) |v| v.* = .{};
+}
+
+test "KV ABI sizes, defaults and validation" {
+    const t = std.testing;
+    try t.expectEqual(@as(usize, 80), @sizeOf(ringloom_kv_store_config_t));
+    try t.expectEqual(@as(usize, 16), @sizeOf(ringloom_kv_reader_options_t));
+    try t.expectEqual(@as(usize, 32), @sizeOf(ringloom_kv_writer_options_t));
+    try t.expectEqual(@as(usize, 72), @sizeOf(ringloom_kv_status_t));
+    var cfg: ringloom_kv_store_config_t = undefined;
+    ringloom_kv_store_config_init(&cfg);
+    try cfg.validate(65536 - 48);
+    var ro: ringloom_kv_reader_options_t = undefined;
+    ringloom_kv_reader_options_init(&ro);
+    try t.expectEqual(@as(u32, 1024), ro.max_readers);
+    var wo: ringloom_kv_writer_options_t = undefined;
+    ringloom_kv_writer_options_init(&wo);
+    try t.expectEqual(@as(u32, 5000), wo.open_timeout_ms);
+    var len: usize = 99;
+    try t.expectEqual(Status.RINGLOOM_ERR_INVALID_ARGUMENT, ringloom_kv_get(null, null, 1, null, 0, &len));
+    try t.expectEqual(@as(usize, 0), len);
+    try t.expectEqual(Status.RINGLOOM_ERR_INVALID_ARGUMENT, ringloom_kv_open_reader(null, "prices", null, null));
+    try t.expectEqual(@as(c_int, -1), ringloom_kv_writer_state(null));
+    try t.expectEqual(@as(c_int, 0), ringloom_kv_is_acked(null, 1));
+    ringloom_kv_release(null);
+    ringloom_kv_session_free(null);
+    ringloom_kv_close_reader(null);
+    ringloom_kv_close_writer(null);
+}
+
+test "KV ABI copying, borrowed views, expiry and iterator stop" {
+    const t = std.testing;
+    const common_kv = ringloom_common.kv;
+    const io = ringloom_common.platform.defaultIo();
+    var dir_buf: [160]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/ringloom-k07-abi-{d}", .{Clock.monotonicNanos()});
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    var cf = try common_kv.control.ControlFile.createOrOpen(dir, 77, common_kv.engine.engine_kind, 511, 4096);
+    defer cf.close();
+    var gen_buf: [200]u8 = undefined;
+    const gdir = try common_kv.control.genDir(&gen_buf, dir, 1);
+    var env = try common_kv.engine.WriteEnv.create(gdir, 8 * 1024 * 1024, 64);
+    defer env.close();
+    var txn = try env.begin();
+    try txn.put("k", .{ .write_index = 1, .expire_at_ns = 0 }, "value");
+    try txn.put("empty", .{ .write_index = 1, .expire_at_ns = 0 }, "");
+    try txn.put("expired", .{ .write_index = 1, .expire_at_ns = 1 }, "dead");
+    try txn.commit();
+    cf.publishGeneration(1);
+    const reader = try kv_api.KvReader.openLocal(t.allocator, dir, .{}, .{});
+    defer ringloom_kv_close_reader(@ptrCast(reader));
+    var session: ?*ringloom_kv_session = null;
+    try t.expectEqual(Status.RINGLOOM_OK, ringloom_kv_session_new(@ptrCast(reader), &session));
+    defer ringloom_kv_session_free(session);
+    var out: [16]u8 = undefined;
+    var len: usize = 0;
+    try t.expectEqual(Status.RINGLOOM_ERR_KV_BUFFER_TOO_SMALL, ringloom_kv_get(session, "k", 1, &out, 1, &len));
+    try t.expectEqual(@as(usize, 5), len);
+    try t.expectEqual(Status.RINGLOOM_OK, ringloom_kv_get(session, "empty", 5, null, 0, &len));
+    try t.expectEqual(@as(usize, 0), len);
+    var value: ?[*]const u8 = null;
+    try t.expectEqual(Status.RINGLOOM_OK, ringloom_kv_view(session, "k", 1, &value, &len));
+    try t.expectEqualStrings("value", value.?[0..len]);
+    var update = try env.begin();
+    try update.put("k", .{ .write_index = 2, .expire_at_ns = 0 }, "new");
+    try update.commit();
+    try t.expectEqual(Status.RINGLOOM_OK, ringloom_kv_get(session, "k", 1, &out, out.len, &len));
+    try t.expectEqualStrings("value", out[0..len]);
+    ringloom_kv_release(session);
+    try t.expectEqual(Status.RINGLOOM_OK, ringloom_kv_get(session, "k", 1, &out, out.len, &len));
+    try t.expectEqualStrings("new", out[0..len]);
+    try t.expectEqual(Status.RINGLOOM_KV_MISSING, ringloom_kv_get(session, "expired", 7, &out, out.len, &len));
+    const Visit = struct {
+        fn callback(ctx: ?*anyopaque, _: [*]const u8, _: usize, _: [*]const u8, _: usize) callconv(.c) c_int {
+            const count: *usize = @ptrCast(@alignCast(ctx.?));
+            count.* += 1;
+            return 0;
+        }
+    };
+    var visits: usize = 0;
+    try t.expectEqual(Status.RINGLOOM_OK, ringloom_kv_for_each(session, Visit.callback, &visits));
+    try t.expectEqual(@as(usize, 1), visits);
 }

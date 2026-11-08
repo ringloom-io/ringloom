@@ -32,6 +32,7 @@ public final class RingloomService implements AutoCloseable {
      * @return started service handle
      */
     public static RingloomService start(ServiceConfig config) {
+        KvCallbackGuard.check();
         Objects.requireNonNull(config, "config");
 
         try (Arena arena = Arena.ofConfined()) {
@@ -267,6 +268,7 @@ public final class RingloomService implements AutoCloseable {
      * Stops the service registration without destroying the Java wrapper.
      */
     public void stop() {
+        KvCallbackGuard.check();
         if (closed.get()) {
             return;
         }
@@ -278,6 +280,7 @@ public final class RingloomService implements AutoCloseable {
      */
     @Override
     public void close() {
+        KvCallbackGuard.check();
         if (!closed.compareAndSet(false, true)) {
             return;
         }
@@ -290,6 +293,7 @@ public final class RingloomService implements AutoCloseable {
     }
 
     void ensureOpen() {
+        KvCallbackGuard.check();
         if (closed.get()) {
             throw new IllegalStateException("RingloomService is closed");
         }

@@ -20,6 +20,15 @@ const RingloomStatus = Object.freeze({
   TOPIC_DISABLED: 13,
   TOPIC_CONFIG_MISMATCH: 14,
   TOPIC_UNKNOWN: 15,
+  KV_MISSING: 32,
+  KV_BUFFER_TOO_SMALL: 33,
+  KV_NOT_WRITER: 34,
+  KV_HELD_BY_OTHER: 35,
+  KV_NOT_AVAILABLE_LOCALLY: 36,
+  KV_ENGINE_MISMATCH: 37,
+  KV_KEY_TOO_LARGE: 38,
+  KV_VALUE_TOO_LARGE: 39,
+  KV_BATCH_FULL: 40,
   INTERNAL: 255,
   isOk(status) {
     return status === 0;
@@ -75,6 +84,7 @@ function throwForStatus(action, status) {
 }
 
 module.exports = {
+  ...require("./kv")(native),
   RingloomStatus,
   AeronPublicationStatus,
   TopicStart,

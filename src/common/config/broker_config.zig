@@ -86,6 +86,73 @@ pub const TopicsConfig = struct {
     }
 };
 
+/// Maximum applier threads (`broker.kv.apply.threads`).
+pub const kv_max_apply_threads: u32 = 16;
+
+pub const KvIdleStrategyName = enum {
+    busy_spin,
+    yield,
+    backoff,
+
+    pub fn fromString(s: []const u8) ?KvIdleStrategyName {
+        const map = std.StaticStringMap(KvIdleStrategyName).initComptime(.{
+            .{ "busy_spin", .busy_spin },
+            .{ "yield", .yield },
+            .{ "yielding", .yield },
+            .{ "backoff", .backoff },
+        });
+        return map.get(s);
+    }
+};
+
+/// Replicated KV store configuration (docs/kv-store-spec.md §16). Disabled by
+/// default; enabling requires `topics.enabled`.
+pub const KvConfig = struct {
+    /// Build stores locally and serve readers. Requires topics.
+    enabled: bool = false,
+    /// Local store root. Empty → `<storage_path>/kv`.
+    path: []const u8 = "",
+    /// Preallocated store slots.
+    max_stores: u32 = 64,
+    /// Number of applier threads; stores are assigned by `store_id % threads`.
+    apply_threads: u32 = 1,
+    /// Maximum log entries per apply transaction.
+    apply_batch_max_entries: u32 = 1024,
+    /// Maximum time to gather a batch before committing, microseconds.
+    apply_batch_max_us: u32 = 50,
+    apply_idle_strategy: KvIdleStrategyName = .backoff,
+    /// CPUs for applier threads: thread `i` pins to `cpu_affinity[i % count]`.
+    /// `apply_cpu_affinity_count == 0` leaves the threads unpinned.
+    apply_cpu_affinity: [kv_max_apply_threads]u32 = @splat(0),
+    apply_cpu_affinity_count: u32 = 0,
+    /// Cap on automatic map-size growth (bytes).
+    map_size_max: u64 = 64 * 1024 * 1024 * 1024,
+    /// Engine reader slots per store.
+    max_readers: u32 = 1024,
+    /// Interval for cleaning up dead reader slots.
+    reader_check_ms: u32 = 1000,
+    /// Warn when a read snapshot is older than this.
+    reader_warn_ms: u32 = 1000,
+    sweep_interval_ms: u32 = 100,
+    sweep_batch: u32 = 1000,
+    /// How long to keep an old generation after switching.
+    generation_grace_ms: u32 = 5000,
+
+    /// Resolves the effective KV root directory into `buffer`.
+    pub fn resolvePath(self: *const KvConfig, storage_path: []const u8, buffer: []u8) std.fmt.BufPrintError![]u8 {
+        if (self.path.len > 0) {
+            return std.fmt.bufPrint(buffer, "{s}", .{self.path});
+        }
+        return std.fmt.bufPrint(buffer, "{s}/kv", .{storage_path});
+    }
+
+    /// CPU for applier thread `index`, or null when unpinned.
+    pub fn cpuForThread(self: *const KvConfig, index: u32) ?u32 {
+        if (self.apply_cpu_affinity_count == 0) return null;
+        return self.apply_cpu_affinity[index % self.apply_cpu_affinity_count];
+    }
+};
+
 pub const BrokerConfig = struct {
     // ── Required ────────────────────────────────────────────────
     node_id: u8,
@@ -158,6 +225,9 @@ pub const BrokerConfig = struct {
 
     // ── Persistent topics ───────────────────────────────────────
     topics: TopicsConfig = .{},
+
+    // ── Replicated KV stores ────────────────────────────────────
+    kv: KvConfig = .{},
 
     // ── Computed (set during validation, not from file) ─────────
     max_counter_id: u32 = 0,

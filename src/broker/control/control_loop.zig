@@ -44,6 +44,11 @@ const topic_admin = @import("../topics/topic_admin.zig");
 const topic_commands = @import("../topics/topic_commands.zig");
 const topic_id_mod = @import("../topics/topic_id.zig");
 const topic_leader_election = @import("../topics/topic_leader_election.zig");
+const kv_control = @import("kv_control.zig");
+const kv_messages = @import("../kv/kv_messages.zig");
+const kv_local_stores = @import("../kv/kv_local_stores.zig");
+const kv_operator = @import("kv_operator_messages");
+const kv_msgs = ringloom_common.message.kv_control_messages;
 
 // ── File-level state for RingBuffer callback dispatch ─────────────────
 //
@@ -204,6 +209,20 @@ pub const ControlLoop = struct {
     /// Throttle interval for ack feedback (ns).
     topic_ack_feedback_interval_ns: i64 = 200 * std.time.ns_per_us,
 
+    // ── KV writer lease (docs/kv-store-spec.md §9) ──────────────────
+    /// Lazily created on the first duty cycle after `topic_subsystem` is set
+    /// and enabled (the application attaches the subsystem after `init`).
+    kv: ?*kv_control.KvControl = null,
+    /// Set false to disable KV control entirely.
+    kv_enabled: bool = true,
+    kv_subsystem: ?*@import("../kv/kv_subsystem.zig").KvSubsystem = null,
+    /// `broker.kv.max.stores`; set before the first `doWork`.
+    kv_max_stores: u32 = 64,
+    max_frame_length: u32 = ringloom_common.platform.constants.default_max_frame_length,
+    /// Reader lookup provided by the KV subsystem (K05). Default: unavailable.
+    kv_local_stores: kv_local_stores.KvLocalStores = .unavailable,
+    kv_init_failed: bool = false,
+
     const Self = @This();
 
     /// Latest ack for one producer. Sent as soon as it changes, then re-sent
@@ -260,11 +279,13 @@ pub const ControlLoop = struct {
         topic_subsystem: ?*topics.TopicSubsystem = null,
         /// Throttle interval for replicate_once ack feedback (ns).
         topic_ack_feedback_interval_ns: i64 = 200 * std.time.ns_per_us,
+        max_frame_length: u32 = ringloom_common.platform.constants.default_max_frame_length,
     };
 
     pub fn init(opts: InitOptions) Self {
         return .{
             .control_rb = opts.control_rb,
+            .max_frame_length = opts.max_frame_length,
             .cmd_queue = opts.cmd_queue,
             .cluster_manager = opts.cluster_manager,
             .counters = opts.counters,
@@ -383,7 +404,13 @@ pub const ControlLoop = struct {
         if (self.topic_subsystem) |ts| {
             work_count += ts.drainStatus(drainTopicStatusHandler, @as(*anyopaque, @ptrCast(self)));
             work_count += self.emitTopicAckFeedbackIfDue(ts, now_ns);
+            if (self.kv_enabled and ts.enabled) {
+                if (self.kv == null and !self.kv_init_failed) self.initKv(ts);
+                if (self.kv) |k| work_count += k.doWork(now_ns);
+            }
         }
+
+        if (self.kv_subsystem) |ks| work_count += ks.doWork(now_ns);
 
         // 4. Update monitoring counters
         self.updateCounters();
@@ -427,6 +454,8 @@ pub const ControlLoop = struct {
         }
         self.allocated_routing_rbs.deinit();
 
+        if (self.kv) |k| k.destroy();
+        self.kv = null;
         self.topic_barrier_max_index.deinit();
         self.topic_pending_acks.deinit();
 
@@ -464,6 +493,12 @@ pub const ControlLoop = struct {
         const template_id = encoding.readTemplateId(payload);
 
         switch (template_id) {
+            kv_operator.TEMPLATE_REBUILD_KV => {
+                const id = kv_operator.decodeRebuild(payload) orelse return;
+                if (self.kv_subsystem) |ks| {
+                    if (!ks.requestRebuild(id)) log.warn("local KV rebuild requested for unknown store {}", .{id});
+                }
+            },
             1 => self.handleRegisterService(payload),
             3 => self.handleSubscribeToServiceUpdates(payload),
             5 => self.handleUnregisterService(payload),
@@ -472,6 +507,12 @@ pub const ControlLoop = struct {
             topic_messages.TEMPLATE_SUBSCRIBE_TOPIC => self.handleSubscribeTopic(payload),
             topic_messages.TEMPLATE_UNREGISTER_TOPIC_PUBLICATION => self.handleUnregisterTopicPublication(payload),
             topic_messages.TEMPLATE_UNSUBSCRIBE_TOPIC => self.handleUnsubscribeTopic(payload),
+            // ── KV control-plane messages (templates 16-24) ──────
+            kv_msgs.TEMPLATE_REGISTER_KV_WRITER,
+            kv_msgs.TEMPLATE_KV_WRITER_REASSERT,
+            kv_msgs.TEMPLATE_UNREGISTER_KV_WRITER,
+            kv_msgs.TEMPLATE_OPEN_KV_READER,
+            => self.handleKvServiceMessage(template_id, payload),
             else => {
                 log.warn("unknown control template_id: {}", .{template_id});
             },
@@ -654,6 +695,7 @@ pub const ControlLoop = struct {
             return;
         };
         defer self.allocator.free(@constCast(removed.service_name));
+        if (self.kv) |k| k.onServiceGone(self.local_node_id, service_id);
 
         log.info("service removed: name={s}, id={}", .{
             removed.service_name,
@@ -720,6 +762,8 @@ pub const ControlLoop = struct {
                 .topic_applied_query => |e| self.handleTopicAppliedQuery(e.data),
                 .topic_applied_reply => |e| self.handleTopicAppliedReply(e.data),
                 .topic_ack_feedback => |e| self.handleTopicAckFeedback(e.data),
+                .kv_request => |e| self.handleKvAdminRequest(e.data),
+                .kv_reply => |e| self.handleKvAdminReply(e.data),
                 else => {},
             }
             count += 1;
@@ -784,6 +828,7 @@ pub const ControlLoop = struct {
         for (service_ids[0..count]) |service_id| {
             const removed = self.service_registry.remove(service_id, node_id) orelse continue;
             defer self.allocator.free(@constCast(removed.service_name));
+            if (self.kv) |k| k.onServiceGone(node_id, service_id);
             if (removed.leader_election_enabled and self.cluster_manager.isClusterLeader()) {
                 _ = self.evaluateAndBroadcastServiceLeader(removed.service_name, -1);
             }
@@ -848,6 +893,7 @@ pub const ControlLoop = struct {
         ) orelse return;
 
         defer self.allocator.free(@constCast(removed.service_name));
+        if (self.kv) |k| k.onServiceGone(body.node_id, @intCast(body.service_id));
 
         log.info("remote service removed: name={s}, id={}, node={}", .{
             name, body.service_id, body.node_id,
@@ -1567,11 +1613,17 @@ pub const ControlLoop = struct {
             return;
         };
 
-        const result = ts.registerPublication(name, msg.config, platform.Clock.monotonicNanos(), msg.local_service_id);
+        // Reserved `__kv.` names are only for the KV subsystem, which opts in
+        // with msg_flag_allow_reserved; everyone else gets TOPIC_NAME_RESERVED.
+        const access = topics.subsystem.AccessOptions{
+            .allow_reserved = (msg.flags & topic_messages.msg_flag_allow_reserved) != 0,
+        };
+        const result = ts.registerPublicationOpts(name, msg.config, platform.Clock.monotonicNanos(), msg.local_service_id, access);
 
         // Reply with TopicPublicationResponse.
         const status: topic_messages.PublicationStatus = switch (result.status) {
             .ok => .ok,
+            .name_reserved => .name_reserved,
             .config_mismatch => .config_mismatch,
             .collision => .collision,
             .disabled => .disabled,
@@ -1612,10 +1664,14 @@ pub const ControlLoop = struct {
         };
 
         const earliest = msg.start_position == @backingInt(topic_messages.StartPosition.earliest);
-        const result = ts.subscribe(name, earliest);
+        const access = topics.subsystem.AccessOptions{
+            .allow_reserved = (msg.flags & topic_messages.msg_flag_allow_reserved) != 0,
+        };
+        const result = ts.subscribeOpts(name, earliest, access);
 
         const status: topic_messages.SubscriptionStatus = switch (result.status) {
             .ok => .ok,
+            .name_reserved => .name_reserved,
             .unknown_topic => .unknown_topic,
             .disabled => .disabled,
         };
@@ -1792,6 +1848,132 @@ pub const ControlLoop = struct {
         );
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // KV writer lease — glue (see kv_control.zig)
+    // ─────────────────────────────────────────────────────────────
+
+    fn initKv(self: *Self, ts: *topics.TopicSubsystem) void {
+        const host = kv_control.Host{
+            .ctx = self,
+            .write_to_service = kvWriteToService,
+            .send_admin_request = kvSendAdminRequest,
+            .send_admin_reply = kvSendAdminReply,
+            .is_service_registered = kvIsServiceRegistered,
+            .create_kv_topic = kvCreateTopic,
+        };
+        const k = kv_control.KvControl.create(self.allocator, ts, self.local_node_id, host, .{
+            .max_stores = self.kv_max_stores,
+            .max_frame_length = self.max_frame_length,
+        }) catch |err| {
+            log.err("KV control init failed: {}", .{err});
+            self.kv_init_failed = true;
+            return;
+        };
+        k.setLocalStores(self.kv_local_stores);
+        self.kv = k;
+    }
+
+    /// Install the reader lookup (call from the KV subsystem once it is up).
+    pub fn setKvLocalStores(self: *Self, ls: kv_local_stores.KvLocalStores) void {
+        self.kv_local_stores = ls;
+        if (self.kv) |k| k.setLocalStores(ls);
+    }
+
+    fn handleKvServiceMessage(self: *Self, template_id: u16, payload: []const u8) void {
+        if (self.kv == null) {
+            // KV control is lazily created in doWork; make sure a message that
+            // arrives first still gets an answer instead of being dropped.
+            if (self.topic_subsystem) |ts| {
+                if (self.kv_enabled and ts.enabled and !self.kv_init_failed) self.initKv(ts);
+            }
+        }
+        if (self.kv) |k| {
+            k.handleServiceMessage(template_id, payload, platform.Clock.monotonicNanos());
+            return;
+        }
+        self.replyKvDisabled(template_id, payload);
+    }
+
+    /// Topics disabled / KV control unavailable: answer so the service does not wait.
+    fn replyKvDisabled(self: *Self, template_id: u16, payload: []const u8) void {
+        var buf: [@sizeOf(kv_msgs.KvReaderResponseMsg)]u8 = undefined;
+        switch (template_id) {
+            kv_msgs.TEMPLATE_REGISTER_KV_WRITER => {
+                const m = kv_msgs.decode(kv_msgs.RegisterKvWriterMsg, payload) orelse return;
+                const n = kv_msgs.encodeKvWriterResponse(&buf, .topics_disabled, 0, m.session_nonce, 0, 0, -1, m.config);
+                _ = self.writeToServiceControl(m.local_service_id, buf[0..n]);
+            },
+            kv_msgs.TEMPLATE_KV_WRITER_REASSERT => {
+                const m = kv_msgs.decode(kv_msgs.KvWriterReassertMsg, payload) orelse return;
+                const n = kv_msgs.encodeKvWriterReassertResponse(&buf, .topics_disabled, 0, m.session_nonce, 0, 0, -1);
+                _ = self.writeToServiceControl(m.local_service_id, buf[0..n]);
+            },
+            kv_msgs.TEMPLATE_OPEN_KV_READER => {
+                const m = kv_msgs.decode(kv_msgs.OpenKvReaderMsg, payload) orelse return;
+                const n = kv_msgs.encodeKvReaderResponse(&buf, .kv_not_available_locally, 0, 0, .{}, "").?;
+                _ = self.writeToServiceControl(m.local_service_id, buf[0..n]);
+            },
+            else => {},
+        }
+    }
+
+    fn handleKvAdminRequest(self: *Self, data: [@sizeOf(kv_messages.KvAdminRequestBody)]u8) void {
+        const k = self.kv orelse return;
+        var body: kv_messages.KvAdminRequestBody = undefined;
+        @memcpy(std.mem.asBytes(&body), &data);
+        k.handleAdminRequest(body, platform.Clock.monotonicNanos());
+    }
+
+    fn handleKvAdminReply(self: *Self, data: [@sizeOf(kv_messages.KvAdminReplyBody)]u8) void {
+        const k = self.kv orelse return;
+        var body: kv_messages.KvAdminReplyBody = undefined;
+        @memcpy(std.mem.asBytes(&body), &data);
+        k.handleAdminReply(body);
+    }
+
+    fn kvWriteToService(ctx: *anyopaque, service_id: i32, bytes: []const u8) bool {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.writeToServiceControl(service_id, bytes);
+    }
+
+    fn kvSendAdminRequest(ctx: *anyopaque, node_id: u8, body: kv_messages.KvAdminRequestBody) void {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        self.sendAdminTo(node_id, kv_messages.KvAdminRequestBody, kv_messages.TEMPLATE_KV_REQUEST, body);
+    }
+
+    fn kvSendAdminReply(ctx: *anyopaque, node_id: u8, body: kv_messages.KvAdminReplyBody) void {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        self.sendAdminTo(node_id, kv_messages.KvAdminReplyBody, kv_messages.TEMPLATE_KV_REPLY, body);
+    }
+
+    fn kvIsServiceRegistered(ctx: *anyopaque, node_id: u8, service_id: i32) bool {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.service_registry.getInstancePtr(service_id, node_id) != null;
+    }
+
+    fn kvCreateTopic(ctx: *anyopaque, topic_name: []const u8, roll_scheme: []const u8) topics.TopicSubsystem.RegisterResult {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.createKvStoreTopic(self.topic_subsystem.?, topic_name, roll_scheme);
+    }
+
+    /// Unicast one admin message to a single peer broker.
+    fn sendAdminTo(self: *Self, peer_id: u8, comptime BodyType: type, template_id: u16, body: BodyType) void {
+        const transport_ref = self.broker_udp_transport orelse return;
+        const payload_offset = admin.AeronAdminHeader.size;
+        const admin_payload_len = admin.encodeAdminMessage(self.encode_buf[payload_offset..], BodyType, template_id, body);
+        const frame_len = admin.encodeAeronAdminFrame(
+            &self.encode_buf,
+            self.local_node_id,
+            peer_id,
+            self.nextAdminEpoch(),
+            self.encode_buf[payload_offset..][0..admin_payload_len],
+        ) catch |err| {
+            log.warn("failed to encode admin UDP frame template={} to node {}: {}", .{ template_id, peer_id, err });
+            return;
+        };
+        self.forwardAdminFrame(transport_ref, peer_id, template_id, self.encode_buf[0..frame_len]);
+    }
+
     /// Helper: write a control message to a service's control ring buffer.
     fn writeToServiceControl(self: *Self, service_id: i32, payload: []const u8) bool {
         const buffers = self.service_registry.getLocalBuffers(service_id) orelse return false;
@@ -1917,8 +2099,21 @@ pub const ControlLoop = struct {
                     _ = ts.ctrl_in.enqueue(.{ .promote_to_leader = .{ .topic_id = b.topic_id } });
                 }
             },
+            .kv_append_done, .replica_reset => {
+                if (self.topic_subsystem) |ts| ts.dispatchKvStatus(status);
+            },
             .master_hwm, .replica_applied, .replicated_hwm, .session_state => {},
         }
+    }
+
+    /// Control thread: creates the backing topic `__kv.<store>` for a KV store
+    /// on the topic leader (retention 0, `flag_kv_store`) and schedules the
+    /// TopicCreated rebroadcast so replicas open it. See
+    /// `TopicSubsystem.createKvStoreTopic` for the result statuses.
+    pub fn createKvStoreTopic(self: *Self, ts: *topics.TopicSubsystem, topic_name: []const u8, roll_scheme: []const u8) topics.TopicSubsystem.RegisterResult {
+        const result = ts.createKvStoreTopic(topic_name, roll_scheme, platform.Clock.monotonicNanos());
+        if (result.newly_created and result.status == .ok) self.next_topic_rebroadcast_ns = 0;
+        return result;
     }
 
     /// Emit throttled per-producer TopicAckFeedback: broadcast to peer brokers

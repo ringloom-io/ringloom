@@ -371,3 +371,112 @@ The final unchanged wrapper also completed a `ring backpressure` validation run:
 --suites 'ring backpressure'`. Its report and raw JSON are retained there. This
 verifies collection after the wrapper edits; it is separate from the three-run
 ring/topic snapshot above.
+
+## Partial-suite snapshot (kv only) — 2026-11-08
+
+First KV measurements. **Only the `kv` suite was run**; every other section
+above is historical and was not refreshed. No earlier KV baseline exists, so
+`bench-report.py` was run without `--baseline` and nothing here is a regression
+or improvement claim. These are exploratory shared-workstation results.
+
+Command (serial, nothing else benchmarked concurrently):
+
+```sh
+scripts/bench-all.sh --output-dir /tmp/ringloom-kv-bench-20261108a --repeat 3 --suites kv
+python3 scripts/bench-report.py /tmp/ringloom-kv-bench-20261108a
+```
+
+Raw JSON (`run-{1,2,3}/kv/*.json`), per-run `kv.log`, `build.log`,
+`metadata.json`, `working-tree.patch` and the wrapper's `report.md` are retained
+locally at `/tmp/ringloom-kv-bench-20261108a/` (temporary storage; archive before
+cleanup). The wrapper's `report.md` was rendered before the KV report tables were
+extended; `report-regenerated.md` in the same directory is the output of the current
+`bench-report.py` on the same raw JSON, and that is what's pasted below.
+
+- **Commit:** `d2bbbac4beafc0fbbf1bcbde46825571dd8df73a`, **working tree dirty**
+  (tracked diff in `working-tree.patch`; untracked KV sources such as
+  `src/perf/kv_bench.zig`, `src/perf/kv_scale_bench.zig` and
+  `docs/kv-store-spec.md` are not in that patch).
+- **Host:** AMD Ryzen 7 8845HS, 16 online CPUs, SMT on, no isolated CPUs,
+  governor `performance`, kernel 7.2.15-1-omarchy, Zig 0.17.1, ReleaseFast.
+  Load average at start 0.65 0.85 0.81. No host tuning was changed.
+- **Integrity:** 3/3 runs completed with wrapper exit 0. `kv-local-serial`:
+  1,000 published / 1,000 visible / 0 failed in every run. Scale runs: `failed` 0,
+  every entry iterated (1k / 1M / 10M), 80,000 of 80,000 parallel gets completed.
+  Read-path Zig and LMDB allocations were 0 in every run (the harness fails on any).
+- **Spread:** `(max-min)/median` across runs is largest for p99 tails on short runs:
+  1M get p99 39% (5,060 / 3,717 / 3,598 ns), 1k get/miss p99 up to 28%,
+  `kv-local-serial` writer/get p99 up to 19%. p50s, setup, iteration and
+  parallel timings are within ~9%. Treat p99s as indicative only.
+
+### Measurement definitions
+
+- **kv-local-serial** (`src/perf/kv_bench.zig` → `ringloom-test-kv-service --mode bench`):
+  one broker with KV enabled, same host. 1,000 sequential puts (100 B value,
+  `replicate_once`, single broker so no remote replica), each followed by waiting
+  for the write to be acknowledged. *Writer p50/p99* times only the `put` call;
+  *Serial write+ack total ns* is wall time for all 1,000 put+ack cycles
+  (median 237.0 ms, i.e. ~237 µs per serial write, not a throughput figure).
+  Gets then repeatedly read **one hot key** (`visible`) and one absent key,
+  100,000 times each, on a 1,001-entry store.
+- **native-reader-scale** (`src/perf/kv_scale_bench.zig`): the LMDB store is
+  populated directly by the engine in 1,000-put transactions (*Setup ns*; this is
+  **not** applier or topic throughput), then opened by the native reader. Gets read
+  20,000 keys with a strided pattern (`i*7919 mod N`), so at 1M/10M they are
+  spread across the store, not a warm hot key. Views re-read the same key set inside one
+  session after the get pass. *Parallel* = 4 threads, each its own session,
+  20,000 gets each, wall time from start gate to join. No broker, topic, or
+  visibility path is involved.
+- **kv-engine-alloc**: 1,000 single-put LMDB write transactions after warmup,
+  counting LMDB allocations (engine only, not the applier).
+
+### Results (field medians of 3 runs)
+
+## KV bounded same-host serial workload
+
+| Scenario | Entries | Published | Visible | Failed | Get p50 ns | Get p99 ns | Miss p99 ns | Writer p99 ns | Serial write+ack total ns | Iteration ns | Read Zig allocs | Read LMDB allocs |
+|----------|---------|-----------|---------|--------|------------|------------|-------------|---------------|---------------------------|--------------|-----------------|------------------|
+| kv-local-serial | 1,001 | 1,000 | 1,000 | 0 | 120 | 160 | 150 | 4,889 | 237,005,179 | 30,478 | 0 | 0 |
+
+Writer p50 (raw JSON, not in table): 421 / 391 / 411 ns.
+
+## KV native reader scale
+
+| Entries | Failed | Get p50 ns | Get p99 ns | Miss p50 ns | Miss p99 ns | View p50 ns | View p99 ns | Iteration ns | Iterated | Reader threads | Parallel gets | Parallel ns | Setup ns | Read Zig allocs | Read LMDB allocs |
+|---------|--------|------------|------------|-------------|-------------|-------------|-------------|--------------|----------|----------------|---------------|-------------|----------|-----------------|------------------|
+| 1,000 | 0 | 140 | 191 | 120 | 180 | 100 | 121 | 6,423 | 1,000 | 4 | 80,000 | 4,106,587 | 335,769 | 0 | 0 |
+| 1,000,000 | 0 | 781 | 3,717 | 251 | 430 | 642 | 1,373 | 14,822,321 | 1,000,000 | 4 | 80,000 | 17,548,218 | 451,243,227 | 0 | 0 |
+| 10,000,000 | 0 | 3,406 | 7,795 | 341 | 511 | 1,053 | 2,395 | 153,906,634 | 10,000,000 | 4 | 80,000 | 26,871,757 | 4,868,571,913 | 0 | 0 |
+
+## KV engine write-transaction allocations
+
+| Transactions | LMDB allocs | LMDB allocs per txn |
+|--------------|-------------|---------------------|
+| 1,000 | 999 | 1.0 |
+
+### Against the initial targets in `docs/kv-store-spec.md` §14.2
+
+These numbers are not directly comparable to the targets, so this is not a verdict:
+
+- *Get hit at 1M, warm, p50 ≤ 300 ns / p99 ≤ 1 µs*: measured 781 / 3,717 ns, but
+  with a strided spread-key pattern rather than a warm working set. A warm-key 1M
+  run has not been measured.
+- *View p50 ≤ 150 ns*: 100 ns at 1k; 642 ns at 1M and 1,053 ns at 10M (spread keys).
+- *Writer `put` p99 ≤ 1 µs (`fire_and_forget`)*: not measured. The measured
+  writer p99 of 4,889 ns uses `replicate_once` on a 1,001-entry store.
+
+### Not yet measured (spec §14.3 items without numbers)
+
+- End-to-end writer → reader **visibility latency**, on one host and **across
+  two hosts** (no cross-host KV run exists; loopback nodes are not physical hosts).
+- **Applier throughput** (batched, 100 B values, target ≥ 500k puts/s). Scale
+  setup time measures direct engine population only, and kv-local-serial is
+  ack-serialized.
+- **Rebuild time** from a 1M-entry log (§8.5), generation switch, and map growth cost.
+- Writer `put` latency in `fire_and_forget` mode, and writer latency under
+  concurrent load or with multiple writers.
+- Warm-key get latency at 1M/10M entries, and multi-reader scaling beyond one fixed
+  4-thread point (per-thread latency histograms, varying thread counts,
+  multi-process readers, readers running concurrently with an active applier).
+- Per-operation allocation counts on the applier/write path through the broker
+  (only the engine-only transaction count above was measured).

@@ -120,3 +120,22 @@ test "service module exports canonical service APIs" {
     _ = IpcProducer;
     _ = IpcConsumer;
 }
+
+pub const kv = @import("kv.zig");
+pub const KvReader = kv.KvReader;
+pub const KvReadSession = kv.KvReadSession;
+pub const KvWriter = kv.KvWriter;
+comptime {
+    _ = kv;
+}
+pub const KvStoreConfig = kv.KvStoreConfig;
+pub const KvReaderOptions = kv.KvReaderOptions;
+pub const KvWriterOptions = kv.KvWriterOptions;
+pub const KvPutOpts = kv.KvPutOpts;
+pub const KvWriteOpts = kv.KvWriteOpts;
+pub const KvStatus = kv.KvStatus;
+pub const KvGetResult = kv.KvGetResult;
+pub const KvViewResult = kv.KvViewResult;
+pub const KvIterResult = kv.KvIterResult;
+pub const KvWriteResult = kv.KvWriteResult;
+pub const KvWriterState = kv.KvWriterState;

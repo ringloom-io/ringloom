@@ -10,6 +10,7 @@
 #include <cstring>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -38,6 +39,15 @@ enum class Status : int {
     topic_disabled = RINGLOOM_ERR_TOPIC_DISABLED,
     topic_config_mismatch = RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH,
     topic_unknown = RINGLOOM_ERR_TOPIC_UNKNOWN,
+    kv_missing = RINGLOOM_KV_MISSING,
+    kv_buffer_too_small = RINGLOOM_ERR_KV_BUFFER_TOO_SMALL,
+    kv_not_writer = RINGLOOM_ERR_KV_NOT_WRITER,
+    kv_held_by_other = RINGLOOM_ERR_KV_HELD_BY_OTHER,
+    kv_not_available_locally = RINGLOOM_ERR_KV_NOT_AVAILABLE_LOCALLY,
+    kv_engine_mismatch = RINGLOOM_ERR_KV_ENGINE_MISMATCH,
+    kv_key_too_large = RINGLOOM_ERR_KV_KEY_TOO_LARGE,
+    kv_value_too_large = RINGLOOM_ERR_KV_VALUE_TOO_LARGE,
+    kv_batch_full = RINGLOOM_ERR_KV_BATCH_FULL,
     internal = RINGLOOM_ERR_INTERNAL,
 };
 
@@ -259,6 +269,196 @@ private:
     ringloom_buffer_claim_t claim_{};
 };
 
+// KV option wrappers preserve every ABI field and use native defaults.
+struct KvStoreConfig : ringloom_kv_store_config_t {
+    KvStoreConfig() { ringloom_kv_store_config_init(this); }
+};
+struct KvReaderOptions : ringloom_kv_reader_options_t {
+    KvReaderOptions() { ringloom_kv_reader_options_init(this); }
+};
+struct KvWriterOptions : ringloom_kv_writer_options_t {
+    KvWriterOptions() { ringloom_kv_writer_options_init(this); }
+};
+using KvStatus = ringloom_kv_status_t;
+enum class KvWriterState : int {
+    granted = RINGLOOM_KV_GRANTED, queued = RINGLOOM_KV_QUEUED,
+    revoked = RINGLOOM_KV_REVOKED, reasserting = RINGLOOM_KV_REASSERTING,
+};
+enum class KvAcquire : std::uint8_t { fail_if_held = 0, wait = 1 };
+enum class KvTtlClock : std::uint8_t { precise = 0, coarse = 1 };
+struct KvWriteResult {
+    Status status;
+    std::uint64_t sequence;
+};
+struct KvGetResult {
+    Status status;
+    std::size_t length;
+};
+struct KvViewResult {
+    Status status;
+    std::string_view value; // Borrowed until session release/close.
+};
+
+class KvSession {
+public:
+    KvSession(std::shared_ptr<ringloom_kv_reader_t> reader, ringloom_kv_session_t *handle)
+        : state_(makeState(std::move(reader), handle)) {}
+    ~KvSession() { close(); }
+    KvSession(const KvSession &) = delete;
+    KvSession &operator=(const KvSession &) = delete;
+    KvSession(KvSession &&) = delete;
+    KvSession &operator=(KvSession &&) = delete;
+    KvGetResult get(std::string_view key, void *out, std::size_t capacity) noexcept {
+        if (!state_ || state_->busy) return {Status::invalid_argument, 0};
+        std::size_t length = 0;
+        const auto status = static_cast<Status>(ringloom_kv_get(state_->handle, bytes(key), key.size(),
+            static_cast<std::uint8_t *>(out), capacity, &length));
+        return {status, length};
+    }
+    KvViewResult view(std::string_view key) noexcept {
+        if (!state_ || state_->busy) return {Status::invalid_argument, {}};
+        const std::uint8_t *value = nullptr;
+        std::size_t length = 0;
+        const auto status = static_cast<Status>(ringloom_kv_view(state_->handle, bytes(key), key.size(), &value, &length));
+        return {status, status == Status::ok && length != 0
+            ? std::string_view(reinterpret_cast<const char *>(value), length) : std::string_view{}};
+    }
+    void release() noexcept {
+        if (!state_) return;
+        if (state_->busy) state_->release_pending = true;
+        else ringloom_kv_release(state_->handle);
+    }
+    // Return false to stop. Exceptions are caught at the C boundary and rethrown.
+    Status forEach(const std::function<bool(std::string_view, std::string_view)> &visitor) {
+        if (!visitor || !state_ || state_->busy) return Status::invalid_argument;
+        // Keep native resources alive even if the callback destroys this wrapper.
+        auto state = state_;
+        state->busy = true;
+        struct Guard {
+            State &state;
+            ~Guard() {
+                state.busy = false;
+                if (state.release_pending) {
+                    state.release_pending = false;
+                    ringloom_kv_release(state.handle);
+                }
+            }
+        } guard{*state};
+        struct Context {
+            const std::function<bool(std::string_view, std::string_view)> &visitor;
+            std::exception_ptr error;
+        } context{visitor, nullptr};
+        const auto status = static_cast<Status>(ringloom_kv_for_each(state->handle,
+            [](void *opaque, const std::uint8_t *key, std::size_t kn,
+               const std::uint8_t *value, std::size_t vn) noexcept -> int {
+                auto &ctx = *static_cast<Context *>(opaque);
+                try {
+                    return ctx.visitor(kn ? std::string_view(reinterpret_cast<const char *>(key), kn) : std::string_view{},
+                        vn ? std::string_view(reinterpret_cast<const char *>(value), vn) : std::string_view{}) ? 1 : 0;
+                } catch (...) { ctx.error = std::current_exception(); return 0; }
+            }, &context));
+        if (context.error) std::rethrow_exception(context.error);
+        return status;
+    }
+    // Detaching also permits destruction from a callback: forEach owns the state.
+    void close() noexcept { state_.reset(); }
+private:
+    struct State {
+        std::shared_ptr<ringloom_kv_reader_t> reader;
+        ringloom_kv_session_t *handle;
+        bool busy = false;
+        bool release_pending = false;
+        State(std::shared_ptr<ringloom_kv_reader_t> r, ringloom_kv_session_t *h)
+            : reader(std::move(r)), handle(h) {}
+        ~State() { if (handle) ringloom_kv_session_free(handle); }
+    };
+    // Takes ownership of handle; frees it if state allocation fails.
+    static std::shared_ptr<State> makeState(std::shared_ptr<ringloom_kv_reader_t> reader,
+                                            ringloom_kv_session_t *handle) {
+        if (!handle) throw std::invalid_argument("KV session handle must not be null");
+        try {
+            return std::make_shared<State>(std::move(reader), handle);
+        } catch (...) {
+            ringloom_kv_session_free(handle);
+            throw;
+        }
+    }
+    static const std::uint8_t *bytes(std::string_view value) noexcept {
+        return reinterpret_cast<const std::uint8_t *>(value.data());
+    }
+    std::shared_ptr<State> state_;
+};
+
+class KvReader {
+public:
+    explicit KvReader(ringloom_kv_reader_t *handle) : handle_(handle, ringloom_kv_close_reader) {
+        if (!handle) throw std::invalid_argument("KV reader handle must not be null");
+    }
+    KvReader(const KvReader &) = delete;
+    KvReader &operator=(const KvReader &) = delete;
+    KvReader(KvReader &&) = delete;
+    KvReader &operator=(KvReader &&) = delete;
+    KvStatus status() const {
+        KvStatus result{};
+        result.size = sizeof(result);
+        throwIfNotOk("ringloom_kv_reader_status", static_cast<Status>(ringloom_kv_reader_status(handle_.get(), &result)));
+        return result;
+    }
+    KvSession newSession() {
+        ringloom_kv_session_t *session = nullptr;
+        throwIfNotOk("ringloom_kv_session_new", static_cast<Status>(ringloom_kv_session_new(handle_.get(), &session)));
+        return KvSession(handle_, session);
+    }
+    // Native close is deferred until all sessions have been freed.
+    void close() noexcept { handle_.reset(); }
+private:
+    std::shared_ptr<ringloom_kv_reader_t> handle_;
+};
+
+class KvWriter {
+public:
+    explicit KvWriter(ringloom_kv_writer_t *handle) : handle_(handle) {
+        if (!handle_) throw std::invalid_argument("KV writer handle must not be null");
+    }
+    ~KvWriter() { close(); }
+    KvWriter(const KvWriter &) = delete;
+    KvWriter &operator=(const KvWriter &) = delete;
+    KvWriter(KvWriter &&) = delete;
+    KvWriter &operator=(KvWriter &&) = delete;
+    // ttl_ms: -1 uses the store default, 0 never expires, positive values expire.
+    KvWriteResult put(std::string_view key, std::string_view value, std::int64_t ttl_ms = -1,
+                      TopicAckMode ack = TopicAckMode::fire_and_forget) noexcept {
+        std::uint64_t seq = 0;
+        auto status = static_cast<Status>(ringloom_kv_put(handle_, bytes(key), key.size(),
+            bytes(value), value.size(), ttl_ms, static_cast<std::uint8_t>(ack), &seq));
+        return {status, seq};
+    }
+    KvWriteResult erase(std::string_view key, TopicAckMode ack = TopicAckMode::fire_and_forget) noexcept {
+        std::uint64_t seq = 0;
+        auto status = static_cast<Status>(ringloom_kv_delete(handle_, bytes(key), key.size(), static_cast<std::uint8_t>(ack), &seq));
+        return {status, seq};
+    }
+    KvWriteResult clear(TopicAckMode ack = TopicAckMode::fire_and_forget) noexcept {
+        std::uint64_t seq = 0;
+        auto status = static_cast<Status>(ringloom_kv_clear(handle_, static_cast<std::uint8_t>(ack), &seq));
+        return {status, seq};
+    }
+    Status beginBatch() noexcept { return static_cast<Status>(ringloom_kv_begin_batch(handle_)); }
+    KvWriteResult commitBatch(TopicAckMode ack = TopicAckMode::fire_and_forget) noexcept {
+        std::uint64_t seq = 0;
+        auto status = static_cast<Status>(ringloom_kv_commit_batch(handle_, static_cast<std::uint8_t>(ack), &seq));
+        return {status, seq};
+    }
+    bool isAcked(std::uint64_t sequence) const noexcept { return ringloom_kv_is_acked(handle_, sequence) > 0; }
+    KvWriterState state() const noexcept { return static_cast<KvWriterState>(ringloom_kv_writer_state(handle_)); }
+    void close() noexcept { if (handle_) { ringloom_kv_close_writer(handle_); handle_ = nullptr; } }
+private:
+    static const std::uint8_t *bytes(std::string_view value) noexcept {
+        return reinterpret_cast<const std::uint8_t *>(value.data());
+    }
+    ringloom_kv_writer_t *handle_;
+};
+
 // Forward declarations for topic types used in Client methods.
 class TopicPublisher;
 class TopicSubscription;
@@ -354,6 +554,22 @@ public:
     /// Subscribe to a persistent topic.
     TopicSubscription subscribeTopic(std::string_view topic_name, TopicStart start = TopicStart::earliest);
 
+    KvReader openKvReader(std::string_view name, const KvReaderOptions &options = {}) {
+        validateKvName(name);
+        ringloom_kv_reader_t *reader = nullptr;
+        throwIfNotOk("ringloom_kv_open_reader", static_cast<Status>(
+            ringloom_kv_open_reader(handle_, std::string(name).c_str(), &options, &reader)));
+        return KvReader(reader);
+    }
+    KvWriter openKvWriter(std::string_view name, const KvStoreConfig &config = {},
+                          const KvWriterOptions &options = {}) {
+        validateKvName(name);
+        ringloom_kv_writer_t *writer = nullptr;
+        throwIfNotOk("ringloom_kv_open_writer", static_cast<Status>(
+            ringloom_kv_open_writer(handle_, std::string(name).c_str(), &config, &options, &writer)));
+        return KvWriter(writer);
+    }
+
     std::vector<TargetService> targetServices() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return target_services_;
@@ -432,6 +648,10 @@ public:
     }
 
 private:
+    static void validateKvName(std::string_view name) {
+        if (name.empty() || name.find('\0') != std::string_view::npos)
+            throw std::invalid_argument("KV name must be nonempty and contain no NUL");
+    }
     Status setNativeLifecycleHandler() noexcept {
         return toStatus(ringloom_client_set_lifecycle_handler(handle_, &Client::dispatchLifecycle, this));
     }

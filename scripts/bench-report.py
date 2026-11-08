@@ -276,7 +276,48 @@ def section_backpressure(results: dict) -> str:
     return "## Backpressure\n\n" + table(["Scenario", "Size (B)", "Sent", "Send failures", "msgs/sec"], rows)
 
 
+def section_kv(results: dict) -> str:
+    parts = []
+    rows = []
+    for _, name, d in pick(results, r"kv/.*\.json$"):
+        if d.get("scenario") in ("native-reader-scale", "kv-engine-alloc"):
+            continue
+        rows.append([str(d.get("scenario", name)), num(d.get("entries")),
+                     num(d.get("published")), num(d.get("visible")), num(d.get("failed")),
+                     num(d.get("get_p50_ns")), num(d.get("get_p99_ns")),
+                     num(d.get("miss_p99_ns")), num(d.get("writer_p99_ns")), num(d.get("apply_ns")),
+                     num(d.get("iteration_ns")), num(d.get("read_zig_allocs")),
+                     num(d.get("read_engine_allocs"))])
+    if rows:
+        parts.append("## KV bounded same-host serial workload\n\n" + table(
+            ["Scenario", "Entries", "Published", "Visible", "Failed", "Get p50 ns", "Get p99 ns", "Miss p99 ns", "Writer p99 ns",
+             "Serial write+ack total ns", "Iteration ns", "Read Zig allocs", "Read LMDB allocs"], rows))
+    rows = []
+    for _, name, d in pick(results, r"kv/.*\.json$"):
+        if d.get("scenario") != "native-reader-scale":
+            continue
+        rows.append([num(d.get("entries")), num(d.get("failed")), num(d.get("get_p50_ns")), num(d.get("get_p99_ns")),
+                     num(d.get("miss_p50_ns")), num(d.get("miss_p99_ns")), num(d.get("view_p50_ns")),
+                     num(d.get("view_p99_ns")), num(d.get("iteration_ns")), num(d.get("iterated")),
+                     num(d.get("reader_threads")), num(d.get("parallel_operations")), num(d.get("parallel_ns")),
+                     num(d.get("setup_ns")), num(d.get("read_zig_allocs")), num(d.get("read_engine_allocs"))])
+    if rows:
+        parts.append("## KV native reader scale\n\n" + table(
+            ["Entries", "Failed", "Get p50 ns", "Get p99 ns", "Miss p50 ns", "Miss p99 ns", "View p50 ns", "View p99 ns",
+             "Iteration ns", "Iterated", "Reader threads", "Parallel gets", "Parallel ns", "Setup ns",
+             "Read Zig allocs", "Read LMDB allocs"], rows))
+    rows = []
+    for _, name, d in pick(results, r"kv/.*\.json$"):
+        if d.get("scenario") == "kv-engine-alloc":
+            rows.append([num(d.get("transactions")), num(d.get("engine_allocs")), num(d.get("engine_allocs_per_txn"))])
+    if rows:
+        parts.append("## KV engine write-transaction allocations\n\n" + table(
+            ["Transactions", "LMDB allocs", "LMDB allocs per txn"], rows))
+    return "\n\n".join(parts)
+
+
 SECTIONS = [
+    section_kv,
     section_ring_buffer,
     section_local_transit,
     section_local_throughput,
@@ -336,6 +377,18 @@ def render_report(root: Path) -> str:
 
 # metric -> True if higher is better
 METRICS = {
+    "get_p50_ns": False,
+    "get_p99_ns": False,
+    "miss_p50_ns": False,
+    "miss_p99_ns": False,
+    "view_p50_ns": False,
+    "view_p99_ns": False,
+    "parallel_ns": False,
+    "setup_ns": False,
+    "engine_allocs_per_txn": False,
+    "writer_p99_ns": False,
+    "apply_ns": False,
+    "iteration_ns": False,
     "latency_p50_ns": False,
     "latency_p99_ns": False,
     "latency_p99_9_ns": False,

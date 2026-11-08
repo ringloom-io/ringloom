@@ -24,6 +24,7 @@ const topic_prefetcher = @import("topic_prefetcher.zig");
 const topic_registry = @import("topic_registry.zig");
 const topic_leader_election = @import("topic_leader_election.zig");
 const commands = @import("topic_commands.zig");
+const topic_local_reader = @import("topic_local_reader.zig");
 
 const TopicId = topic_id_mod.TopicId;
 const TopicConfig = topic_config_mod.TopicConfig;
@@ -42,6 +43,61 @@ const TopicReplEnvelope = common.message.topic_data_header.TopicReplEnvelope;
 const EngineCommand = commands.EngineCommand;
 
 const log = std.log.scoped(.topics);
+
+pub const LocalTailer = topic_local_reader.LocalTailer;
+pub const KvAppendResult = commands.KvAppendResult;
+pub const ResetListener = topic_engine.ResetListener;
+
+/// Control-thread callbacks for KV-relevant engine status. Set with
+/// `TopicSubsystem.setKvHooks`; invoked from `dispatchKvStatus`, which the
+/// control loop calls while draining engine status. Both run on the control
+/// thread and must not block.
+pub const KvHooks = struct {
+    ctx: ?*anyopaque = null,
+    /// Result of `kvLeaderAppend`, correlated by `correlation_id`.
+    on_append_done: ?*const fn (ctx: ?*anyopaque, topic_id: TopicId, correlation_id: u64, result: KvAppendResult, index: u64) void = null,
+    /// A replica queue was reset (informational; the reliable, synchronous
+    /// channel is `addResetListener`).
+    on_replica_reset: ?*const fn (ctx: ?*anyopaque, topic_id: TopicId, kv_store: bool, reset_seq: u64) void = null,
+};
+
+/// Point-in-time local view of one topic queue, see `TopicSubsystem.topicStatus`.
+pub const TopicLocalStatus = struct {
+    role: topic_store.Role,
+    /// Leader: failover catch-up barrier (spec 08) has cleared; appends and
+    /// publishes are accepted. Always false for replicas.
+    barrier_cleared: bool,
+    /// Replica: replication sink is in live mode. Leaders: always false here
+    /// (use `replicationLive`, which also counts "local node is leader").
+    sink_live: bool,
+    /// Highest index in the local log (leader: last append; replica: last
+    /// applied). 0 when empty.
+    hwm_index: u64,
+    epoch: u64,
+    kv_store: bool,
+};
+
+/// A topic with `flag_kv_store` open in the local store.
+pub const KvTopicInfo = struct {
+    topic_id: TopicId,
+    role: topic_store.Role,
+};
+
+/// A KV topic from the registry, with its name. Control thread only.
+pub const KvTopicRecord = struct {
+    topic_id: TopicId,
+    /// Full topic name (`__kv.<store>`), borrowed from the registry.
+    name: []const u8,
+    leader_node_id: u8,
+    leader_epoch: u64,
+};
+
+/// Options for the registration/subscription entry points.
+pub const AccessOptions = struct {
+    /// Allow the reserved `__kv.` namespace (KV subsystem only). The control
+    /// loop sets it from `topic_messages.msg_flag_allow_reserved`.
+    allow_reserved: bool = false,
+};
 
 /// A local service that registered a publication on a topic, with the number of
 /// publisher handles it holds there. Ack feedback and leader changes for the
@@ -84,6 +140,10 @@ pub const TopicSubsystem = struct {
     /// Local producer services per topic, recorded whether or not this node
     /// leads the topic (remote leaders' feedback is relayed to them too).
     local_producers: std.AutoHashMap(TopicId, std.ArrayList(LocalProducer)),
+    /// KV status callbacks (control thread); see `KvHooks`.
+    kv_hooks: KvHooks = .{},
+    /// Last topics-enabled heartbeat per peer node (0 = none); control thread.
+    topic_peer_last_ns: [256]i64 = @splat(0),
 
     /// Returns an iterator over all topic records for periodic re-broadcast
     /// (spec 02 §8). Caller must iterate on the control thread.
@@ -108,6 +168,9 @@ pub const TopicSubsystem = struct {
         self.registry = TopicRegistry.init(allocator);
         self.election = TopicLeaderElection.init(opts.local_node_id, opts.enabled, now_ns);
         self.local_producers = std.AutoHashMap(TopicId, std.ArrayList(LocalProducer)).init(allocator);
+        // Field-wise init skips struct defaults; set them explicitly.
+        self.kv_hooks = .{};
+        self.topic_peer_last_ns = @splat(0);
         return self;
     }
 
@@ -254,7 +317,7 @@ pub const TopicSubsystem = struct {
         leader_node_id: u8,
         leader_epoch: u64,
         effective_config: TopicConfig,
-        status: enum { ok, config_mismatch, collision, disabled, not_leader },
+        status: enum { ok, config_mismatch, collision, disabled, not_leader, name_reserved },
         newly_created: bool,
     };
 
@@ -263,10 +326,59 @@ pub const TopicSubsystem = struct {
     /// queue, and signal callers to broadcast TopicCreated (spec 03 §3).
     /// On success (or not_leader) `producer_service_id` is added to the topic's
     /// local producers, so ack-feedback and leader-change frames reach it.
+    ///
+    /// Ordinary entry point: names in the reserved `__kv.` namespace, and
+    /// configs with `flag_kv_store`, are rejected with `.name_reserved`. The KV
+    /// subsystem uses `registerPublicationOpts` / `createKvStoreTopic`.
     pub fn registerPublication(self: *TopicSubsystem, name: []const u8, config: TopicConfig, now_ns: i64, producer_service_id: i32) RegisterResult {
+        return self.registerPublicationOpts(name, config, now_ns, producer_service_id, .{});
+    }
+
+    /// As `registerPublication` with explicit access options.
+    ///
+    /// With `allow_reserved`, the name and config must agree: a `__kv.` name
+    /// requires `flag_kv_store` and vice versa (otherwise `.config_mismatch`),
+    /// so a KV store topic can never be created without its flag.
+    pub fn registerPublicationOpts(self: *TopicSubsystem, name: []const u8, config: TopicConfig, now_ns: i64, producer_service_id: i32, access: AccessOptions) RegisterResult {
+        return self.registerImpl(name, config, now_ns, producer_service_id, access);
+    }
+
+    /// Broker-internal creation of a KV store's backing topic on the topic
+    /// leader (docs/kv-store-spec.md §4.2): name must be `__kv.<store>`,
+    /// `retention_cycles = 0`, `flag_kv_store` set. No producer is recorded.
+    /// Idempotent: an existing identical topic yields `.ok`, `newly_created =
+    /// false`. Returns `.not_leader` when this node is not the topic leader (the
+    /// KV control code must forward to the leader), `.name_reserved` if `name`
+    /// lacks the prefix, `.config_mismatch` if the roll scheme is unknown or
+    /// differs from the existing topic.
+    ///
+    /// On `newly_created` the queue is already on disk and its open/promote
+    /// commands are queued ahead of any later `kvLeaderAppend`, so an append
+    /// issued right after this call sees the topic. The caller (control thread)
+    /// should trigger a TopicCreated rebroadcast so replicas open it; use
+    /// `ControlLoop.createKvStoreTopic`, which does.
+    pub fn createKvStoreTopic(self: *TopicSubsystem, name: []const u8, roll_scheme: []const u8, now_ns: i64) RegisterResult {
+        const config = TopicConfig.fromName(roll_scheme, 0, false).withKvStore(true);
+        if (!topic_id_mod.isReservedName(name) or name.len == topic_id_mod.reserved_kv_prefix.len) {
+            return .{ .topic_id = topic_id_mod.topicIdOf(name), .leader_node_id = 0, .leader_epoch = 0, .effective_config = config, .status = .name_reserved, .newly_created = false };
+        }
+        const result = self.registerImpl(name, config, now_ns, null, .{ .allow_reserved = true });
+        if (result.status == .ok) self.persistKvIdentity(result.topic_id, name, result.effective_config);
+        return result;
+    }
+
+    fn registerImpl(self: *TopicSubsystem, name: []const u8, config: TopicConfig, now_ns: i64, producer_service_id: ?i32, access: AccessOptions) RegisterResult {
         const id = topic_id_mod.topicIdOf(name);
         if (!self.enabled) {
             return .{ .topic_id = id, .leader_node_id = 0, .leader_epoch = 0, .effective_config = config, .status = .disabled, .newly_created = false };
+        }
+        const reserved_name = topic_id_mod.isReservedName(name);
+        if (!access.allow_reserved) {
+            if (reserved_name or config.isKvStore()) {
+                return .{ .topic_id = id, .leader_node_id = 0, .leader_epoch = 0, .effective_config = config, .status = .name_reserved, .newly_created = false };
+            }
+        } else if (reserved_name != config.isKvStore()) {
+            return .{ .topic_id = id, .leader_node_id = 0, .leader_epoch = 0, .effective_config = config, .status = .config_mismatch, .newly_created = false };
         }
         // Reject a config no queue can be opened with, before it is recorded:
         // otherwise the topic exists without a queue and later registrations
@@ -284,7 +396,7 @@ pub const TopicSubsystem = struct {
         const epoch = self.election.getEpoch();
         if (leader == null or leader.? != self.local_node_id) {
             // Not the topic leader: caller proxies creation to the leader (spec 03 §5).
-            self.addLocalProducer(id, producer_service_id);
+            if (producer_service_id) |svc| self.addLocalProducer(id, svc);
             return .{
                 .topic_id = id,
                 .leader_node_id = leader orelse 0,
@@ -309,7 +421,7 @@ pub const TopicSubsystem = struct {
             };
         };
         const rec = self.registry.getById(id).?;
-        self.addLocalProducer(id, producer_service_id);
+        if (producer_service_id) |svc| self.addLocalProducer(id, svc);
         if (outcome == .created) {
             rec.local_role = .leader;
             rec.local_queue_open = true;
@@ -339,20 +451,32 @@ pub const TopicSubsystem = struct {
             self.cmdOpenReplica(topic_id, config, leader_epoch);
             self.cmdStartSink(topic_id, leader_node);
         }
+        if (config.isKvStore()) self.persistKvIdentity(topic_id, name, config);
     }
 
     pub const SubscribeResult = struct {
         topic_id: TopicId,
-        status: enum { ok, unknown_topic, disabled },
+        status: enum { ok, unknown_topic, disabled, name_reserved },
         start_index: u64,
         geometry: TopicConfig,
     };
 
     /// Control-loop entry: a local subscriber requests a topic (spec 03 §4).
+    ///
+    /// Names in the reserved `__kv.` namespace are rejected with
+    /// `.name_reserved`; the KV subsystem uses `subscribeOpts`.
     pub fn subscribe(self: *TopicSubsystem, name: []const u8, earliest: bool) SubscribeResult {
+        return self.subscribeOpts(name, earliest, .{});
+    }
+
+    /// As `subscribe` with explicit access options.
+    pub fn subscribeOpts(self: *TopicSubsystem, name: []const u8, earliest: bool, access: AccessOptions) SubscribeResult {
         const id = topic_id_mod.topicIdOf(name);
         if (!self.enabled) {
             return .{ .topic_id = id, .status = .disabled, .start_index = 0, .geometry = .{} };
+        }
+        if (!access.allow_reserved and topic_id_mod.isReservedName(name)) {
+            return .{ .topic_id = id, .status = .name_reserved, .start_index = 0, .geometry = .{} };
         }
         const rec = self.registry.getById(id) orelse {
             return .{ .topic_id = id, .status = .unknown_topic, .start_index = 0, .geometry = .{} };
@@ -402,6 +526,136 @@ pub const TopicSubsystem = struct {
         } });
     }
 
+    // ── KV hooks (docs/kv-store-spec.md §17 K04) ───────────────────────────
+
+    pub fn setKvHooks(self: *TopicSubsystem, hooks: KvHooks) void {
+        self.kv_hooks = hooks;
+    }
+
+    /// Registers a synchronous replica-reset listener (receiver thread
+    /// callbacks; see `topic_engine.ResetListener` for what a consumer must do).
+    /// Returns false if all listener slots are used.
+    pub fn addResetListener(self: *TopicSubsystem, listener: ResetListener) bool {
+        return self.engine.addResetListener(listener);
+    }
+
+    /// Control thread: asks the topic engine to append an opaque leader-authored
+    /// payload to `topic_id`, a topic this node leads. Non-blocking and
+    /// allocation-free. The outcome (assigned index or failure) arrives later
+    /// through `KvHooks.on_append_done` with the same `correlation_id`.
+    pub const AppendEnqueue = enum { queued, payload_invalid, queue_full };
+    pub fn kvLeaderAppend(self: *TopicSubsystem, topic_id: TopicId, correlation_id: u64, payload: []const u8) AppendEnqueue {
+        const cmd = commands.KvLeaderAppend.init(topic_id, correlation_id, payload) orelse return .payload_invalid;
+        if (!self.ctrl_in.enqueue(.{ .kv_leader_append = cmd })) return .queue_full;
+        return .queued;
+    }
+
+    /// Control thread: routes KV-relevant engine status to `kv_hooks`. Called by
+    /// the control loop's status handler for every engine status.
+    pub fn dispatchKvStatus(self: *TopicSubsystem, status: commands.EngineStatus) void {
+        switch (status) {
+            .kv_append_done => |d| if (self.kv_hooks.on_append_done) |f| f(self.kv_hooks.ctx, d.topic_id, d.correlation_id, d.result, d.index),
+            .replica_reset => |r| {
+                if (r.kv_store) {
+                    if (self.registry.getById(r.topic_id)) |rec| self.persistKvIdentity(r.topic_id, rec.name, rec.config);
+                }
+                if (self.kv_hooks.on_replica_reset) |f| f(self.kv_hooks.ctx, r.topic_id, r.kv_store, r.reset_seq);
+            },
+            else => {},
+        }
+    }
+
+    /// Any thread: snapshot of the local queue state, or null if the topic is
+    /// not open here. Takes `store.lock` briefly.
+    pub fn topicStatus(self: *TopicSubsystem, topic_id: TopicId) ?TopicLocalStatus {
+        self.store.lock.lock();
+        defer self.store.lock.unlock();
+        const tq = self.store.get(topic_id) orelse return null;
+        return .{
+            .role = tq.role,
+            .barrier_cleared = tq.role == .leader and tq.accepting_writes,
+            .sink_live = tq.role == .replica and tq.repl_live.load(.acquire),
+            .hwm_index = tq.hwm_index,
+            .epoch = tq.epoch,
+            .kv_store = tq.config.isKvStore(),
+        };
+    }
+
+    /// Any thread: the local node leads the topic (its master queue is open).
+    pub fn isLocalLeader(self: *TopicSubsystem, topic_id: TopicId) bool {
+        const st = self.topicStatus(topic_id) orelse return false;
+        return st.role == .leader;
+    }
+
+    /// Any thread: `KvControlHeader.replication_live` (§5.1): the replica's sink
+    /// is in live mode, or the local node is the topic leader.
+    pub fn replicationLive(self: *TopicSubsystem, topic_id: TopicId) bool {
+        const st = self.topicStatus(topic_id) orelse return false;
+        return st.role == .leader or st.sink_live;
+    }
+
+    /// Any thread: the local node leads the topic AND the failover catch-up
+    /// barrier (spec 08) has cleared, i.e. appends are accepted. Leader lease
+    /// arbitration (§9.2) must wait for this.
+    pub fn isBarrierCleared(self: *TopicSubsystem, topic_id: TopicId) bool {
+        const st = self.topicStatus(topic_id) orelse return false;
+        return st.barrier_cleared;
+    }
+
+    /// Any thread: opens an independent read-only tailer on the topic's local
+    /// queue, starting at `start_index` (0 = beginning of the log). The caller
+    /// owns it and must `deinit` it, and must drop and reopen it on a replica
+    /// reset (see `topic_local_reader`). Setup path; allocates. Fails with
+    /// `error.QueueNotOpen` if the topic is not open locally; a concurrent
+    /// reset may also make the open fail, in which case retry later.
+    pub fn openLocalTailer(self: *TopicSubsystem, allocator: std.mem.Allocator, topic_id: TopicId, start_index: u64) !LocalTailer {
+        var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var config: TopicConfig = undefined;
+        var dir_len: usize = 0;
+        {
+            self.store.lock.lock();
+            defer self.store.lock.unlock();
+            const tq = self.store.get(topic_id) orelse return error.QueueNotOpen;
+            if (tq.dir.len > dir_buf.len) return error.NameTooLong;
+            @memcpy(dir_buf[0..tq.dir.len], tq.dir);
+            dir_len = tq.dir.len;
+            config = tq.config;
+        }
+        return LocalTailer.open(allocator, dir_buf[0..dir_len], config, start_index);
+    }
+
+    /// Any thread: fills `out` with open topics that have `flag_kv_store`.
+    /// Returns the number written (at most `out.len`).
+    pub fn collectKvTopics(self: *TopicSubsystem, out: []KvTopicInfo) u32 {
+        self.store.lock.lock();
+        defer self.store.lock.unlock();
+        var n: u32 = 0;
+        var it = self.store.openQueues();
+        while (it.next()) |tqp| {
+            if (n >= out.len) break;
+            const tq = tqp.*;
+            if (!tq.config.isKvStore()) continue;
+            out[n] = .{ .topic_id = tq.topic_id, .role = tq.role };
+            n += 1;
+        }
+        return n;
+    }
+
+    /// Control thread only: fills `out` with registry topics that have
+    /// `flag_kv_store` (open locally or not), with their names. Slices borrow
+    /// the registry; copy them if they must outlive the next registry change.
+    pub fn collectKvTopicRecords(self: *TopicSubsystem, out: []KvTopicRecord) u32 {
+        var n: u32 = 0;
+        var it = self.registry.iterator();
+        while (it.next()) |rec| {
+            if (n >= out.len) break;
+            if (!rec.config.isKvStore()) continue;
+            out[n] = .{ .topic_id = rec.topic_id, .name = rec.name, .leader_node_id = rec.leader_node_id, .leader_epoch = rec.leader_epoch };
+            n += 1;
+        }
+        return n;
+    }
+
     /// Build the absolute queue directory for a topic (mirrors TopicStore layout).
     pub fn queueDir(self: *TopicSubsystem, allocator: std.mem.Allocator, topic_id: TopicId) ![]u8 {
         return allocator.print("{s}/t_{x:0>16}", .{ self.store.base_dir, topic_id });
@@ -411,7 +665,7 @@ pub const TopicSubsystem = struct {
     /// the registry. Dir names are hex-encoded topic IDs (spec 02 §5).
     fn scanExistingQueues(self: *TopicSubsystem) void {
         // Open the topics base directory for iteration.
-        var dir = std.Io.Dir.openDirAbsolute(self.io, self.store.base_dir, .{ .iterate = true }) catch return;
+        var dir = std.Io.Dir.cwd().openDir(self.io, self.store.base_dir, .{ .iterate = true }) catch return;
         defer dir.close(self.io);
 
         var iter = dir.iterateAssumeFirstIteration();
@@ -426,6 +680,15 @@ pub const TopicSubsystem = struct {
             // Skip if the queue is already open in the store.
             if (self.isQueueOpen(topic_id)) continue;
 
+            // KV identity and flags must survive a restart, including when
+            // tmpfs materializations have vanished. Queue geometry alone does
+            // not preserve either the reserved name or flag_kv_store.
+            if (self.readKvIdentity(topic_id)) |identity| {
+                const name = identity.name[0..identity.name_len];
+                _ = self.registry.upsert(topic_id, name, identity.config, 0, 0, 0) catch continue;
+                continue;
+            }
+
             // Try to read the queue's metadata to recover its geometry.
             const config = self.readQueueConfigFromDir(dir, entry.name) orelse continue;
 
@@ -433,6 +696,50 @@ pub const TopicSubsystem = struct {
             // re-announce TopicCreated and we'll receive the real epoch.
             _ = self.registry.upsert(topic_id, entry.name, config, 0, 0, 0) catch {};
         }
+    }
+
+    const KvDiskIdentity = extern struct {
+        magic: u32 = 0x3149564b,
+        name_len: u32 = 0,
+        config: TopicConfig,
+        name: [72]u8 = @splat(0),
+    };
+
+    fn persistKvIdentity(self: *TopicSubsystem, id: TopicId, name: []const u8, config: TopicConfig) void {
+        if (name.len < 6 or name.len > 69 or !common.kv.format.hasKvTopicPrefix(name) or !common.kv.format.isValidStoreName(name[5..])) return;
+        var identity: KvDiskIdentity = .{ .config = config, .name_len = @intCast(name.len) };
+        @memcpy(identity.name[0..name.len], name);
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/t_{x:0>16}.kv-identity", .{ self.store.base_dir, id }) catch return;
+        const io = common.platform.defaultIo();
+        var temp_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const temporary = std.fmt.bufPrint(&temp_buf, "{s}.tmp", .{path}) catch return;
+        const file = std.Io.Dir.cwd().createFile(io, temporary, .{}) catch |err| {
+            log.warn("cannot persist KV identity: {s}", .{@errorName(err)});
+            return;
+        };
+        defer file.close(io);
+        file.writeStreamingAll(io, std.mem.asBytes(&identity)) catch |err| {
+            log.warn("cannot write KV identity: {s}", .{@errorName(err)});
+            return;
+        };
+        file.sync(io) catch return;
+        // Keep identity beside the queue, so replica reset cannot remove it.
+        std.Io.Dir.rename(.cwd(), temporary, .cwd(), path, io) catch |err| log.warn("cannot publish KV identity: {s}", .{@errorName(err)});
+    }
+
+    fn readKvIdentity(self: *TopicSubsystem, id: TopicId) ?KvDiskIdentity {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/t_{x:0>16}.kv-identity", .{ self.store.base_dir, id }) catch return null;
+        const io = common.platform.defaultIo();
+        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+        defer file.close(io);
+        var identity: KvDiskIdentity = undefined;
+        const n = file.readPositionalAll(io, std.mem.asBytes(&identity), 0) catch return null;
+        if (n != @sizeOf(KvDiskIdentity) or identity.magic != 0x3149564b or identity.name_len < 6 or identity.name_len > 69) return null;
+        const name = identity.name[0..identity.name_len];
+        if (!common.kv.format.hasKvTopicPrefix(name) or !common.kv.format.isValidStoreName(name[5..]) or topic_id_mod.topicIdOf(name) != id or !identity.config.isKvStore() or !topic_store.isKnownRollScheme(identity.config)) return null;
+        return identity;
     }
 
     /// Read the ringloom-queue geometry from a metadata file in a topic dir.
@@ -465,12 +772,29 @@ pub const TopicSubsystem = struct {
     pub fn onTopicHeartbeat(self: *TopicSubsystem, sender_id: u8, sender_topics_enabled: bool, now_ns: i64) void {
         if (!self.enabled) return;
         _ = self.election.onTopicHeartbeat(sender_id, sender_topics_enabled, now_ns);
+        if (sender_id != self.local_node_id) {
+            self.topic_peer_last_ns[sender_id] = if (sender_topics_enabled) now_ns else 0;
+            self.refreshTopicPeers(now_ns);
+        }
+    }
+
+    /// Publish the number of topics-enabled peers heard from within the
+    /// leader-down interval to the engine's replicate_once carve-out. Uses the
+    /// same interval as leader failover, so a promoted survivor of a dead
+    /// cluster partner acks on append again.
+    pub fn refreshTopicPeers(self: *TopicSubsystem, now_ns: i64) void {
+        var live: u32 = 0;
+        for (self.topic_peer_last_ns) |last| {
+            if (last != 0 and now_ns - last <= topic_leader_election.LeaderDownIntervalNs) live += 1;
+        }
+        self.engine.live_topic_peers.store(live, .release);
     }
 
     /// Duty-cycle election check; on becoming leader, returns the new epoch so the
     /// caller can announce TOPIC_LEADER_CHANGED and run the catch-up barrier.
     pub fn checkLeadership(self: *TopicSubsystem, now_ns: i64) topic_leader_election.Result {
         if (!self.enabled) return .{};
+        self.refreshTopicPeers(now_ns);
         const r = self.election.checkLeaderDown(now_ns);
         if (r.became_leader) {
             // New term: fence every topic and require catch-up before writes.
@@ -539,6 +863,10 @@ fn nullPublisher() Publisher {
 
 fn tmpBase(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
     return allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+}
+
+comptime {
+    _ = topic_local_reader;
 }
 
 test "disabled subsystem ignores publish/subscribe" {
@@ -690,6 +1018,25 @@ test "producers registering on a non-leader node are tracked for feedback relay"
     try testing.expectEqual(@as(usize, 1), sub.localProducers(r.topic_id).len);
 }
 
+test "live topics-enabled peers gate the replicate_once single-node carve-out" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmpBase(allocator, &tmp);
+    defer allocator.free(base);
+    const sub = try testSubsystem(allocator, base, 1);
+    defer sub.deinit();
+    try testing.expectEqual(@as(u32, 0), sub.engine.live_topic_peers.load(.acquire));
+    // A topics-disabled peer is not a replica target.
+    sub.onTopicHeartbeat(3, false, 1000);
+    try testing.expectEqual(@as(u32, 0), sub.engine.live_topic_peers.load(.acquire));
+    sub.onTopicHeartbeat(2, true, 1000);
+    try testing.expectEqual(@as(u32, 1), sub.engine.live_topic_peers.load(.acquire));
+    // The periodic leadership check expires the peer with the leader-down interval.
+    _ = sub.checkLeadership(1000 + topic_leader_election.LeaderDownIntervalNs + 1);
+    try testing.expectEqual(@as(u32, 0), sub.engine.live_topic_peers.load(.acquire));
+}
+
 test "registration only queues store changes; the receiver thread applies them" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{ .iterate = true });
@@ -788,4 +1135,206 @@ test "registration with an unknown roll scheme is rejected and not recorded" {
     // A valid registration for the same topic then succeeds.
     const good = sub.registerPublication("orders", TopicConfig.fromName("FAST_DAILY", 4, false), 1000, 1);
     try testing.expectEqual(@as(@TypeOf(good.status), .ok), good.status);
+}
+
+// ── KV hook tests ────────────────────────────────────────────────────────────
+
+test "reserved __kv. names are rejected on ordinary paths, allowed with opt-in" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmpBase(allocator, &tmp);
+    defer allocator.free(base);
+    const sub = try testSubsystem(allocator, base, 1);
+    defer sub.deinit();
+    _ = sub.checkLeadership(10 * std.time.ns_per_s);
+
+    const plain = TopicConfig.fromName("FAST_DAILY", 0, false);
+    const kv = plain.withKvStore(true);
+
+    // Ordinary registration: reserved name, with or without the flag.
+    const r1 = sub.registerPublication("__kv.prices", plain, 1000, 1);
+    try testing.expectEqual(@as(@TypeOf(r1.status), .name_reserved), r1.status);
+    const r2 = sub.registerPublication("__kv.prices", kv, 1000, 1);
+    try testing.expectEqual(@as(@TypeOf(r2.status), .name_reserved), r2.status);
+    // The flag alone on an ordinary name is also reserved.
+    const r3 = sub.registerPublication("orders", kv, 1000, 1);
+    try testing.expectEqual(@as(@TypeOf(r3.status), .name_reserved), r3.status);
+    try testing.expect(sub.registry.getById(r1.topic_id) == null);
+    try testing.expectEqual(@as(usize, 0), sub.localProducers(r1.topic_id).len);
+
+    // Ordinary subscribe.
+    const s1 = sub.subscribe("__kv.prices", true);
+    try testing.expectEqual(@as(@TypeOf(s1.status), .name_reserved), s1.status);
+
+    // Opt-in registration needs name and flag to agree.
+    const bad = sub.registerPublicationOpts("__kv.prices", plain, 1000, 1, .{ .allow_reserved = true });
+    try testing.expectEqual(@as(@TypeOf(bad.status), .config_mismatch), bad.status);
+    const ok = sub.registerPublicationOpts("__kv.prices", kv, 1000, 7, .{ .allow_reserved = true });
+    try testing.expectEqual(@as(@TypeOf(ok.status), .ok), ok.status);
+    try testing.expect(ok.newly_created);
+    try testing.expect(ok.effective_config.isKvStore());
+    try testing.expectEqual(@as(usize, 1), sub.localProducers(ok.topic_id).len);
+    const s2 = sub.subscribeOpts("__kv.prices", true, .{ .allow_reserved = true });
+    try testing.expectEqual(@as(@TypeOf(s2.status), .ok), s2.status);
+    // Ordinary subscribe still refuses the now-existing topic.
+    const s3 = sub.subscribe("__kv.prices", true);
+    try testing.expectEqual(@as(@TypeOf(s3.status), .name_reserved), s3.status);
+
+    // Non-reserved topics are unaffected.
+    const normal = sub.registerPublication("orders", plain, 1000, 1);
+    try testing.expectEqual(@as(@TypeOf(normal.status), .ok), normal.status);
+}
+
+const KvTestHooks = struct {
+    done_count: u32 = 0,
+    last_corr: u64 = 0,
+    last_result: KvAppendResult = .ok,
+    last_index: u64 = 0,
+    resets: u32 = 0,
+
+    fn onDone(ctx: ?*anyopaque, _: TopicId, corr: u64, result: KvAppendResult, index: u64) void {
+        const self: *KvTestHooks = @ptrCast(@alignCast(ctx.?));
+        self.done_count += 1;
+        self.last_corr = corr;
+        self.last_result = result;
+        self.last_index = index;
+    }
+    fn onReset(ctx: ?*anyopaque, _: TopicId, _: bool, _: u64) void {
+        const self: *KvTestHooks = @ptrCast(@alignCast(ctx.?));
+        self.resets += 1;
+    }
+    fn handler(ts: *TopicSubsystem, status: commands.EngineStatus) void {
+        ts.dispatchKvStatus(status);
+    }
+};
+
+test "createKvStoreTopic + kvLeaderAppend + local status/tailer/iteration" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmpBase(allocator, &tmp);
+    defer allocator.free(base);
+    const sub = try testSubsystem(allocator, base, 1);
+    defer sub.deinit();
+    _ = sub.checkLeadership(10 * std.time.ns_per_s);
+
+    var hooks = KvTestHooks{};
+    sub.setKvHooks(.{ .ctx = &hooks, .on_append_done = KvTestHooks.onDone, .on_replica_reset = KvTestHooks.onReset });
+
+    // Names without the prefix cannot be KV stores.
+    const nope = sub.createKvStoreTopic("orders", "FAST_DAILY", 1000);
+    try testing.expectEqual(@as(@TypeOf(nope.status), .name_reserved), nope.status);
+
+    const r = sub.createKvStoreTopic("__kv.prices", "FAST_DAILY", 1000);
+    try testing.expectEqual(@as(@TypeOf(r.status), .ok), r.status);
+    try testing.expect(r.newly_created);
+    try testing.expect(r.effective_config.isKvStore());
+    try testing.expectEqual(@as(u32, 0), r.effective_config.retention_cycles);
+    // Idempotent.
+    const again = sub.createKvStoreTopic("__kv.prices", "FAST_DAILY", 1000);
+    try testing.expectEqual(@as(@TypeOf(again.status), .ok), again.status);
+    try testing.expect(!again.newly_created);
+    // No producer recorded for the internal create.
+    try testing.expectEqual(@as(usize, 0), sub.localProducers(r.topic_id).len);
+
+    // Append right after create: FIFO commands make the queue available.
+    try testing.expectEqual(TopicSubsystem.AppendEnqueue.queued, sub.kvLeaderAppend(r.topic_id, 5, "STORE_HEADER"));
+    try testing.expectEqual(TopicSubsystem.AppendEnqueue.payload_invalid, sub.kvLeaderAppend(r.topic_id, 6, ""));
+    _ = sub.receiverStep();
+    try testing.expectEqual(@as(u32, 1), sub.drainStatus(KvTestHooks.handler, sub));
+    try testing.expectEqual(@as(u32, 1), hooks.done_count);
+    try testing.expectEqual(@as(u64, 5), hooks.last_corr);
+    try testing.expectEqual(KvAppendResult.ok, hooks.last_result);
+
+    // Local views.
+    try testing.expect(sub.isLocalLeader(r.topic_id));
+    try testing.expect(sub.isBarrierCleared(r.topic_id));
+    try testing.expect(sub.replicationLive(r.topic_id));
+    const st = sub.topicStatus(r.topic_id).?;
+    try testing.expect(st.kv_store);
+    try testing.expectEqual(hooks.last_index, st.hwm_index);
+    try testing.expect(sub.topicStatus(12345) == null);
+    try testing.expect(!sub.isLocalLeader(12345));
+
+    // KV topic enumeration (thread-safe store view and control-thread registry view).
+    var infos: [4]KvTopicInfo = undefined;
+    try testing.expectEqual(@as(u32, 1), sub.collectKvTopics(&infos));
+    try testing.expectEqual(r.topic_id, infos[0].topic_id);
+    var recs: [4]KvTopicRecord = undefined;
+    try testing.expectEqual(@as(u32, 1), sub.collectKvTopicRecords(&recs));
+    try testing.expectEqualStrings("__kv.prices", recs[0].name);
+
+    // An ordinary topic is not listed.
+    _ = sub.registerPublication("orders", TopicConfig.fromName("FAST_DAILY", 0, false), 1000, 1);
+    _ = sub.receiverStep();
+    try testing.expectEqual(@as(u32, 1), sub.collectKvTopics(&infos));
+
+    // Independent local tailer from "another thread" (here: same thread, own handle).
+    var t = try sub.openLocalTailer(allocator, r.topic_id, 0);
+    defer t.deinit();
+    const e = (try t.poll()).?;
+    try testing.expectEqualStrings("STORE_HEADER", e.message);
+    try testing.expectEqual(hooks.last_index, e.index);
+    try testing.expect((try t.poll()) == null);
+    try testing.expectError(error.QueueNotOpen, sub.openLocalTailer(allocator, 12345, 0));
+}
+
+test "replica status: not leader, sink not live, barrier not cleared" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmpBase(allocator, &tmp);
+    defer allocator.free(base);
+    const sub = try testSubsystem(allocator, base, 2);
+    defer sub.deinit();
+
+    const kv = TopicConfig.fromName("FAST_DAILY", 0, false).withKvStore(true);
+    const id = topic_id_mod.topicIdOf("__kv.prices");
+    sub.applyTopicCreated(id, "__kv.prices", kv, 1, 3, 1000);
+    _ = sub.receiverStep();
+
+    try testing.expect(!sub.isLocalLeader(id));
+    try testing.expect(!sub.isBarrierCleared(id));
+    try testing.expect(!sub.replicationLive(id)); // sink is connecting, not live
+    const st = sub.topicStatus(id).?;
+    try testing.expectEqual(topic_store.Role.replica, st.role);
+    try testing.expect(st.kv_store);
+
+    // Flip the mirrored flag the receiver sets when the sink goes live.
+    sub.store.get(id).?.repl_live.store(true, .release);
+    try testing.expect(sub.replicationLive(id));
+
+    // Reset notifications reach the control-thread hook.
+    var hooks = KvTestHooks{};
+    sub.setKvHooks(.{ .ctx = &hooks, .on_replica_reset = KvTestHooks.onReset });
+    sub.resetReplicaToLeader(id);
+    _ = sub.receiverStep();
+    _ = sub.drainStatus(KvTestHooks.handler, sub);
+    try testing.expectEqual(@as(u32, 1), hooks.resets);
+    try testing.expect(!sub.replicationLive(id)); // fresh replica is not live yet
+}
+
+test "KV topic identity and immutable geometry survive restart scanning" {
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmpBase(a, &tmp);
+    defer a.free(base);
+    const first = try testSubsystem(a, base, 1);
+    _ = first.checkLeadership(10 * std.time.ns_per_s);
+    const created = first.createKvStoreTopic("__kv.restart", "FAST_HOURLY", 1);
+    try testing.expectEqual(@TypeOf(created.status).ok, created.status);
+    _ = first.receiverStep();
+    first.deinit();
+    const second = try testSubsystem(a, base, 1);
+    defer second.deinit();
+    second.io = common.platform.defaultIo();
+    second.scanExistingQueues();
+    var records: [1]KvTopicRecord = undefined;
+    try testing.expectEqual(@as(u32, 1), second.collectKvTopicRecords(&records));
+    try testing.expectEqualStrings("__kv.restart", records[0].name);
+    const rec = second.registry.getById(created.topic_id).?;
+    try testing.expect(rec.config.isKvStore());
+    try testing.expectEqualStrings("FAST_HOURLY", rec.config.rollSchemeName());
 }

@@ -21,6 +21,7 @@ const ServiceClient = @import("service_client.zig").ServiceClient;
 const ServiceClientRegistry = @import("service_client_registry.zig").ServiceClientRegistry;
 const topic_publisher_registry = @import("topics/topic_publisher_registry.zig");
 const TopicPublisher = @import("topics/topic_publisher.zig").TopicPublisher;
+const kv_api = @import("kv.zig");
 const topic_messages = ringloom_common.message.topic_control_messages;
 
 const BrokerMetadataFile = memory.BrokerMetadataFile;
@@ -87,6 +88,8 @@ pub const RingLoomEngine = struct {
     /// 15) and leader-change (template 13) frames to publishers via this.
     topic_publishers: topic_publisher_registry.TopicPublisherRegistry,
 
+    kv_context: kv_api.KvContext,
+
     // ── Observability ─────────────────────────────────────────────────
     counters: CountersManager,
     service_counters: ServiceCounters,
@@ -123,6 +126,8 @@ pub const RingLoomEngine = struct {
         engine.broker_meta = meta.broker_meta;
         engine.service_id = meta.service_id;
         engine.node_id = meta.node_id;
+        engine.kv_context = .{ .allocator = allocator, .broker = meta.broker_meta, .service_id = meta.service_id, .node_id = meta.node_id };
+        errdefer engine.kv_context.stop();
         engine.config = config;
         engine.allocator = allocator;
         engine.topic_publishers = topic_publisher_registry.TopicPublisherRegistry.init(allocator);
@@ -210,7 +215,12 @@ pub const RingLoomEngine = struct {
             &engine.service_counters,
             &engine.topic_publishers,
         );
+        ctrl_agent.kv_context = &engine.kv_context;
         engine.control_agent = ctrl_agent;
+        if (options.control_agent_mode == .manual) {
+            engine.kv_context.poll_ctx = ctrl_agent;
+            engine.kv_context.poll_fn = pollKvControl;
+        }
 
         if (options.control_agent_mode == .threaded) {
             engine.control_agent_runner = ThreadRunner.init(
@@ -242,6 +252,8 @@ pub const RingLoomEngine = struct {
         if (self.control_agent_runner) |*r| {
             r.stopAndJoin();
         }
+
+        self.kv_context.stop();
 
         // 3. Send UnregisterService to the broker.
         control_agent_mod.unregisterFromBroker(self.broker_meta, self.service_id) catch {};
@@ -284,6 +296,7 @@ pub const RingLoomEngine = struct {
     /// Create a client proxy for the named service.
     pub fn createClient(self: *Self, service_name: []const u8) !*ServiceClient {
         const client = try self.service_registry.getOrCreate(service_name);
+        client.kv_context = &self.kv_context;
 
         // Subscribe to updates from the broker for this service.
         try control_agent_mod.subscribeToServiceUpdates(
@@ -294,6 +307,14 @@ pub const RingLoomEngine = struct {
         self.service_counters.increment(.subscriptions_sent);
 
         return client;
+    }
+
+    pub fn openKvReader(self: *Self, name: []const u8, options: kv_api.KvReaderOptions) !*kv_api.KvReader {
+        return self.kv_context.openReader(name, options);
+    }
+
+    pub fn openKvWriter(self: *Self, name: []const u8, config: kv_api.KvStoreConfig, options: kv_api.KvWriterOptions) !*kv_api.KvWriter {
+        return self.kv_context.openWriter(name, config, options);
     }
 
     pub const RegisterTopicError = error{
@@ -420,4 +441,9 @@ fn createServiceMetadata(allocator: std.mem.Allocator, config: ServiceConfig) !s
         .service_id = service_id,
         .node_id = node_id,
     };
+}
+
+fn pollKvControl(ctx: *anyopaque) void {
+    const agent: *ControlAgent = @ptrCast(@alignCast(ctx));
+    _ = agent.poll(constants.control_read_limit);
 }

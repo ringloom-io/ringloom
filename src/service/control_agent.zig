@@ -40,6 +40,7 @@ const heartbeat_write_interval_ns: i64 =
     constants.service_heartbeat_write_interval_ms * std.time.ns_per_ms;
 
 pub const ControlAgent = struct {
+    kv_context: ?*@import("kv.zig").KvContext = null,
     control_rb: RingBuffer,
     service_meta: *ServiceMetadataFile,
     broker_meta: *BrokerMetadataFile,
@@ -84,6 +85,8 @@ pub const ControlAgent = struct {
         }
         work_count += control_messages;
 
+        if (self.kv_context) |kv_ctx| kv_ctx.doWork();
+
         // 2. Write heartbeat if interval has elapsed.
         if (self.writeHeartbeatIfDue()) {
             work_count += 1;
@@ -99,6 +102,7 @@ pub const ControlAgent = struct {
         if (messages_read > 0) {
             self.addCounter(.control_messages_received, messages_read);
         }
+        if (self.kv_context) |kv_ctx| kv_ctx.doWork();
         _ = self.writeHeartbeatIfDue();
         return messages_read;
     }
@@ -123,6 +127,7 @@ pub const ControlAgent = struct {
 
     /// Dispatch a single control message based on its template ID.
     pub fn dispatchControlMessage(self: *Self, payload: []const u8) void {
+        if (self.kv_context) |kv_ctx| kv_ctx.dispatch(payload);
         const template_id = control_encoding.readTemplateId(payload);
 
         switch (template_id) {
@@ -215,7 +220,7 @@ pub const ControlAgent = struct {
 
 // File-level state for the dispatch handler — set before each read() call.
 // Safe: ControlAgent runs on a single dedicated thread.
-var dispatch_agent_ptr: ?*ControlAgent = null;
+threadlocal var dispatch_agent_ptr: ?*ControlAgent = null;
 
 fn dispatchWrapper(_: i32, payload: []const u8) void {
     if (dispatch_agent_ptr) |agent| {

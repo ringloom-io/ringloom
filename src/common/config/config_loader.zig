@@ -5,6 +5,8 @@ const BrokerConfig = @import("broker_config.zig").BrokerConfig;
 const PeerEndpoint = @import("broker_config.zig").PeerEndpoint;
 const ThreadingMode = @import("broker_config.zig").ThreadingMode;
 const IdleStrategyName = @import("broker_config.zig").IdleStrategyName;
+const KvIdleStrategyName = @import("broker_config.zig").KvIdleStrategyName;
+const kv_max_apply_threads = @import("broker_config.zig").kv_max_apply_threads;
 const aeron_term_min_length = @import("broker_config.zig").aeron_term_min_length;
 const aeron_network_publication_max_messages_per_send_max = @import("broker_config.zig").aeron_network_publication_max_messages_per_send_max;
 
@@ -250,6 +252,48 @@ pub const ConfigLoader = struct {
             config.topics.read_runway_bytes = std.fmt.parseInt(u64, v, 10) catch
                 return ConfigError.InvalidValue;
 
+        // ── Replicated KV stores (docs/kv-store-spec.md §16) ────
+        if (props.get("broker.kv.enabled")) |v|
+            config.kv.enabled = std.mem.eql(u8, v, "true");
+        if (props.get("broker.kv.path")) |v|
+            config.kv.path = self.allocator.dupe(u8, v) catch return ConfigError.IoError;
+        if (props.get("broker.kv.max.stores")) |v|
+            config.kv.max_stores = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.kv.apply.threads")) |v|
+            config.kv.apply_threads = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.kv.apply.batch.max.entries")) |v|
+            config.kv.apply_batch_max_entries = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.kv.apply.batch.max.us")) |v|
+            config.kv.apply_batch_max_us = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.kv.apply.idle.strategy")) |v|
+            config.kv.apply_idle_strategy = KvIdleStrategyName.fromString(v) orelse return ConfigError.InvalidValue;
+        if (props.get("broker.kv.apply.cpu.affinity")) |v| {
+            var n: u32 = 0;
+            var it = std.mem.splitScalar(u8, v, ',');
+            while (it.next()) |part| {
+                const t = std.mem.trim(u8, part, &std.ascii.whitespace);
+                if (t.len == 0) continue;
+                if (n >= kv_max_apply_threads) return ConfigError.InvalidValue;
+                config.kv.apply_cpu_affinity[n] = std.fmt.parseInt(u32, t, 10) catch return ConfigError.InvalidValue;
+                n += 1;
+            }
+            config.kv.apply_cpu_affinity_count = n;
+        }
+        if (props.get("broker.kv.map.size.max")) |v|
+            config.kv.map_size_max = std.fmt.parseInt(u64, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.kv.max.readers")) |v|
+            config.kv.max_readers = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.kv.reader.check.ms")) |v|
+            config.kv.reader_check_ms = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.kv.reader.warn.ms")) |v|
+            config.kv.reader_warn_ms = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.kv.sweep.interval.ms")) |v|
+            config.kv.sweep_interval_ms = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.kv.sweep.batch")) |v|
+            config.kv.sweep_batch = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+        if (props.get("broker.kv.generation.grace.ms")) |v|
+            config.kv.generation_grace_ms = std.fmt.parseInt(u32, v, 10) catch return ConfigError.InvalidValue;
+
         // ── Validate and compute derived fields ─────────────────
         try validate(&config);
 
@@ -481,10 +525,32 @@ fn validate(config: *BrokerConfig) ConfigError!void {
         return ConfigError.InvalidValue;
     }
 
+    try validateKv(config);
+
+    // Retain 512 slots for existing broker/topic counters in addition to the
+    // complete per-store schema. Larger explicit budgets are preserved.
+    if (config.kv.enabled) {
+        const slots = 512 + config.kv.max_stores * @as(u32, @intCast(@import("../monitoring/kv_metrics.zig").metric_count));
+        config.counter_values_buffer_size = @max(config.counter_values_buffer_size, alignToPowerOfTwo(slots * 128));
+    }
+
     // ── Compute derived fields ──────────────────────────────────
     config.max_counter_id = config.counter_values_buffer_size / 128;
     config.counter_metadata_buffer_size = config.max_counter_id * 256;
     config.single_node_cluster = config.peer_endpoints.len == 0;
+}
+
+fn validateKv(config: *const BrokerConfig) ConfigError!void {
+    const kv = &config.kv;
+    if (kv.enabled and !config.topics.enabled) return ConfigError.InvalidValue;
+    if (kv.max_stores == 0 or kv.max_stores > 65_536) return ConfigError.InvalidValue;
+    if (kv.apply_threads == 0 or kv.apply_threads > kv_max_apply_threads) return ConfigError.InvalidValue;
+    if (kv.apply_batch_max_entries == 0 or kv.apply_batch_max_entries > 1_048_576) return ConfigError.InvalidValue;
+    if (kv.apply_batch_max_us == 0) return ConfigError.InvalidValue;
+    if (kv.map_size_max < 1024 * 1024) return ConfigError.InvalidValue;
+    if (kv.max_readers == 0 or kv.max_readers > 65_536) return ConfigError.InvalidValue;
+    if (kv.reader_check_ms == 0 or kv.reader_warn_ms == 0) return ConfigError.InvalidValue;
+    if (kv.sweep_interval_ms == 0 or kv.sweep_batch == 0) return ConfigError.InvalidValue;
 }
 
 fn validateAeronTermLength(value: u32) ConfigError!void {
@@ -912,4 +978,93 @@ test "alignToPowerOfTwo edge cases" {
     try std.testing.expectEqual(@as(u32, 8), alignToPowerOfTwo(5));
     try std.testing.expectEqual(@as(u32, 65536), alignToPowerOfTwo(65536));
     try std.testing.expectEqual(@as(u32, 131072), alignToPowerOfTwo(100000));
+}
+
+test "kv defaults and parsing" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const loader = ConfigLoader.initForTesting(arena.allocator());
+
+    const d = try loader.parseAndBuild("broker.node.id=1\nbroker.local.host.port=127.0.0.1:9000\n");
+    try std.testing.expect(!d.kv.enabled);
+    try std.testing.expectEqual(@as(u32, 64), d.kv.max_stores);
+    try std.testing.expectEqual(@as(u32, 1), d.kv.apply_threads);
+    try std.testing.expectEqual(@as(u32, 1024), d.kv.apply_batch_max_entries);
+    try std.testing.expectEqual(@as(u32, 50), d.kv.apply_batch_max_us);
+    try std.testing.expectEqual(@as(u64, 64) << 30, d.kv.map_size_max);
+    try std.testing.expectEqual(@as(u32, 5000), d.kv.generation_grace_ms);
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("/dev/shm/kv", try d.kv.resolvePath(d.storage_path, &buf));
+
+    const c = try loader.parseAndBuild(
+        \\broker.node.id=1
+        \\broker.local.host.port=127.0.0.1:9000
+        \\broker.topics.enabled=true
+        \\broker.kv.enabled=true
+        \\broker.kv.path=/tmp/kvx
+        \\broker.kv.max.stores=8
+        \\broker.kv.apply.threads=2
+        \\broker.kv.apply.batch.max.entries=64
+        \\broker.kv.apply.batch.max.us=10
+        \\broker.kv.apply.idle.strategy=busy_spin
+        \\broker.kv.apply.cpu.affinity=2, 3
+        \\broker.kv.map.size.max=1073741824
+        \\broker.kv.max.readers=16
+        \\broker.kv.reader.check.ms=10
+        \\broker.kv.reader.warn.ms=20
+        \\broker.kv.sweep.interval.ms=5
+        \\broker.kv.sweep.batch=7
+        \\broker.kv.generation.grace.ms=9
+    );
+    try std.testing.expect(c.kv.enabled);
+    try std.testing.expectEqualStrings("/tmp/kvx", try c.kv.resolvePath(c.storage_path, &buf));
+    try std.testing.expectEqual(@as(u32, 8), c.kv.max_stores);
+    try std.testing.expectEqual(@as(u32, 2), c.kv.apply_threads);
+    try std.testing.expectEqual(@as(u32, 64), c.kv.apply_batch_max_entries);
+    try std.testing.expectEqual(@as(u32, 10), c.kv.apply_batch_max_us);
+    try std.testing.expect(c.kv.apply_idle_strategy == .busy_spin);
+    try std.testing.expectEqual(@as(?u32, 2), c.kv.cpuForThread(0));
+    try std.testing.expectEqual(@as(?u32, 3), c.kv.cpuForThread(1));
+    try std.testing.expectEqual(@as(?u32, 2), c.kv.cpuForThread(2));
+    try std.testing.expectEqual(@as(u64, 1) << 30, c.kv.map_size_max);
+    try std.testing.expectEqual(@as(u32, 16), c.kv.max_readers);
+    try std.testing.expectEqual(@as(u32, 7), c.kv.sweep_batch);
+    try std.testing.expectEqual(@as(?u32, null), d.kv.cpuForThread(0));
+}
+
+test "kv validation" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const loader = ConfigLoader.initForTesting(arena.allocator());
+    const base = "broker.node.id=1\nbroker.local.host.port=127.0.0.1:9000\n";
+    // kv.enabled requires topics.enabled
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(base ++ "broker.kv.enabled=true\n"));
+    _ = try loader.parseAndBuild(base ++ "broker.topics.enabled=true\nbroker.kv.enabled=true\n");
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(base ++ "broker.kv.max.stores=0\n"));
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(base ++ "broker.kv.apply.threads=0\n"));
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(base ++ "broker.kv.apply.threads=99\n"));
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(base ++ "broker.kv.apply.batch.max.entries=0\n"));
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(base ++ "broker.kv.apply.idle.strategy=nap\n"));
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(base ++ "broker.kv.map.size.max=10\n"));
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(base ++ "broker.kv.sweep.batch=0\n"));
+    try std.testing.expectError(ConfigError.InvalidValue, loader.parseAndBuild(base ++ "broker.kv.max.readers=abc\n"));
+}
+
+test "KV capacity reserves all configured stores and preserves larger budgets" {
+    var config: BrokerConfig = .{ .node_id = 1, .local_host = "127.0.0.1", .local_port = 9000, .peer_endpoints = &.{} };
+    config.topics.enabled = true;
+    config.kv.enabled = true;
+    try validate(&config);
+    const required = 512 + 64 * @import("../monitoring/kv_metrics.zig").metric_count;
+    try std.testing.expect(config.max_counter_id >= required);
+    try std.testing.expectEqual(@as(u32, 524288), config.counter_values_buffer_size);
+    const provisioned = config.counter_values_buffer_size;
+    try validate(&config);
+    try std.testing.expectEqual(provisioned, config.counter_values_buffer_size);
+    config.counter_values_buffer_size = 1048576;
+    try validate(&config);
+    try std.testing.expectEqual(@as(u32, 1048576), config.counter_values_buffer_size);
+    config.kv.max_stores = 65536;
+    try validate(&config);
+    try std.testing.expect(config.max_counter_id >= 512 + 65536 * @import("../monitoring/kv_metrics.zig").metric_count);
 }

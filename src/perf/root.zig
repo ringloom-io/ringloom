@@ -16,6 +16,8 @@ comptime {
     _ = @import("backpressure_bench.zig");
     _ = @import("recovery_bench.zig");
     _ = @import("topic_bench.zig");
+    _ = @import("kv_bench.zig");
+    _ = @import("kv_scale_bench.zig");
 }
 
 test "perf module compiles" {

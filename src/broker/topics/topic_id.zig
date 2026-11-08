@@ -11,6 +11,8 @@ pub const TopicId = common.topics.topic_id.TopicId;
 pub const invalid_topic_id = common.topics.topic_id.invalid_topic_id;
 pub const topicIdOf = common.topics.topic_id.topicIdOf;
 pub const isValid = common.topics.topic_id.isValid;
+pub const reserved_kv_prefix = common.topics.topic_id.reserved_kv_prefix;
+pub const isReservedName = common.topics.topic_id.isReservedName;
 
 // Re-run the shared tests through this module's test namespace.
 test {

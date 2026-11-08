@@ -1,0 +1,12 @@
+RingLoom
+Copyright the RingLoom authors. Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes third-party software:
+
+LMDB (Lightning Memory-Mapped Database), release LMDB_0.9.33
+  Copyright 2011-2021 Howard Chu, Symas Corp. All rights reserved.
+  Licensed under the OpenLDAP Public License, Version 2.8.
+  Source: https://github.com/LMDB/lmdb (libraries/liblmdb), fetched through build.zig.zon
+  and compiled by build_support/lmdb.zig for the replicated KV store engine
+  (src/common/kv/lmdb_engine.zig).
+  License texts: licenses/OpenLDAP-Public-License-2.8.txt, licenses/LMDB-COPYRIGHT.txt

@@ -28,6 +28,7 @@ pub const sender = @import("sender.zig");
 pub const threading = @import("threading.zig");
 pub const aeron = @import("aeron.zig");
 pub const topics = @import("topics.zig");
+pub const kv = @import("kv.zig");
 
 // ── Monitoring (re-exported from common for broker convenience) ──────
 
@@ -107,6 +108,9 @@ comptime {
 
     // Topics
     _ = @import("topics.zig");
+
+    // KV stores (writer lease)
+    _ = @import("kv.zig");
 
     // Monitoring (via common)
     _ = ringloom_common.monitoring;

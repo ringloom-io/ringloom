@@ -446,6 +446,12 @@ fn printCounters(
             try stdout.print("    counters:\n", .{});
             printed = true;
         }
+        if (ringloom_common.monitoring.kv_metrics.decode(sample.type_id, sample.label)) |kv| {
+            try stdout.print("      [{d}] kv_{s} store_id={d} store_name={s}", .{ sample.id, kv.metric.name(), kv.store_id, kv.store_name });
+            if (kv.metric.extra()) |extra| try stdout.print(" {s}={s}", .{ extra.key, extra.value });
+            try stdout.print(" value={d}\n", .{sample.value});
+            continue;
+        }
         try stdout.print("      [{d}] type={d} {s}={d}\n", .{ sample.id, sample.type_id, sample.label, sample.value });
     }
     if (!printed) {

@@ -20,6 +20,8 @@ pub const ServiceHeartbeatChecker = service_heartbeat_checker.ServiceHeartbeatCh
 pub const service_leader_election = @import("control/service_leader_election.zig");
 pub const ServiceLeaderElection = service_leader_election.ServiceLeaderElection;
 
+pub const kv_control = @import("control/kv_control.zig");
+
 // Ensure all control module tests are discovered by `zig build test`.
 comptime {
     _ = @import("control/control_messages.zig");
@@ -27,4 +29,5 @@ comptime {
     _ = @import("control/service_heartbeat_checker.zig");
     _ = @import("control/service_leader_election.zig");
     _ = @import("control/control_loop.zig");
+    _ = @import("control/kv_control.zig");
 }

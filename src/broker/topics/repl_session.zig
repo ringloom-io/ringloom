@@ -284,6 +284,7 @@ pub const ReplHub = struct {
             const res = s.sink.step(budget) catch rq.StepResult.idle;
             if (res != .idle) summary.work += 1;
             if (self.store.get(s.topic_id)) |tq| {
+                tq.repl_live.store(s.sink.state == .live, .release);
                 if (s.sink.last_applied_index >= 0) {
                     tq.hwm_index = @max(tq.hwm_index, @as(u64, @intCast(s.sink.last_applied_index)));
                 }

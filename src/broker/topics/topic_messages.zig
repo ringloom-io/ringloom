@@ -41,6 +41,10 @@ pub const encodeTopicLeaderChanged = common.message.topic_control_messages.encod
 pub const encodeUnregisterTopicPublication = common.message.topic_control_messages.encodeUnregisterTopicPublication;
 pub const encodeUnsubscribeTopic = common.message.topic_control_messages.encodeUnsubscribeTopic;
 
+pub const msg_flag_allow_reserved = common.message.topic_control_messages.msg_flag_allow_reserved;
+pub const encodeRegisterTopicPublicationFlags = common.message.topic_control_messages.encodeRegisterTopicPublicationFlags;
+pub const encodeSubscribeTopicFlags = common.message.topic_control_messages.encodeSubscribeTopicFlags;
+
 pub const decode = common.message.topic_control_messages.decode;
 pub const registerTopicName = common.message.topic_control_messages.registerTopicName;
 pub const subscribeTopicName = common.message.topic_control_messages.subscribeTopicName;

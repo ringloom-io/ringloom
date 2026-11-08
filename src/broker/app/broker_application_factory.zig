@@ -110,6 +110,7 @@ pub fn freeBrokerConfig(allocator: std.mem.Allocator, config: *BrokerConfig) voi
     }
 
     // Topics: free duped strings (defaults are static literals / empty).
+    if (config.kv.path.len > 0) allocator.free(config.kv.path);
     if (config.topics.path.len > 0) {
         allocator.free(config.topics.path);
     }

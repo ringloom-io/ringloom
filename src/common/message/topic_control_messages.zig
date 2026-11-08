@@ -32,13 +32,29 @@ pub const PublicationStatus = enum(u8) {
     config_mismatch = 1,
     collision = 2,
     disabled = 3,
+    /// `TOPIC_NAME_RESERVED`: the name is in the reserved `__kv.` namespace (or
+    /// the config sets `flag_kv_store`) and the caller did not opt in.
+    name_reserved = 4,
 };
 
 pub const SubscriptionStatus = enum(u8) {
     ok = 0,
     unknown_topic = 1,
     disabled = 2,
+    /// `TOPIC_NAME_RESERVED` (reserved `__kv.` namespace, caller did not opt in).
+    name_reserved = 3,
 };
+
+/// Request flag (`RegisterTopicPublicationMsg.flags` / `SubscribeTopicMsg.flags`):
+/// the caller is the KV subsystem and may use the reserved `__kv.` namespace.
+///
+/// This is an in-process-family trust gate, not authentication: any local
+/// service on the broker host can set it. It exists so that *ordinary* public
+/// APIs (which never set it) cannot collide with KV store topics by accident.
+/// Only the KV writer client (docs/kv-store-spec.md §11.2) sets it, when it
+/// registers its publication on `__kv.<store>` through the normal topic
+/// publisher path.
+pub const msg_flag_allow_reserved: u8 = 1 << 0;
 
 pub const StartPosition = enum(u8) {
     earliest = 0,
@@ -52,7 +68,8 @@ pub const RegisterTopicPublicationMsg = extern struct {
     local_service_id: i32,
     config: TopicConfig,
     name_length: u16,
-    _pad: u16 = 0,
+    /// `msg_flag_allow_reserved`. Was padding (always 0), layout unchanged.
+    flags: u16 = 0,
     // followed by name_length bytes of topic name
 };
 
@@ -70,7 +87,8 @@ pub const SubscribeTopicMsg = extern struct {
     header: ControlMessageHeader, // template_id = 9
     local_service_id: i32,
     start_position: u8,
-    _pad: u8 = 0,
+    /// `msg_flag_allow_reserved`. Was padding (always 0), layout unchanged.
+    flags: u8 = 0,
     name_length: u16,
     // followed by name_length bytes of topic name
 };
@@ -157,6 +175,12 @@ fn writeStruct(buf: []u8, comptime T: type, value: T) void {
 }
 
 pub fn encodeRegisterTopicPublication(buf: []u8, local_service_id: i32, config: TopicConfig, name: []const u8) usize {
+    return encodeRegisterTopicPublicationFlags(buf, local_service_id, config, name, 0);
+}
+
+/// As `encodeRegisterTopicPublication` with request `flags`
+/// (`msg_flag_allow_reserved` for the KV subsystem).
+pub fn encodeRegisterTopicPublicationFlags(buf: []u8, local_service_id: i32, config: TopicConfig, name: []const u8, flags: u16) usize {
     const total = @sizeOf(RegisterTopicPublicationMsg) + name.len;
     std.debug.assert(buf.len >= total);
     const msg = RegisterTopicPublicationMsg{
@@ -164,6 +188,7 @@ pub fn encodeRegisterTopicPublication(buf: []u8, local_service_id: i32, config: 
         .local_service_id = local_service_id,
         .config = config,
         .name_length = @intCast(name.len),
+        .flags = flags,
     };
     writeStruct(buf, RegisterTopicPublicationMsg, msg);
     writeHeader(buf, RegisterTopicPublicationMsg, TEMPLATE_REGISTER_TOPIC_PUBLICATION, name.len);
@@ -172,12 +197,18 @@ pub fn encodeRegisterTopicPublication(buf: []u8, local_service_id: i32, config: 
 }
 
 pub fn encodeSubscribeTopic(buf: []u8, local_service_id: i32, start: StartPosition, name: []const u8) usize {
+    return encodeSubscribeTopicFlags(buf, local_service_id, start, name, 0);
+}
+
+/// As `encodeSubscribeTopic` with request `flags` (`msg_flag_allow_reserved`).
+pub fn encodeSubscribeTopicFlags(buf: []u8, local_service_id: i32, start: StartPosition, name: []const u8, flags: u8) usize {
     const total = @sizeOf(SubscribeTopicMsg) + name.len;
     std.debug.assert(buf.len >= total);
     const msg = SubscribeTopicMsg{
         .header = undefined,
         .local_service_id = local_service_id,
         .start_position = @backingInt(start),
+        .flags = flags,
         .name_length = @intCast(name.len),
     };
     writeStruct(buf, SubscribeTopicMsg, msg);
@@ -320,6 +351,26 @@ test "register topic publication round-trips with name tail" {
     try testing.expectEqual(@as(u16, 6), m.name_length);
     try testing.expectEqualStrings("orders", registerTopicName(buf[0..n]));
     try testing.expect(m.config.eqlForReplication(&cfg));
+}
+
+test "request flags round-trip and default to 0; name_reserved statuses exist" {
+    var buf: [256]u8 = undefined;
+    const cfg = TopicConfig.fromName("FAST_DAILY", 0, false).withKvStore(true);
+    const n = encodeRegisterTopicPublicationFlags(&buf, 3, cfg, "__kv.prices", msg_flag_allow_reserved);
+    const m = decode(RegisterTopicPublicationMsg, buf[0..n]).?;
+    try testing.expectEqual(@as(u16, msg_flag_allow_reserved), m.flags);
+    try testing.expect(m.config.isKvStore());
+    try testing.expectEqualStrings("__kv.prices", registerTopicName(buf[0..n]));
+    const n0 = encodeRegisterTopicPublication(&buf, 3, cfg, "orders");
+    try testing.expectEqual(@as(u16, 0), decode(RegisterTopicPublicationMsg, buf[0..n0]).?.flags);
+
+    const n2 = encodeSubscribeTopicFlags(&buf, 3, .earliest, "__kv.prices", msg_flag_allow_reserved);
+    try testing.expectEqual(msg_flag_allow_reserved, decode(SubscribeTopicMsg, buf[0..n2]).?.flags);
+    const n3 = encodeSubscribeTopic(&buf, 3, .earliest, "orders");
+    try testing.expectEqual(@as(u8, 0), decode(SubscribeTopicMsg, buf[0..n3]).?.flags);
+
+    try testing.expectEqual(@as(u8, 4), @backingInt(PublicationStatus.name_reserved));
+    try testing.expectEqual(@as(u8, 3), @backingInt(SubscriptionStatus.name_reserved));
 }
 
 test "subscribe + subscription response round-trip with queue_dir tail" {

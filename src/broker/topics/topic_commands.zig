@@ -23,6 +23,27 @@ pub const SessionState = enum(u8) {
     disconnected = 3,
 };
 
+/// Maximum inline payload of a `kv_leader_append` command. KV leader-authored
+/// frames are at most 32 (header) + 80 (`KvStoreConfig`) = 112 bytes. Keeping it
+/// inline means the control thread never allocates and the engine never reads
+/// borrowed memory. Bumping this grows every `EngineCommand` slot (see the
+/// size assertion below).
+pub const kv_append_max_payload: usize = 160;
+
+/// Outcome of a `kv_leader_append`.
+pub const KvAppendResult = enum(u8) {
+    /// Appended; `index` is the assigned topic index.
+    ok = 0,
+    /// The topic's queue is not open on this node.
+    topic_missing = 1,
+    /// The local queue is a replica (not the topic leader here).
+    not_leader = 2,
+    /// Leader, but the failover catch-up barrier has not cleared yet.
+    barrier_active = 3,
+    /// The queue rejected the append (I/O, payload empty or too large).
+    append_failed = 4,
+};
+
 /// Commands posted control loop -> receiver topic engine.
 pub const EngineCommand = union(enum) {
     /// Open (or refresh) a master queue for a topic this node now leads.
@@ -50,7 +71,47 @@ pub const EngineCommand = union(enum) {
     /// Reset a replica queue (sink-ahead / divergence recovery, spec 08 §4).
     /// Closes the local queue, removes the dir, recreates empty, and restarts sink.
     reset_replica: struct { topic_id: TopicId, leader_node: u8, config: TopicConfig, epoch: u64 },
+    /// KV only (docs/kv-store-spec.md §6.1): append an opaque leader-authored
+    /// payload (store header, writer grant/release) to a topic this node leads.
+    /// It takes the same sequencing and replication path as a publish: the
+    /// engine appends to the master queue, and replication ships it to replicas.
+    /// The engine answers with `EngineStatus.kv_append_done` carrying
+    /// `correlation_id`. Because commands are FIFO, an append posted after
+    /// `adopt_queue`/`promote_to_leader` of the same topic sees the open queue.
+    kv_leader_append: KvLeaderAppend,
 };
+
+/// Payload of `EngineCommand.kv_leader_append`. Use `KvLeaderAppend.init`.
+pub const KvLeaderAppend = struct {
+    topic_id: TopicId,
+    /// Caller-chosen id echoed in `kv_append_done`.
+    correlation_id: u64,
+    len: u16,
+    payload: [kv_append_max_payload]u8,
+
+    /// Copies `data` inline. Returns null if empty or longer than
+    /// `kv_append_max_payload`.
+    pub fn init(topic_id: TopicId, correlation_id: u64, data: []const u8) ?KvLeaderAppend {
+        if (data.len == 0 or data.len > kv_append_max_payload) return null;
+        var out: KvLeaderAppend = .{
+            .topic_id = topic_id,
+            .correlation_id = correlation_id,
+            .len = @intCast(data.len),
+            .payload = undefined,
+        };
+        @memcpy(out.payload[0..data.len], data);
+        return out;
+    }
+
+    pub fn bytes(self: *const KvLeaderAppend) []const u8 {
+        return self.payload[0..self.len];
+    }
+};
+
+comptime {
+    // The command ring holds `command_capacity` of these; keep slots small.
+    std.debug.assert(@sizeOf(EngineCommand) <= 256);
+}
 
 /// Status posted receiver topic engine -> control loop.
 pub const EngineStatus = union(enum) {
@@ -64,6 +125,20 @@ pub const EngineStatus = union(enum) {
     session_state: struct { topic_id: TopicId, peer: u8, state: SessionState },
     /// Barrier completion: master has caught up and is ready for promotion.
     barrier_complete: struct { topic_id: TopicId, index: u64 },
+    /// Result of an `EngineCommand.kv_leader_append`. `index` is the assigned
+    /// topic index when `result == .ok`, otherwise 0.
+    kv_append_done: struct {
+        topic_id: TopicId,
+        correlation_id: u64,
+        result: KvAppendResult,
+        index: u64,
+    },
+    /// A replica queue was reset (docs/kv-store-spec.md §8.4). The old local log
+    /// is gone and a fresh empty replica was reopened (the sink restarts from
+    /// the leader). Informational copy of the synchronous listener callbacks
+    /// (`TopicEngine.addResetListener`); a consumer that holds a tailer on the
+    /// topic must reopen it and rebuild derived state.
+    replica_reset: struct { topic_id: TopicId, kv_store: bool, reset_seq: u64 },
     /// A producer's `replicate_once` publishes are replicated up to `acked_seq`
     /// (spec 05 §3.1). Carries the queue's epoch and replicated HWM at the time
     /// so the control loop can build feedback without reading receiver state.
@@ -140,6 +215,18 @@ test "engine command queue POD round-trip" {
     const b = q.dequeue().?;
     try std.testing.expect(b == .close_queue);
     try std.testing.expect(q.dequeue() == null);
+}
+
+test "kv_leader_append stays inline and bounded" {
+    try std.testing.expect(KvLeaderAppend.init(1, 1, "") == null);
+    var big: [kv_append_max_payload + 1]u8 = undefined;
+    try std.testing.expect(KvLeaderAppend.init(1, 1, &big) == null);
+    var q = EngineCommandQueue{};
+    const a = KvLeaderAppend.init(77, 9, "frame-bytes").?;
+    try std.testing.expect(q.enqueue(.{ .kv_leader_append = a }));
+    const got = q.dequeue().?;
+    try std.testing.expectEqual(@as(u64, 9), got.kv_leader_append.correlation_id);
+    try std.testing.expectEqualStrings("frame-bytes", got.kv_leader_append.bytes());
 }
 
 test "spsc queue reports full via backpressure" {

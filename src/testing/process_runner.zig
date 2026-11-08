@@ -353,7 +353,7 @@ pub const ProcessHandle = struct {
 
         const child = self.child orelse return false;
         const pid = child.id orelse return false;
-        var status: if (builtin.link_libc) std.c.c_int else i32 = undefined;
+        var status: if (builtin.link_libc) c_int else i32 = undefined;
 
         while (true) {
             const result = posix.system.waitpid(pid, &status, std.os.linux.W.NOHANG);
@@ -383,7 +383,7 @@ pub const ProcessHandle = struct {
 
         const child = self.child orelse return error.ProcessNotFound;
         const pid = child.id orelse return error.ProcessNotFound;
-        var status: if (builtin.link_libc) std.c.c_int else i32 = undefined;
+        var status: if (builtin.link_libc) c_int else i32 = undefined;
 
         while (true) {
             const result = posix.system.waitpid(pid, &status, 0);

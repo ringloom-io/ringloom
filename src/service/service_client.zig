@@ -71,6 +71,8 @@ pub const ServiceClient = struct {
         last_status_ns: i64,
     };
 
+    kv_context: ?*@import("kv.zig").KvContext = null,
+
     service_name: []const u8,
     instances: std.ArrayList(ServiceInstance),
     instances_lock: std.atomic.Mutex = .unlocked,
@@ -99,6 +101,14 @@ pub const ServiceClient = struct {
     remote_frame_scratch: ?[]u8 = null,
 
     const Self = @This();
+
+    pub fn openKvReader(self: *Self, name: []const u8, options: @import("kv.zig").KvReaderOptions) !*@import("kv.zig").KvReader {
+        return (self.kv_context orelse return error.EngineNotRunning).openReader(name, options);
+    }
+
+    pub fn openKvWriter(self: *Self, name: []const u8, config: @import("kv.zig").KvStoreConfig, options: @import("kv.zig").KvWriterOptions) !*@import("kv.zig").KvWriter {
+        return (self.kv_context orelse return error.EngineNotRunning).openWriter(name, config, options);
+    }
 
     pub const SendError = error{
         NoAvailableInstance,

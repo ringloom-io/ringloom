@@ -16,7 +16,7 @@ import java.nio.file.Path;
 
 final class RingloomNative {
 
-    static final int ABI_VERSION = 5;
+    static final int ABI_VERSION = 6;
     private static final String LIBRARY_BASE_NAME = "ringloom_service";
     private static final String CLASSPATH_LIBRARY_ROOT =
         "/io/ringloom/service/native";
@@ -1634,7 +1634,7 @@ final class RingloomNative {
         return new String(copy, StandardCharsets.UTF_8);
     }
 
-    private static MethodHandle downcall(
+    static MethodHandle downcall(
         String symbol,
         FunctionDescriptor descriptor
     ) {

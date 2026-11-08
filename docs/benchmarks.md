@@ -28,7 +28,8 @@ use fixed `/tmp` paths; only files freshly written during that suite are copied.
 Benchmark build steps always execute, including on a warm build cache.
 
 Suite names are `ring`, `ipc` (local and two-broker service messaging), `topic`
-(single-broker publishing in both ack modes), `backpressure`, `recovery`, and `aeron` (raw UDP
+(single-broker publishing in both ack modes), `kv` (KV serial write/read on one
+broker plus native reader scale at 1k/1M/10M entries), `backpressure`, `recovery`, and `aeron` (raw UDP
 reference). For direct harness runs:
 
 ```sh

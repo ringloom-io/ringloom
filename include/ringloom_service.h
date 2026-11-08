@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define RINGLOOM_SERVICE_ABI_VERSION 5u
+#define RINGLOOM_SERVICE_ABI_VERSION 6u
 
 typedef struct ringloom_service ringloom_service_t;
 typedef struct ringloom_client ringloom_client_t;
@@ -33,6 +33,15 @@ typedef enum ringloom_status {
     RINGLOOM_ERR_TOPIC_DISABLED = 13,
     RINGLOOM_ERR_TOPIC_CONFIG_MISMATCH = 14,
     RINGLOOM_ERR_TOPIC_UNKNOWN = 15,
+    RINGLOOM_KV_MISSING = 32,
+    RINGLOOM_ERR_KV_BUFFER_TOO_SMALL = 33,
+    RINGLOOM_ERR_KV_NOT_WRITER = 34,
+    RINGLOOM_ERR_KV_HELD_BY_OTHER = 35,
+    RINGLOOM_ERR_KV_NOT_AVAILABLE_LOCALLY = 36,
+    RINGLOOM_ERR_KV_ENGINE_MISMATCH = 37,
+    RINGLOOM_ERR_KV_KEY_TOO_LARGE = 38,
+    RINGLOOM_ERR_KV_VALUE_TOO_LARGE = 39,
+    RINGLOOM_ERR_KV_BATCH_FULL = 40,
     RINGLOOM_ERR_INTERNAL = 255
 } ringloom_status_t;
 
@@ -482,6 +491,85 @@ uint64_t ringloom_topic_publisher_replicated_count(const ringloom_topic_publishe
 
 // Returns the broker-assigned topic_id for a subscription.
 uint64_t ringloom_topic_subscription_id(const ringloom_topic_subscription_t *subscription);
+
+
+/* KV ABI 6. Initialize all option/status size fields to sizeof(struct).
+ * NULL reader/writer options select defaults. Config is required.
+ * Sessions belong to one thread. Free sessions before readers; close writers
+ * and readers before destroying the service. A view pins a snapshot until
+ * release; get/view/iteration reuse that snapshot while it is held.
+ * Callbacks must not re-enter the KV API or close their handles. A visit
+ * callback returns nonzero to continue and zero to stop. Iteration returns OK
+ * for both completion and an explicit callback stop.
+ * Poll ringloom_service_poll_control regularly for heartbeat, grant/reassert,
+ * acknowledgements and transport maintenance (the C service uses manual control).
+ * ack_mode: 0=fire_and_forget, 1=replicate_once. Buffered writes return seq=0.
+ * Missing and buffer-too-small are distinct from an empty value (OK, len=0).
+ */
+typedef struct ringloom_kv_reader ringloom_kv_reader_t;
+typedef struct ringloom_kv_session ringloom_kv_session_t;
+typedef struct ringloom_kv_writer ringloom_kv_writer_t;
+typedef enum ringloom_kv_writer_state {
+    RINGLOOM_KV_GRANTED=0, RINGLOOM_KV_QUEUED=1,
+    RINGLOOM_KV_REVOKED=2, RINGLOOM_KV_REASSERTING=3
+} ringloom_kv_writer_state_t;
+typedef void (*ringloom_kv_state_fn)(void*, uint8_t state, uint64_t writer_epoch);
+typedef int (*ringloom_kv_visit_fn)(void*, const uint8_t*, size_t, const uint8_t*, size_t);
+typedef struct ringloom_kv_store_config {
+    uint32_t size;
+    uint16_t format_version, _pad0;
+    uint16_t max_key_len, _pad1;
+    uint32_t max_value_len;
+    uint64_t default_ttl_ms, map_size_hint;
+    char topic_roll_scheme[16];
+    uint32_t flags;
+    uint8_t _reserved[28];
+} ringloom_kv_store_config_t;
+typedef struct ringloom_kv_reader_options {
+    uint32_t size, wait_ready_timeout_ms;
+    uint8_t prefault, ttl_clock; /* 0=precise, 1=coarse */
+    uint8_t _pad[2];
+    uint32_t max_readers;
+} ringloom_kv_reader_options_t;
+typedef struct ringloom_kv_writer_options {
+    uint32_t size;
+    uint8_t acquire; /* 0=fail_if_held, 1=wait */
+    uint8_t _pad[3];
+    uint32_t open_timeout_ms, max_frame_length;
+    ringloom_kv_state_fn on_state;
+    void *user_data;
+} ringloom_kv_writer_options_t;
+typedef struct ringloom_kv_status {
+    uint32_t size;
+    uint8_t state, replication_live; /* state: 0=initializing,1=catching_up,2=live,3=rebuilding,4=failed */
+    uint8_t _pad[2];
+    uint64_t generation, applied_index, applied_leader_epoch, applied_at_ns;
+    uint64_t local_log_tip_index, lag_entries, heartbeat_age_ms, generation_switches;
+} ringloom_kv_status_t;
+/* Set config defaults then customize limits as needed. The entire largest
+ * record plus KV and topic headers must fit max_frame_length (default 65536).
+ * Default max_value_len=64929 leaves room for a 511-byte key and padding. */
+void ringloom_kv_store_config_init(ringloom_kv_store_config_t*);
+void ringloom_kv_reader_options_init(ringloom_kv_reader_options_t*);
+void ringloom_kv_writer_options_init(ringloom_kv_writer_options_t*);
+int ringloom_kv_open_reader(ringloom_client_t*, const char*, const ringloom_kv_reader_options_t*, ringloom_kv_reader_t**);
+int ringloom_kv_reader_status(const ringloom_kv_reader_t*, ringloom_kv_status_t*);
+int ringloom_kv_session_new(ringloom_kv_reader_t*, ringloom_kv_session_t**);
+int ringloom_kv_get(ringloom_kv_session_t*, const uint8_t*, size_t, uint8_t*, size_t, size_t*);
+int ringloom_kv_view(ringloom_kv_session_t*, const uint8_t*, size_t, const uint8_t**, size_t*);
+void ringloom_kv_release(ringloom_kv_session_t*);
+int ringloom_kv_for_each(ringloom_kv_session_t*, ringloom_kv_visit_fn, void*);
+void ringloom_kv_session_free(ringloom_kv_session_t*);
+void ringloom_kv_close_reader(ringloom_kv_reader_t*);
+int ringloom_kv_open_writer(ringloom_client_t*, const char*, const ringloom_kv_store_config_t*, const ringloom_kv_writer_options_t*, ringloom_kv_writer_t**);
+int ringloom_kv_put(ringloom_kv_writer_t*, const uint8_t*, size_t, const uint8_t*, size_t, int64_t ttl_ms, uint8_t ack_mode, uint64_t*);
+int ringloom_kv_delete(ringloom_kv_writer_t*, const uint8_t*, size_t, uint8_t ack_mode, uint64_t*);
+int ringloom_kv_clear(ringloom_kv_writer_t*, uint8_t ack_mode, uint64_t*);
+int ringloom_kv_begin_batch(ringloom_kv_writer_t*);
+int ringloom_kv_commit_batch(ringloom_kv_writer_t*, uint8_t ack_mode, uint64_t*);
+int ringloom_kv_is_acked(ringloom_kv_writer_t*, uint64_t);
+int ringloom_kv_writer_state(const ringloom_kv_writer_t*);
+void ringloom_kv_close_writer(ringloom_kv_writer_t*);
 
 #ifdef __cplusplus
 }

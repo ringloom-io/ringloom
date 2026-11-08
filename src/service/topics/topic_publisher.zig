@@ -26,7 +26,32 @@ pub const RegistrationStatus = enum(u8) {
     disabled = 3,
     not_leader = 4,
     internal_error = 5,
+    /// `TOPIC_NAME_RESERVED`: `__kv.` namespace used without the KV opt-in.
+    name_reserved = 6,
 };
+
+/// Error for ordinary (non-KV) topic APIs given a reserved name.
+pub const NameError = error{TopicNameReserved};
+
+/// Client-side guard for the ordinary public topic APIs (create/publish/
+/// subscribe): rejects the reserved `__kv.` namespace early, with
+/// `error.TopicNameReserved`, before any broker round trip. The broker enforces
+/// the same rule (`PublicationStatus.name_reserved`), so this is only a fast
+/// path.
+///
+/// The KV writer/reader client (docs/kv-store-spec.md §11) bypasses it: it
+/// registers its publication on `__kv.<store>` with
+/// `topic_messages.msg_flag_allow_reserved` set on the RegisterTopicPublication
+/// request (`encodeRegisterTopicPublicationFlags`) and a config with
+/// `flag_kv_store`, then publishes data frames through the normal
+/// `TopicPublisher.publish` path.
+pub fn checkPublicTopicName(name: []const u8) NameError!void {
+    if (ringloom_common.topics.isReservedName(name)) return error.TopicNameReserved;
+}
+
+/// Frames up to this many bytes (data header + topic header + payload) are
+/// built on the stack. Larger ones need `TopicPublisher.scratch`.
+pub const inline_frame_capacity: usize = 4096;
 
 /// Result of a registration response.
 pub const RegistrationResult = struct {
@@ -55,6 +80,8 @@ pub const TopicPublisher = struct {
     publisher_id: u64,
     leader_node_id: u8,
     leader_epoch: u64,
+    source_node_id: u16 = 0,
+    source_service_id: u16 = 0,
     /// Aeron publication to the topic leader (IPC if co-located, UDP otherwise).
     leader_pub: ?ringloom_aeron.ExclusivePublication = null,
     /// Highest queue index replicated to >=1 replica (for diagnostics). Advanced
@@ -68,6 +95,22 @@ pub const TopicPublisher = struct {
     /// successful publish. Sent in the frame as `publish_seq` and returned to
     /// the caller as the `out_index` token.
     next_token: u64 = 0,
+    /// Optional caller-owned buffer for frames larger than
+    /// `inline_frame_capacity`. Set it once at open time (size it to the
+    /// broker's `max_frame_length` + the data header, e.g. 64 KiB + 80 for the
+    /// default) so large publishes (KV batches up to `max_frame_length`) stay
+    /// allocation-free. Without it, such publishes return `.failed`. Must
+    /// outlive the publisher; never shared between publishers or threads.
+    scratch: []u8 = &.{},
+
+    /// Largest payload `publish` accepts: bounded by the inline buffer or the
+    /// scratch buffer, whichever is larger. The broker additionally rejects
+    /// frames whose payload (topic header + message) exceeds its
+    /// `max_frame_length`.
+    pub fn maxPayload(self: *const TopicPublisher) usize {
+        const overhead = data_header.RingLoomDataHeader.encoded_length + TopicPublishHeader.encoded_length;
+        return @max(inline_frame_capacity, self.scratch.len) -| overhead;
+    }
 
     /// Returns a fresh, non-zero publisher id. Mixes wall-clock and monotonic
     /// time, a process-wide counter and a per-call address, which makes
@@ -108,21 +151,17 @@ pub const TopicPublisher = struct {
         const total = data_header.RingLoomDataHeader.encoded_length +
             TopicPublishHeader.encoded_length + payload.len;
 
-        // Use Aeron's tryClaim or offer; for simplicity, build in a stack buffer.
-        var buf: [4096]u8 = undefined;
-        if (total > buf.len) return .failed;
+        // Small frames are built on the stack; larger ones in `scratch`.
+        var stack_buf: [inline_frame_capacity]u8 = undefined;
+        const buf: []u8 = if (total <= stack_buf.len)
+            stack_buf[0..]
+        else if (total <= self.scratch.len)
+            self.scratch
+        else
+            return .failed;
 
         // 1. RingLoomDataHeader with flag_topic.
-        var dh = std.mem.zeroes(data_header.RingLoomDataHeader);
-        @memcpy(&dh.magic, &data_header.magic_bytes);
-        dh.version = data_header.header_version;
-        dh.flags = constants.flag_topic;
-        dh.header_length = data_header.RingLoomDataHeader.encoded_length;
-        dh.source_node_id = 0; // filled by transport
-        dh.source_service_id = 0; // topic publishes don't use service IDs
-        dh.target_node_id = 0; // transport supplies
-        dh.target_service_id = 0;
-        dh.payload_length = @intCast(TopicPublishHeader.encoded_length + payload.len);
+        const dh = self.frameHeader(payload.len);
 
         // 2. TopicPublishHeader.
         // The token is committed only if the offer succeeds, so a retried
@@ -155,6 +194,18 @@ pub const TopicPublisher = struct {
             .not_connected => return .not_connected,
             else => return .failed,
         }
+    }
+
+    fn frameHeader(self: *const TopicPublisher, payload_len: usize) data_header.RingLoomDataHeader {
+        return .{
+            .flags = constants.flag_topic,
+            .source_node_id = self.source_node_id,
+            .source_service_id = self.source_service_id,
+            // Unlike the local IPC path, UDP ingress checks the destination
+            // before topic demultiplexing. Zero silently drops remote writes.
+            .target_node_id = self.leader_node_id,
+            .payload_length = @intCast(TopicPublishHeader.encoded_length + payload_len),
+        };
     }
 
     /// The sequence token assigned by the most recent successful `publish`.
@@ -214,6 +265,21 @@ test "ack feedback for another publisher on the same topic is ignored" {
     try std.testing.expect(p.isAcked(2));
 }
 
+test "reserved names are rejected by the public name guard only" {
+    try std.testing.expectError(error.TopicNameReserved, checkPublicTopicName("__kv.prices"));
+    try checkPublicTopicName("orders");
+    try checkPublicTopicName("__kv"); // no trailing dot: not reserved
+}
+
+test "maxPayload grows with the scratch buffer" {
+    var p = TopicPublisher{ .topic_id = 1, .publisher_id = 1, .leader_node_id = 1, .leader_epoch = 1 };
+    const small = p.maxPayload();
+    try std.testing.expectEqual(inline_frame_capacity - 32 - 48, small);
+    var scratch: [65_536 + 80]u8 = undefined;
+    p.scratch = &scratch;
+    try std.testing.expectEqual(@as(usize, 65_536), p.maxPayload());
+}
+
 test "newPublisherId is non-zero and distinct" {
     var seen = std.AutoHashMap(u64, void).init(std.testing.allocator);
     defer seen.deinit();
@@ -223,4 +289,18 @@ test "newPublisherId is non-zero and distinct" {
         try std.testing.expect(!seen.contains(id));
         try seen.put(id, {});
     }
+}
+
+test "topic publish outer header addresses remote broker before topic demux" {
+    const p = TopicPublisher{ .topic_id = 7, .publisher_id = 11, .leader_node_id = 3, .leader_epoch = 5, .source_node_id = 2, .source_service_id = 17 };
+    const header = p.frameHeader(100);
+    try std.testing.expectEqual(@as(u16, 3), header.target_node_id);
+    try std.testing.expectEqual(@as(u16, 2), header.source_node_id);
+    try std.testing.expectEqual(@as(u16, 17), header.source_service_id);
+    try std.testing.expectEqual(@as(u16, 0), header.target_service_id);
+    try std.testing.expectEqual(@as(u32, 148), header.payload_length);
+    try std.testing.expect(header.flags & constants.flag_topic != 0);
+    const encoded = std.mem.asBytes(&header);
+    try std.testing.expectEqual(@as(u16, 3), std.mem.readInt(u16, encoded[20..22], .little));
+    try std.testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, encoded[16..18], .little));
 }

@@ -11,6 +11,7 @@ const std = @import("std");
 
 const topic_id = @import("topic_id.zig");
 const TopicId = topic_id.TopicId;
+const testing = std.testing;
 
 /// Per-PUBLISH acknowledgement mode (carried in `TopicPublishHeader`, spec 04 —
 /// NOT part of `TopicConfig`).
@@ -33,6 +34,11 @@ pub const AckMode = enum(u8) {
 /// bit0 of `TopicConfig.flags`: open queues with huge pages.
 pub const flag_use_huge_pages: u32 = 1 << 0;
 
+/// bit1 of `TopicConfig.flags`: the topic is the backing log of a replicated KV
+/// store (`__kv.<store>`, docs/kv-store-spec.md §4.1). Only the KV subsystem may
+/// create such topics; ordinary registrations that set it are rejected.
+pub const flag_kv_store: u32 = 1 << 1;
+
 /// Immutable after first creation. Defines the ringloom-queue geometry; MUST be
 /// identical on leader and every replica or index-exact replication NACKs.
 pub const TopicConfig = extern struct {
@@ -40,7 +46,7 @@ pub const TopicConfig = extern struct {
     roll_scheme_name: [16]u8 = @splat(0),
     /// 0 = keep indefinitely.
     retention_cycles: u32 = 0,
-    /// bit0 = use_huge_pages.
+    /// bit0 = use_huge_pages, bit1 = kv_store.
     flags: u32 = 0,
     _reserved: [8]u8 = @splat(0),
 
@@ -67,12 +73,25 @@ pub const TopicConfig = extern struct {
         return (self.flags & flag_use_huge_pages) != 0;
     }
 
+    /// True when this topic backs a replicated KV store (`flag_kv_store`).
+    pub fn isKvStore(self: *const TopicConfig) bool {
+        return (self.flags & flag_kv_store) != 0;
+    }
+
+    /// Returns a copy with `flag_kv_store` set or cleared.
+    pub fn withKvStore(self: TopicConfig, enabled: bool) TopicConfig {
+        var out = self;
+        if (enabled) out.flags |= flag_kv_store else out.flags &= ~flag_kv_store;
+        return out;
+    }
+
     /// Full-geometry equality: this IS the config identity for first-wins, since
     /// ack mode is per publish.
     pub fn eqlForReplication(self: *const TopicConfig, other: *const TopicConfig) bool {
         return std.mem.eql(u8, self.rollSchemeName(), other.rollSchemeName()) and
             self.retention_cycles == other.retention_cycles and
-            self.useHugePages() == other.useHugePages();
+            self.useHugePages() == other.useHugePages() and
+            self.isKvStore() == other.isKvStore();
     }
 };
 
@@ -115,6 +134,24 @@ test "eqlForReplication compares full geometry" {
     try std.testing.expect(a.eqlForReplication(&b));
     try std.testing.expect(!a.eqlForReplication(&c));
     try std.testing.expect(!a.eqlForReplication(&d));
+}
+
+test "flag_kv_store: accessor, builder and replication identity" {
+    const plain = TopicConfig.fromName("FAST_DAILY", 0, false);
+    try testing.expect(!plain.isKvStore());
+    const kv = plain.withKvStore(true);
+    try testing.expect(kv.isKvStore());
+    try testing.expectEqual(@as(u32, 2), kv.flags);
+    try testing.expect(!kv.useHugePages());
+    // Huge pages and kv_store are independent bits.
+    const both = TopicConfig.fromName("FAST_DAILY", 0, true).withKvStore(true);
+    try testing.expectEqual(@as(u32, 3), both.flags);
+    try testing.expect(!both.withKvStore(false).isKvStore());
+    try testing.expect(both.withKvStore(false).useHugePages());
+    // The flag is part of the first-creation-wins identity.
+    try testing.expect(!plain.eqlForReplication(&kv));
+    try testing.expect(kv.eqlForReplication(&kv));
+    try testing.expectError(error.TopicConfigMismatch, validateAgainstExisting("__kv.a", &kv, "__kv.a", &plain));
 }
 
 test "first-wins validation: collision and mismatch" {

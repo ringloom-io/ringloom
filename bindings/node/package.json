@@ -10,6 +10,7 @@
   },
   "files": [
     "index.js",
+    "kv.js",
     "README.md",
     "build/Release/ringloom_node.node",
     "build/Release/libringloom_service.so",

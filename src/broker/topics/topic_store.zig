@@ -42,6 +42,9 @@ pub const TopicQueue = struct {
     role: Role,
     queue: RawQueue,
     dir: []u8, // owned
+    /// Config the queue was opened with. Immutable; lets other threads open an
+    /// independent read handle (`topic_local_reader.zig`) under `store.lock`.
+    config: TopicConfig,
     epoch: u64,
     hwm_index: u64 = 0,
     /// Leader: highest index applied by >=1 replica (or appended, single-node).
@@ -49,6 +52,10 @@ pub const TopicQueue = struct {
     /// Leader only: false until the failover catch-up barrier clears (spec 08).
     /// Replicas never accept publishes, so this stays false for them.
     accepting_writes: bool = false,
+    /// Replica only: the replication sink is in live mode (caught up and
+    /// streaming). Written by the receiver thread (`ReplHub.stepAll`), readable
+    /// from any thread. Always false for leaders; use `TopicSubsystem.topicStatus`.
+    repl_live: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     /// CoreQueue pointer for binding replication Source/Sink (spec 06).
     pub fn coreQueue(self: *TopicQueue) *rq.CoreQueue {
@@ -170,6 +177,7 @@ pub const TopicStore = struct {
             .role = role,
             .queue = queue,
             .dir = dir,
+            .config = config,
             .epoch = epoch,
         };
         return tq;

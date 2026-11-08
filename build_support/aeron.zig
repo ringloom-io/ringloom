@@ -97,6 +97,11 @@ const common_cflags = [_][]const u8{
     "-D_DEFAULT_SOURCE",
     "-DHAVE_FALLOCATE",
     "-DHAVE_POSIX_FALLOCATE",
+    // Seed aeron_randomised_int32() (driver session ids) from /dev/urandom.
+    // Without it Aeron falls back to unseeded rand(): every broker driver
+    // mints identical session ids and same-stream publications from two
+    // peers to a third collide, silently dropping one peer's frames.
+    "-DHAVE_DEV_URANDOM",
     "-DDISABLE_BOUNDS_CHECKS",
     "-std=c11",
     "-fvisibility=hidden",

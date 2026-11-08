@@ -14,10 +14,13 @@ pub const TopicId = topic_id.TopicId;
 pub const topicIdOf = topic_id.topicIdOf;
 pub const isValidTopicId = topic_id.isValid;
 pub const invalid_topic_id = topic_id.invalid_topic_id;
+pub const reserved_kv_prefix = topic_id.reserved_kv_prefix;
+pub const isReservedName = topic_id.isReservedName;
 
 pub const topic_config = @import("topics/topic_config.zig");
 pub const TopicConfig = topic_config.TopicConfig;
 pub const AckMode = topic_config.AckMode;
+pub const flag_kv_store = topic_config.flag_kv_store;
 
 // Ensure all topic submodule tests are discovered by `zig build test`.
 comptime {

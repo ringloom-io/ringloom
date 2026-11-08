@@ -92,3 +92,50 @@ The integration tests use `scripts/start-test-broker.sh`. Example manual usage:
 ./scripts/start-test-broker.sh --workspace /tmp/ringloom-java-it-demo --node-id 1 --stop
 ./scripts/start-test-broker.sh --workspace /tmp/ringloom-java-it-demo --node-id 2 --stop
 ```
+
+## KV stores (ABI 6)
+
+```java
+try (KvWriter writer = client.openKvWriter("prices", KvStoreConfig.defaults());
+     KvReader reader = client.openKvReader("prices");
+     KvSession session = reader.newSession();
+     Arena arena = Arena.ofConfined()) {
+    MemorySegment key = arena.allocateFrom("AAPL");
+    MemorySegment value = arena.allocateFrom("123.45");
+    long[] sequence = new long[1];
+    int status = writer.put(key, value, KvWriter.DEFAULT_TTL,
+        TopicAckMode.REPLICATE_ONCE, sequence);
+    // Continue polling service.pollControl(...); writes and local reads converge asynchronously.
+    MemorySegment destination = arena.allocate(1024);
+    long[] length = new long[1];
+    status = session.get(key, destination, length);
+    // OK: length is copied bytes; KV_MISSING: absent; KV_BUFFER_TOO_SMALL: required size.
+}
+```
+
+Use native memory segments for keys, values and copy destinations. `get` is the primary,
+allocation-free read API. Empty values return OK and length zero, distinct from missing.
+`view` returns null for missing and otherwise a read-only scoped segment. It pins a snapshot:
+subsequent reads and iteration reuse that snapshot until `release()`. Release or session close
+invalidates every borrowed view and its slices. Iteration key/value segments expire after each
+callback; copy them inside the callback if needed. Iteration order is engine-defined.
+
+Sessions belong to their creating thread. Create one session per reader thread and close every
+session before closing its reader. Reader close rejects outstanding sessions. Close writers and
+readers before their parent client or service; parent handles do not close KV children automatically.
+Close is idempotent. Serialize service control polling with writer operations and close. Callbacks
+must not re-enter KV, service, or client APIs (including control polling, stop, and close).
+These calls throw `IllegalStateException` before entering native code or changing handle state. Visitor exceptions are rethrown after returning from
+native code; writer state callback failures are available through `callbackFailure()`.
+
+TTL milliseconds: `-1` selects the store default, `0` disables expiry, positive values expire.
+`beginBatch()`, puts/deletes/clear, then `commitBatch(ackMode, sequence)` form a native batch;
+there is no abort API. Buffered operations return sequence zero. `KV_BATCH_FULL` means the record
+was not buffered; commit the current batch before retrying. `isAcked(sequence)` checks replication
+acknowledgement, not local reader visibility. Poll the service control plane for lease/state and
+ack progress. `state()` exposes GRANTED, QUEUED, REVOKED, REASSERTING. Options expose lease
+acquisition mode and timeouts, frame size, reader prefault/TTL clock/reader limits, and state callbacks.
+`KvReader.status()` reports local replication/generation status. Config and options `defaults()`
+call the native default initializers. Config includes immutable key/value limits, default TTL,
+map hint, format version, topic roll scheme and flags. Unsigned counters retain their raw Java
+long bits. All native KV status constants are in `RingloomStatus`.

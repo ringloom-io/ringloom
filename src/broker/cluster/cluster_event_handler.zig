@@ -146,6 +146,8 @@ pub const ClusterEventHandler = struct {
                 .topic_applied_query,
                 .topic_applied_reply,
                 .topic_ack_feedback,
+                .kv_request,
+                .kv_reply,
                 => {
                     // Handled by the control loop, not the event handler.
                 },

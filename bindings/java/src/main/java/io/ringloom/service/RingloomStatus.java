@@ -75,6 +75,16 @@ public final class RingloomStatus {
      */
     public static final int INTERNAL = 255;
 
+    public static final int KV_MISSING = 32;
+    public static final int KV_BUFFER_TOO_SMALL = 33;
+    public static final int KV_NOT_WRITER = 34;
+    public static final int KV_HELD_BY_OTHER = 35;
+    public static final int KV_NOT_AVAILABLE_LOCALLY = 36;
+    public static final int KV_ENGINE_MISMATCH = 37;
+    public static final int KV_KEY_TOO_LARGE = 38;
+    public static final int KV_VALUE_TOO_LARGE = 39;
+    public static final int KV_BATCH_FULL = 40;
+
     private RingloomStatus() {}
 
     /**

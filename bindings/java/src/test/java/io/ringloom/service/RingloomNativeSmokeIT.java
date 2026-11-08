@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 final class RingloomNativeSmokeIT {
     @Test
     void loadsNativeLibraryAndExposesAbiBasics() {
-        assertEquals(5, RingloomNative.abiVersion());
+        assertEquals(6, RingloomNative.abiVersion());
         assertFalse(RingloomNative.statusName(RingloomStatus.OK).isEmpty());
     }
 

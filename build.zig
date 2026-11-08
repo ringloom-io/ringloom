@@ -1,5 +1,6 @@
 const std = @import("std");
 const aeron_build = @import("build_support/aeron.zig");
+const lmdb_build = @import("build_support/lmdb.zig");
 
 pub fn build(b: *std.Build) void {
     const requested_target = b.standardTargetOptions(.{});
@@ -7,12 +8,19 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const use_llvm = b.option(bool, "use-llvm", "Build Zig artifacts with the LLVM backend") orelse true;
 
+    // KV storage engine selection (docs/kv-store-spec.md §7.1).
+    const kv_engine = b.option(lmdb_build.Engine, "kv-engine", "Replicated KV storage engine (default: lmdb)") orelse .lmdb;
+    const kv_options = b.addOptions();
+    kv_options.addOption(u32, "engine_kind", @backingInt(kv_engine));
+    const kv_options_module = kv_options.createModule();
+
     // ── Library modules ──────────────────────────────────────────────
 
     const ringloom_common = b.addModule("ringloom_common", .{
         .root_source_file = b.path("src/common/root.zig"),
         .target = target,
     });
+    addKvEngine(b, ringloom_common, kv_engine, kv_options_module);
 
     const ringloom_queue = b.dependency("ringloom_queue", .{
         .target = target,
@@ -87,10 +95,12 @@ pub fn build(b: *std.Build) void {
     );
     b.getInstallStep().dependOn(&install_service_header.step);
 
+    const kv_operator_messages = b.createModule(.{ .root_source_file = b.path("src/common/message/kv_operator_messages.zig"), .target = target });
     const ringloom_broker = b.addModule("ringloom_broker", .{
         .root_source_file = b.path("src/broker/root.zig"),
         .target = target,
         .imports = &.{
+            .{ .name = "kv_operator_messages", .module = kv_operator_messages },
             .{ .name = "ringloom_common", .module = ringloom_common },
             .{ .name = "ringloom_aeron", .module = ringloom_aeron.module },
             .{ .name = "ringloom_queue", .module = ringloom_queue },
@@ -122,6 +132,17 @@ pub fn build(b: *std.Build) void {
         .use_llvm = use_llvm,
     });
     b.installArtifact(broker_exe);
+    const kv_cli_module = b.createModule(.{
+        .root_source_file = b.path("tools/ringloom_kv.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ringloom_common", .module = ringloom_common },
+            .{ .name = "kv_operator_messages", .module = kv_operator_messages },
+        },
+    });
+    const kv_cli = b.addExecutable(.{ .name = "ringloom-kv", .root_module = kv_cli_module, .use_llvm = use_llvm });
+    b.installArtifact(kv_cli);
 
     const run_step = b.step("run", "Run the broker");
     const run_cmd = b.addRunArtifact(broker_exe);
@@ -140,6 +161,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_bin_entries = [_]TestBinEntry{
+        .{ .source_name = "test_kv_service", .exe_name = "ringloom-test-kv-service" },
         .{ .source_name = "test_echo_service", .exe_name = "ringloom-test-echo-service" },
         .{ .source_name = "test_ping_service", .exe_name = "ringloom-test-ping-service" },
         .{ .source_name = "test_forwarder_service", .exe_name = "ringloom-test-forwarder-service" },
@@ -185,6 +207,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/common/root.zig"),
         .target = c_link_test_target,
     });
+    addKvEngine(b, common_for_c_link_tests, kv_engine, kv_options_module);
     const aeron_for_c_link_tests = aeron_build.buildRingLoomAeron(b, c_link_test_target, optimize, .{
         .module_name = null,
         .library_name = "aeron_driver_c_link_test",
@@ -194,6 +217,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/broker/root.zig"),
         .target = c_link_test_target,
         .imports = &.{
+            .{ .name = "kv_operator_messages", .module = kv_operator_messages },
             .{ .name = "ringloom_common", .module = common_for_c_link_tests },
             .{ .name = "ringloom_aeron", .module = aeron_for_c_link_tests.module },
             .{ .name = "ringloom_queue", .module = ringloom_queue },
@@ -209,11 +233,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const common_tests_module = b.createModule(.{
+        .root_source_file = b.path("src/common/root.zig"),
+        .target = target,
+    });
+    addKvEngine(b, common_tests_module, kv_engine, kv_options_module);
     const common_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/common/root.zig"),
-            .target = target,
-        }),
+        .root_module = common_tests_module,
         .use_llvm = use_llvm,
     });
     const run_common_tests = b.addRunArtifact(common_tests);
@@ -272,6 +298,9 @@ pub fn build(b: *std.Build) void {
     const run_testing_tests = b.addRunArtifact(testing_tests);
 
     const test_step = b.step("test", "Run all unit and integration tests");
+    const kv_cli_tests = b.addTest(.{ .root_module = kv_cli_module, .use_llvm = use_llvm });
+    const run_kv_cli_tests = b.addRunArtifact(kv_cli_tests);
+    test_step.dependOn(&run_kv_cli_tests.step);
     test_step.dependOn(&run_common_tests.step);
     test_step.dependOn(&run_broker_tests.step);
     if (run_aeron_tests) |run| {
@@ -304,7 +333,9 @@ pub fn build(b: *std.Build) void {
     // step depends on the broker executable and all test service
     // binaries being installed first.
 
+    const e2e_filter = b.option([]const u8, "e2e-filter", "Only run e2e tests whose name contains this text");
     const e2e_tests = b.addTest(.{
+        .filters = if (e2e_filter) |f| b.dupeStrings(&.{f}) else &.{},
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/e2e/root.zig"),
             .target = target,
@@ -316,6 +347,9 @@ pub fn build(b: *std.Build) void {
         .use_llvm = use_llvm,
     });
     const run_e2e_tests = b.addRunArtifact(e2e_tests);
+    // The test binary does not change when broker/service binaries do;
+    // never serve e2e results from the cache.
+    run_e2e_tests.has_side_effects = true;
 
     // e2e tests need the broker and all test services built first.
     run_e2e_tests.step.dependOn(b.getInstallStep());
@@ -341,6 +375,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
                 .{ .name = "ringloom_testing", .module = ringloom_testing },
+                .{ .name = "ringloom_service", .module = ringloom_service },
             },
         }),
         .use_llvm = use_llvm,
@@ -446,8 +481,13 @@ pub fn build(b: *std.Build) void {
     });
     cpp_test_cmd.step.dependOn(&cpp_bindings_cmd.step);
 
+    const cpp_kv_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\ROOT=$(pwd) && zig c++ -std=c++17 -Wall -Wextra -pedantic -I"$ROOT/include" -I"$ROOT/bindings/cpp/include" "$ROOT/bindings/cpp/test/kv_bindings_test.cpp" -o "$ROOT/zig-out/bin/ringloom-kv-cpp-test" && RINGLOOM_PROJECT_ROOT="$ROOT" RINGLOOM_BROKER_BIN="$ROOT/zig-out/bin/ringloom-broker" "$ROOT/zig-out/bin/ringloom-kv-cpp-test"
+    });
+    cpp_kv_cmd.step.dependOn(&cpp_test_cmd.step);
     const test_cpp_step = b.step("test-cpp", "Run C++ binding integration tests");
-    test_cpp_step.dependOn(&cpp_test_cmd.step);
+    test_cpp_step.dependOn(&cpp_kv_cmd.step);
 
     const node_bindings_cmd = b.addSystemCommand(&.{
         "sh",
@@ -609,4 +649,18 @@ pub fn build(b: *std.Build) void {
 
     const sample_smoke_step = b.step("sample-order-management-smoke", "Run a small order-management sample smoke test");
     sample_smoke_step.dependOn(&sample_smoke_cmd.step);
+}
+
+/// Wires the selected KV engine (C sources, allocation shim, build options)
+/// into a module that contains src/common/root.zig.
+fn addKvEngine(
+    b: *std.Build,
+    module: *std.Build.Module,
+    engine: lmdb_build.Engine,
+    options_module: *std.Build.Module,
+) void {
+    module.addImport("kv_build_options", options_module);
+    switch (engine) {
+        .lmdb => lmdb_build.addLmdb(b, module),
+    }
 }

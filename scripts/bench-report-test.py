@@ -28,6 +28,27 @@ class ReportTests(unittest.TestCase):
             self.assertIn('Repeat variability', report.render_report(root))
             self.assertIn('replicate_once', report.render_report(root))
 
+    def test_kv_counts_and_percentiles(self):
+        text = report.section_kv({'kv/kv-local-serial.json': dict(
+            scenario='kv-local-serial', entries=1001, published=1000, visible=1000,
+            failed=0, get_p50_ns=123, get_p99_ns=456, read_zig_allocs=0,
+            read_engine_allocs=0)})
+        self.assertIn('1,001 | 1,000 | 1,000 | 0 | 123 | 456', text)
+        self.assertIn('Read LMDB allocs', text)
+        self.assertFalse(report.METRICS['get_p99_ns'])
+
+    def test_kv_scale_and_engine_alloc_tables(self):
+        text = report.section_kv({
+            'kv/kv-scale-1000000.json': dict(scenario='native-reader-scale', entries=1000000, failed=0,
+                                             get_p50_ns=781, view_p50_ns=642, reader_threads=4,
+                                             parallel_operations=80000),
+            'kv/kv-engine-alloc.json': dict(scenario='kv-engine-alloc', transactions=1000,
+                                            engine_allocs=999, engine_allocs_per_txn=0.999)})
+        self.assertNotIn('KV bounded same-host serial workload', text)
+        self.assertIn('| 1,000,000 | 0 | 781 |', text)
+        self.assertIn('| 642 |', text)
+        self.assertIn('| 1,000 | 999 | 1.0 |', text)
+
     def test_comparison_direction(self):
         with tempfile.TemporaryDirectory() as tmp:
             old, new = Path(tmp)/'old', Path(tmp)/'new'

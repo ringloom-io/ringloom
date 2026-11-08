@@ -3,6 +3,9 @@
 //! This is the single import point for all monitoring-related functionality.
 //! It re-exports counters, cycle time tracking, snapshots, and periodic dump types.
 
+pub const kv_metrics = @import("monitoring/kv_metrics.zig");
+pub const KvMetrics = kv_metrics.KvMetrics;
+
 pub const system_counter = @import("monitoring/system_counter.zig");
 pub const SystemCounter = system_counter.SystemCounter;
 
@@ -31,6 +34,7 @@ pub const aeron_cnc_reader = @import("monitoring/aeron_cnc_reader.zig");
 
 // Ensure all monitoring module tests are discovered by `zig build test`.
 comptime {
+    _ = @import("monitoring/kv_metrics.zig");
     _ = @import("monitoring/system_counter.zig");
     _ = @import("monitoring/system_counters.zig");
     _ = @import("monitoring/service_counters.zig");

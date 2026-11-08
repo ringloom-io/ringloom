@@ -465,6 +465,24 @@ public final class RingloomClient implements AutoCloseable {
         }
     }
 
+    /** Opens a local KV reader with native defaults. Close all KV handles before this client/service. */
+    public KvReader openKvReader(String name) { return openKvReader(name, KvReaderOptions.defaults()); }
+
+    public KvReader openKvReader(String name, KvReaderOptions options) {
+        ensureOpen(); KvNative.guard(); Objects.requireNonNull(options);
+        try (Arena a = Arena.ofConfined()) {
+            MemorySegment out = a.allocate(ValueLayout.ADDRESS);
+            KvNative.check("open_reader", KvNative.open_reader(nativeHandle, KvNative.name(a,name), options.allocate(a), out));
+            return new KvReader(out.get(ValueLayout.ADDRESS,0));
+        }
+    }
+
+    public KvWriter openKvWriter(String name, KvStoreConfig config) { return openKvWriter(name, config, KvWriterOptions.defaults()); }
+
+    public KvWriter openKvWriter(String name, KvStoreConfig config, KvWriterOptions options) {
+        ensureOpen(); return KvWriter.open(nativeHandle,name,config,options);
+    }
+
     // ── Persistent topics ────────────────────────────────────────────────
 
     /**
@@ -616,6 +634,7 @@ public final class RingloomClient implements AutoCloseable {
 
     @Override
     public void close() {
+        KvCallbackGuard.check();
         if (!closed.compareAndSet(false, true)) {
             return;
         }
@@ -824,6 +843,7 @@ public final class RingloomClient implements AutoCloseable {
     }
 
     private void ensureOpen() {
+        KvCallbackGuard.check();
         if (closed.get()) {
             throw new IllegalStateException("RingloomClient is closed");
         }

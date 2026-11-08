@@ -14,6 +14,7 @@ final class TestBroker implements AutoCloseable {
     private final String storagePath;
     private final String group;
     private boolean closed;
+    private Process directProcess;
 
     private TestBroker(Path repoRoot, Path workspace, short nodeId, String storagePath, String group) {
         this.repoRoot = repoRoot;
@@ -21,6 +22,23 @@ final class TestBroker implements AutoCloseable {
         this.nodeId = nodeId;
         this.storagePath = storagePath;
         this.group = group;
+    }
+
+    static TestBroker startKvEnabled(Path repoRoot, Path workspace) throws IOException, InterruptedException {
+        java.nio.file.Files.createDirectories(workspace);
+        Path storage=workspace.resolve("storage");
+        Path config=workspace.resolve("kv-broker.properties");
+        Path log=workspace.resolve("kv-broker.log");
+        java.nio.file.Files.writeString(config,"broker.node.id=1\nbroker.local.host.port=127.0.0.1:19001\nbroker.group.name=ringloom-java-test\nbroker.storage.path="+storage+"\nbroker.topics.enabled=true\nbroker.kv.enabled=true\nbroker.threading.mode=dedicated\n");
+        Process process=new ProcessBuilder(System.getProperty("ringloom.brokerBin"),"--config",config.toString()).redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        long deadline=System.nanoTime()+10_000_000_000L;
+        while(System.nanoTime()<deadline && process.isAlive()) {
+            if(java.nio.file.Files.readString(log).contains("broker started:")) {
+                var broker=new TestBroker(repoRoot,workspace,(short)1,storage.toString(),"ringloom-java-test");broker.directProcess=process;return broker;
+            }
+            Thread.sleep(25);
+        }
+        process.destroyForcibly();process.waitFor();throw new IOException("KV broker failed: "+java.nio.file.Files.readString(log));
     }
 
     static TestBroker start(Path repoRoot, Path workspace) throws IOException, InterruptedException {
@@ -113,6 +131,11 @@ final class TestBroker implements AutoCloseable {
         }
         closed = true;
 
+        if(directProcess!=null) {
+            directProcess.destroy();
+            if(!directProcess.waitFor(10,java.util.concurrent.TimeUnit.SECONDS)) {directProcess.destroyForcibly();directProcess.waitFor();}
+            return;
+        }
         Process process = new ProcessBuilder(
             "bash",
             repoRoot.resolve("scripts/start-test-broker.sh").toString(),

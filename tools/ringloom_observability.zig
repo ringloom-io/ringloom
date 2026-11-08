@@ -135,6 +135,7 @@ fn renderMetrics(writer: *std.Io.Writer, args: Args, self_metrics: *SelfMetrics)
     try prometheus.writeHelpType(writer, "ringloom_ring_producer_position", "Ring producer position.", "gauge");
     try prometheus.writeHelpType(writer, "ringloom_ring_consumer_position", "Ring consumer position.", "gauge");
     try prometheus.writeHelpType(writer, "ringloom_ring_consumer_heartbeat_age_seconds", "Age of ring consumer heartbeat.", "gauge");
+    try ringloom_common.monitoring.kv_metrics.writeHelpTypes(writer);
     try prometheus.writeHelpType(writer, "ringloom_counter", "Generic metadata counter by stored counter label.", "untyped");
     try prometheus.writeHelpType(writer, "ringloom_aeron_driver_up", "Aeron CnC file parse and driver process liveness status.", "gauge");
     try prometheus.writeHelpType(writer, "ringloom_aeron_driver_start_time_seconds", "Aeron media driver start timestamp.", "gauge");
@@ -361,6 +362,15 @@ fn renderFlowControl(writer: *std.Io.Writer, group: []const u8, source_node_id: 
 }
 
 fn renderDirectCounter(writer: *std.Io.Writer, group: []const u8, owner_type: []const u8, node_id: i16, service_id: i32, service_name: []const u8, sample: metadata_reader.CounterSample) !void {
+    if (ringloom_common.monitoring.kv_metrics.decode(sample.type_id, sample.label)) |identity| {
+        var owner_buf: [512]u8 = undefined;
+        var owner: std.Io.Writer = .fixed(&owner_buf);
+        try owner.writeAll("group=\"");
+        try prometheus.writeLabelValue(&owner, group);
+        try owner.print("\",owner_type=\"{s}\",node_id=\"{d}\",service_id=\"{d}\",", .{ owner_type, node_id, service_id });
+        try ringloom_common.monitoring.kv_metrics.writeSeries(writer, identity, sample.value, owner.buffered());
+        return;
+    }
     if (std.mem.eql(u8, owner_type, "broker")) {
         const metric = brokerDirectMetricName(sample) orelse return;
         try writer.print("{s}{{group=\"{s}\",node_id=\"{d}\"}} {d}\n", .{ metric, group, node_id, sample.value });

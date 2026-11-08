@@ -8,6 +8,7 @@ const std = @import("std");
 const admin = @import("admin_messages.zig");
 const fc_messages = @import("ringloom_common").message.flow_control_messages;
 const topic_admin = @import("../topics/topic_admin.zig");
+const kv_messages = @import("../kv/kv_messages.zig");
 
 // ── Admin Command ─────────────────────────────────────────────────────
 
@@ -71,6 +72,14 @@ pub const AdminCommand = union(enum) {
     },
     topic_ack_feedback: struct {
         data: [@sizeOf(topic_admin.TopicAckFeedbackBody)]u8,
+    },
+
+    // ── KV writer-lease forwarding (docs/kv-store-spec.md §12, admin 19-20) ──
+    kv_request: struct {
+        data: [@sizeOf(kv_messages.KvAdminRequestBody)]u8,
+    },
+    kv_reply: struct {
+        data: [@sizeOf(kv_messages.KvAdminReplyBody)]u8,
     },
 
     /// Maximum snapshot payload (body after header): 1 byte node_id +
@@ -280,6 +289,18 @@ pub fn dispatchAdminMessage(
                 .topic_ack_feedback = .{ .data = undefined },
             };
             @memcpy(&cmd.topic_ack_feedback.data, body[0..@sizeOf(topic_admin.TopicAckFeedbackBody)]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        kv_messages.TEMPLATE_KV_REQUEST => {
+            if (body.len < @sizeOf(kv_messages.KvAdminRequestBody)) return;
+            var cmd = AdminCommand{ .kv_request = .{ .data = undefined } };
+            @memcpy(&cmd.kv_request.data, body[0..@sizeOf(kv_messages.KvAdminRequestBody)]);
+            _ = cmd_queue.enqueue(cmd);
+        },
+        kv_messages.TEMPLATE_KV_REPLY => {
+            if (body.len < @sizeOf(kv_messages.KvAdminReplyBody)) return;
+            var cmd = AdminCommand{ .kv_reply = .{ .data = undefined } };
+            @memcpy(&cmd.kv_reply.data, body[0..@sizeOf(kv_messages.KvAdminReplyBody)]);
             _ = cmd_queue.enqueue(cmd);
         },
         else => {}, // unknown templateId — silently drop

@@ -14,6 +14,9 @@ pub const monitoring = @import("monitoring.zig");
 // Shared topic wire types and identity — used by broker, service, and bindings.
 pub const topics = @import("topics.zig");
 
+// Replicated KV store formats and control header (shared by broker and service).
+pub const kv = @import("kv.zig");
+
 // Configuration — shared config loading helpers.
 pub const config = struct {
     pub const broker_config = @import("config/broker_config.zig");
@@ -93,6 +96,7 @@ comptime {
     _ = @import("message/control_encoding.zig");
     _ = @import("message/control_messages.zig");
     _ = @import("message/topic_control_messages.zig");
+    _ = @import("message/kv_control_messages.zig");
     _ = @import("message/message_fragmenting_producer.zig");
     _ = @import("message/message_assembler.zig");
     _ = @import("message/flow_control_messages.zig");
@@ -101,6 +105,10 @@ comptime {
     // Topics (shared wire types)
     _ = @import("topics/topic_id.zig");
     _ = @import("topics/topic_config.zig");
+
+    // KV store formats and control header
+    _ = @import("kv/kv_format.zig");
+    _ = @import("kv/kv_control.zig");
 
     // Monitoring
     _ = @import("monitoring/system_counter.zig");
@@ -124,6 +132,7 @@ test "common module compiles" {
     _ = concurrent;
     _ = message;
     _ = topics;
+    _ = kv;
     _ = config;
     _ = monitoring;
 }
