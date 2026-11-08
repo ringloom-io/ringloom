@@ -37,12 +37,12 @@ pub const flag_use_huge_pages: u32 = 1 << 0;
 /// identical on leader and every replica or index-exact replication NACKs.
 pub const TopicConfig = extern struct {
     /// Roll scheme name, right-padded with 0 (e.g. "FAST_DAILY").
-    roll_scheme_name: [16]u8 = [_]u8{0} ** 16,
+    roll_scheme_name: [16]u8 = @splat(0),
     /// 0 = keep indefinitely.
     retention_cycles: u32 = 0,
     /// bit0 = use_huge_pages.
     flags: u32 = 0,
-    _reserved: [8]u8 = [_]u8{0} ** 8,
+    _reserved: [8]u8 = @splat(0),
 
     comptime {
         std.debug.assert(@sizeOf(TopicConfig) == 32);

@@ -186,7 +186,7 @@ pub const ThreadRunner = struct {
 ///
 /// Linux: max 15 chars. macOS: max 63 chars. Windows: no limit.
 pub fn setThreadName(name: []const u8) void {
-    switch (comptime builtin.os.tag) {
+    switch (comptime builtin.target.os.tag) {
         .linux => setThreadNameLinux(name),
         .macos => setThreadNameMacos(name),
         else => {}, // Unsupported — silently ignore.
@@ -201,7 +201,7 @@ fn setThreadNameLinux(name: []const u8) void {
     buf[len] = 0;
 
     _ = std.os.linux.prctl(
-        @intFromEnum(std.os.linux.PR.SET_NAME),
+        @backingInt(std.os.linux.PR.SET_NAME),
         @intFromPtr(&buf),
         0,
         0,
@@ -219,7 +219,7 @@ fn setThreadNameMacos(name: []const u8) void {
 
     // Use Zig's std.c for the pthread call.
     // On macOS, pthread_setname_np takes only one argument (the name).
-    if (comptime builtin.os.tag == .macos) {
+    if (comptime builtin.target.os.tag == .macos) {
         // macOS-specific: pthread_setname_np only takes the name.
         const c = struct {
             extern "c" fn pthread_setname_np(name: [*:0]const u8) c_int;
@@ -232,7 +232,7 @@ fn setThreadNameMacos(name: []const u8) void {
 ///
 /// Returns error on failure or if the platform doesn't support affinity.
 pub fn setThreadAffinity(cpu_id: u32) !void {
-    switch (comptime builtin.os.tag) {
+    switch (comptime builtin.target.os.tag) {
         .linux => {
             var mask: std.os.linux.cpu_set_t = @splat(0);
             mask[cpu_id / @bitSizeOf(usize)] = @as(usize, 1) << @intCast(cpu_id % @bitSizeOf(usize));

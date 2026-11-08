@@ -230,7 +230,7 @@ pub fn isProcessAlive(pid: i64) bool {
 
     const pid_int: std.posix.pid_t = @intCast(pid);
 
-    const result = std.posix.kill(pid_int, @enumFromInt(0)) catch |err| {
+    const result = std.posix.kill(pid_int, @fromBackingInt(@intCast(0))) catch |err| {
         return switch (err) {
             error.PermissionDenied => true, // process exists but we can't signal it
             error.ProcessNotFound => false,
@@ -252,7 +252,7 @@ pub fn serviceMetadataPath(
     service_id: i32,
     node_id: i16,
 ) ![]const u8 {
-    const file_name = try std.fmt.allocPrint(allocator, "{s}_node{d}_{d}.dat", .{
+    const file_name = try allocator.print("{s}_node{d}_{d}.dat", .{
         service_name,
         node_id,
         service_id,

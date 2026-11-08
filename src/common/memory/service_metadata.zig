@@ -34,8 +34,8 @@ pub const ServiceAeronDiscovery = extern struct {
     _reserved0: i32 = 0,
     broker_start_timestamp_ms: i64 = 0,
     aeron_directory_length: u16 = 0,
-    _reserved1: [6]u8 = [_]u8{0} ** 6,
-    aeron_directory: [constants.max_aeron_directory_length]u8 = [_]u8{0} ** constants.max_aeron_directory_length,
+    _reserved1: [6]u8 = @splat(0),
+    aeron_directory: [constants.max_aeron_directory_length]u8 = @splat(0),
 
     pub fn directory(self: *const ServiceAeronDiscovery) []const u8 {
         return self.aeron_directory[0..@as(usize, @intCast(self.aeron_directory_length))];
@@ -45,7 +45,7 @@ pub const ServiceAeronDiscovery = extern struct {
 /// Overlay for one 128-byte blocking trailer slot.
 pub const BlockingTrailerSlot = extern struct {
     value: i32 = 0,
-    _pad: [124]u8 = [_]u8{0} ** 124,
+    _pad: [124]u8 = @splat(0),
 
     comptime {
         std.debug.assert(@sizeOf(BlockingTrailerSlot) == 128);
@@ -55,7 +55,7 @@ pub const BlockingTrailerSlot = extern struct {
 /// Overlay for the timeout slot (i64 value + padding = 128 bytes).
 pub const BlockingTrailerTimeoutSlot = extern struct {
     value: i64 = 0,
-    _pad: [120]u8 = [_]u8{0} ** 120,
+    _pad: [120]u8 = @splat(0),
 
     comptime {
         std.debug.assert(@sizeOf(BlockingTrailerTimeoutSlot) == 128);

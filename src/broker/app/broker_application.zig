@@ -189,7 +189,7 @@ pub const BrokerApplication = struct {
         // Validate configuration
         if (self.config.node_id == 0) {
             std.log.err("invalid configuration: node_id must be > 0", .{});
-            return @intFromEnum(ExitCode.config_error);
+            return @backingInt(ExitCode.config_error);
         }
 
         self.installSignalHandler();
@@ -205,7 +205,7 @@ pub const BrokerApplication = struct {
             std.Io.sleep(self.io, .fromMilliseconds(50), .awake) catch unreachable;
         }
 
-        return @intFromEnum(ExitCode.success);
+        return @backingInt(ExitCode.success);
     }
 
     /// Create event loops and start worker threads.
@@ -314,7 +314,7 @@ pub const BrokerApplication = struct {
         // subscription co-located service publishers can never connect.
         if (topics_cfg.enabled and self.aeron_udp_transport == null) {
             var ipc_uri_buf: [64]u8 = undefined;
-            const ipc_channel_z = try std.fmt.bufPrintZ(&ipc_uri_buf, "aeron:ipc", .{});
+            const ipc_channel_z = try std.mem.printSentinel(&ipc_uri_buf, "aeron:ipc", .{}, 0);
             const topic_ipc_stream_id: i32 = @as(i32, @intCast(topics_cfg.pub_stream_base)) + @as(i32, @intCast(self.config.node_id));
             self.standalone_topic_ipc_subscription = try self.aeron_client.?.client.addSubscription(ipc_channel_z, topic_ipc_stream_id, &self.aeron_driver_agents.?);
             self.receiver_loop.?.setStandaloneTopicIpcSubscription(&self.standalone_topic_ipc_subscription.?);

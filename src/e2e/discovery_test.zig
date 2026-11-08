@@ -112,7 +112,7 @@ test "service removal triggers discovery removal notification" {
     const forwarder = try harness.startService(.{
         .executable_name = "ringloom-test-forwarder-service",
         .service_name = "forwarder",
-        .extra_args = &.{"--target-service", "echo"},
+        .extra_args = &.{ "--target-service", "echo" },
     });
     try harness.waitForServiceReady(forwarder, 5000);
 

@@ -246,7 +246,7 @@ pub const ControlLoop = struct {
         admin_cmd_queue: ?*AdminCommandQueue(64) = null,
         broker_udp_transport: ?*broker_aeron.BrokerUdpTransport = null,
         peer_node_ids: []const u8 = &.{},
-        local_host_and_port: [22]u8 = [_]u8{0} ** 22,
+        local_host_and_port: [22]u8 = @splat(0),
         routing_registry: ?*RoutingRegistry = null,
         fc_region: ?FlowControlRegion = null,
         fc_enabled: bool = false,
@@ -296,8 +296,8 @@ pub const ControlLoop = struct {
             .fc_normal_refresh_interval_ns = @as(i64, @intCast(opts.fc_normal_refresh_interval_ms)) * std.time.ns_per_ms,
             .aeron_agent = opts.aeron_agent,
             .admin_epoch = 0,
-            .admin_peer_seen = [_]bool{false} ** 256,
-            .admin_peer_last_heartbeat_ns = [_]i64{0} ** 256,
+            .admin_peer_seen = @splat(false),
+            .admin_peer_last_heartbeat_ns = @splat(0),
             .admin_udp_counters = AdminUdpCounters.allocate(opts.counters),
             .topic_subsystem = opts.topic_subsystem,
             .topic_barrier_max_index = std.AutoHashMap(topic_id_mod.TopicId, u64).init(opts.allocator),
@@ -1473,7 +1473,7 @@ pub const ControlLoop = struct {
         self: *Self,
         data: [@sizeOf(fc_messages.ServiceCapacityUpdatePayload)]u8,
     ) void {
-        const update: fc_messages.ServiceCapacityUpdatePayload = @bitCast(data);
+        const update = std.mem.bytesToValue(fc_messages.ServiceCapacityUpdatePayload, &data);
         self.updateRemoteFcEntry(
             update.source_node_id,
             update.service_id,
@@ -1611,7 +1611,7 @@ pub const ControlLoop = struct {
             return;
         };
 
-        const earliest = msg.start_position == @intFromEnum(topic_messages.StartPosition.earliest);
+        const earliest = msg.start_position == @backingInt(topic_messages.StartPosition.earliest);
         const result = ts.subscribe(name, earliest);
 
         const status: topic_messages.SubscriptionStatus = switch (result.status) {

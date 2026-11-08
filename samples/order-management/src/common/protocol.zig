@@ -187,16 +187,16 @@ pub const ClaimedMessage = struct {
 pub fn templateFromMsgType(msg_type_id: i32) Error!TemplateId {
     if (msg_type_id < 0 or msg_type_id > std.math.maxInt(u16)) return error.UnknownTemplate;
     return switch (@as(u16, @intCast(msg_type_id))) {
-        @intFromEnum(TemplateId.new_order) => .new_order,
-        @intFromEnum(TemplateId.cancel_order) => .cancel_order,
-        @intFromEnum(TemplateId.risk_check_request) => .risk_check_request,
-        @intFromEnum(TemplateId.risk_accepted) => .risk_accepted,
-        @intFromEnum(TemplateId.order_rejected) => .order_rejected,
-        @intFromEnum(TemplateId.fill) => .fill,
-        @intFromEnum(TemplateId.execution_report) => .execution_report,
-        @intFromEnum(TemplateId.portfolio_snapshot_request) => .portfolio_snapshot_request,
-        @intFromEnum(TemplateId.portfolio_snapshot) => .portfolio_snapshot,
-        @intFromEnum(TemplateId.bulk_order_batch) => .bulk_order_batch,
+        @backingInt(TemplateId.new_order) => .new_order,
+        @backingInt(TemplateId.cancel_order) => .cancel_order,
+        @backingInt(TemplateId.risk_check_request) => .risk_check_request,
+        @backingInt(TemplateId.risk_accepted) => .risk_accepted,
+        @backingInt(TemplateId.order_rejected) => .order_rejected,
+        @backingInt(TemplateId.fill) => .fill,
+        @backingInt(TemplateId.execution_report) => .execution_report,
+        @backingInt(TemplateId.portfolio_snapshot_request) => .portfolio_snapshot_request,
+        @backingInt(TemplateId.portfolio_snapshot) => .portfolio_snapshot,
+        @backingInt(TemplateId.bulk_order_batch) => .bulk_order_batch,
         else => error.UnknownTemplate,
     };
 }
@@ -206,7 +206,7 @@ pub fn claimMessage(
     template_id: TemplateId,
     body_size: usize,
 ) ServiceClient.SendError!ClaimedMessage {
-    const claim = try client.tryClaim(@intFromEnum(template_id), @sizeOf(Envelope) + body_size);
+    const claim = try client.tryClaim(@backingInt(template_id), @sizeOf(Envelope) + body_size);
     const payload = claim.payload;
     return .{
         .claim = claim,

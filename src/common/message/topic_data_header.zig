@@ -24,7 +24,7 @@ pub const TopicPublishHeader = extern struct {
     /// AckMode (spec 01): 0=fire_and_forget, 1=replicate_once.
     ack_mode: u8 = 0,
     flags: u8 = 0,
-    _reserved: [6]u8 = [_]u8{0} ** 6,
+    _reserved: [6]u8 = @splat(0),
     /// Identifies the producing `TopicPublisher` (unique per publisher handle).
     /// The leader keys `replicate_once` ack accounting on it (spec 05 §3.1).
     publisher_id: u64 = 0,
@@ -150,7 +150,7 @@ test "TopicReplEnvelope is 32 bytes and wraps a frame exactly" {
     var buf: [128]u8 = undefined;
     const frame = "hello-repl-frame";
     const env = TopicReplEnvelope{
-        .direction = @intFromEnum(ReplDirection.source_to_sink),
+        .direction = @backingInt(ReplDirection.source_to_sink),
         .target_node_id = 2,
         .source_node_id = 1,
         .topic_id = 99,

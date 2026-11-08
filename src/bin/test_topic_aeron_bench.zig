@@ -47,12 +47,12 @@ fn parseU64Hex(args: []const [:0]const u8, name: []const u8, default: u64) u64 {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const alloc = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => gpa.allocator(),
+        .debug, .safe => gpa.allocator(),
         else => std.heap.smp_allocator,
     };
-    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+    defer if (builtin.mode == .debug or builtin.mode == .safe) {
         _ = gpa.deinit();
     };
 
@@ -107,15 +107,15 @@ pub fn main(init: std.process.Init) !void {
 
     // ── Connect to the running broker's Aeron driver ───────────────
     var dir_buf: [256]u8 = undefined;
-    const dir_z = try std.fmt.bufPrintZ(&dir_buf, "{s}", .{aeron_dir});
+    const dir_z = try std.mem.printSentinel(&dir_buf, "{s}", .{aeron_dir}, 0);
     var client = try ringloom_aeron.Client.connect(.{ .directory = dir_z, .use_conductor_agent_invoker = true, .driver_timeout_ms = 5000 });
     defer client.deinit();
 
     var channel_buf: [128]u8 = undefined;
     const channel_z = if (use_udp)
-        try std.fmt.bufPrintZ(&channel_buf, "aeron:udp?endpoint={s}:{d}", .{ target_host, target_port })
+        try std.mem.printSentinel(&channel_buf, "aeron:udp?endpoint={s}:{d}", .{ target_host, target_port }, 0)
     else
-        try std.fmt.bufPrintZ(&channel_buf, "aeron:ipc", .{});
+        try std.mem.printSentinel(&channel_buf, "aeron:ipc", .{}, 0);
     var pub_ = try client.addExclusivePublication(channel_z, pub_stream, null);
     defer pub_.close() catch {};
 
@@ -142,9 +142,9 @@ pub fn main(init: std.process.Init) !void {
     var admin_sub: ?ringloom_aeron.Subscription = null;
     if (ack_mode == 1) {
         const admin_channel_z = if (use_udp)
-            try std.fmt.bufPrintZ(&channel_buf, "aeron:udp?endpoint={s}:{d}", .{ target_host, target_port })
+            try std.mem.printSentinel(&channel_buf, "aeron:udp?endpoint={s}:{d}", .{ target_host, target_port }, 0)
         else
-            try std.fmt.bufPrintZ(&channel_buf, "aeron:ipc", .{});
+            try std.mem.printSentinel(&channel_buf, "aeron:ipc", .{}, 0);
         admin_sub = try client.addSubscription(admin_channel_z, admin_stream, null);
     }
 
@@ -289,7 +289,7 @@ fn registerTopic(alloc: std.mem.Allocator, storage_path: []const u8, topic_name:
     std.mem.writeInt(u16, buf[2..4], body_len, .little); // body_length
     std.mem.writeInt(i32, buf[4..8], @as(i32, 1), .little); // local_service_id
     // TopicConfig: roll_scheme_name[16] + retention_cycles(u32) + flags(u32) + _reserved[8] = 32 bytes
-    @memcpy(buf[8..24], "FAST_DAILY" ++ &[_]u8{0} ** 6); // roll_scheme_name[16]
+    @memcpy(buf[8..24], "FAST_DAILY\x00\x00\x00\x00\x00\x00"); // roll_scheme_name[16]
     std.mem.writeInt(u32, buf[24..28], @as(u32, 4), .little); // retention_cycles
     std.mem.writeInt(u32, buf[28..32], @as(u32, 0), .little); // flags
     @memset(buf[32..40], 0); // _reserved[8]

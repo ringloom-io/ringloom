@@ -32,7 +32,7 @@ pub const TopicCreatedBody = extern struct {
     leader_node_id: u8,
     /// TopicInfo only: 1 if the topic exists, else 0. Ignored for CREATED.
     exists: u8,
-    _pad: [6]u8 = [_]u8{0} ** 6,
+    _pad: [6]u8 = @splat(0),
     config: TopicConfig,
     name: [topic_name_max]u8,
 
@@ -51,7 +51,7 @@ pub const TopicLeaderChangedBody = extern struct {
     topic_id: u64 align(1),
     leader_epoch: u64 align(1),
     new_leader: u8,
-    _pad: [7]u8 = [_]u8{0} ** 7,
+    _pad: [7]u8 = @splat(0),
 };
 
 /// templateId = 16: TopicAppliedQuery (catch-up barrier; 0 = all topics).
@@ -65,7 +65,7 @@ pub const TopicAppliedReplyBody = extern struct {
     last_applied_index: u64 align(1),
     leader_epoch: u64 align(1),
     node: u8,
-    _pad: [7]u8 = [_]u8{0} ** 7,
+    _pad: [7]u8 = @splat(0),
 };
 
 /// templateId = 18: TopicAckFeedback. topic leader → brokers with local producers.
@@ -81,7 +81,7 @@ pub const TopicAckFeedbackBody = extern struct {
 };
 
 pub fn padTopicName(name: []const u8) [topic_name_max]u8 {
-    var out: [topic_name_max]u8 = [_]u8{0} ** topic_name_max;
+    var out: [topic_name_max]u8 = @splat(0);
     const n = @min(name.len, topic_name_max);
     @memcpy(out[0..n], name[0..n]);
     return out;
@@ -157,7 +157,7 @@ test "TopicLeaderChanged + AppliedReply round-trip" {
 }
 
 test "padTopicName truncates oversize names" {
-    const long = "x" ** 100;
-    const padded = padTopicName(long);
+    const long: [100]u8 = @splat('x');
+    const padded = padTopicName(&long);
     try testing.expectEqual(@as(usize, topic_name_max), trimTopicName(&padded).len);
 }

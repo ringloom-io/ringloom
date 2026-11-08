@@ -66,7 +66,7 @@ pub const ServiceCounters = struct {
         };
 
         inline for (0..ServiceCounter.count) |i| {
-            const sc: ServiceCounter = @enumFromInt(i);
+            const sc: ServiceCounter = @fromBackingInt(i);
             self.ids[i] = counters_mgr.allocate(@intCast(i), sc.label()) orelse
                 return error.CounterAllocationFailed;
         }
@@ -75,21 +75,21 @@ pub const ServiceCounters = struct {
     }
 
     pub inline fn increment(self: *const ServiceCounters, counter: ServiceCounter) void {
-        self.counters.increment(self.ids[@intFromEnum(counter)]);
+        self.counters.increment(self.ids[@backingInt(counter)]);
     }
 
     pub inline fn add(self: *const ServiceCounters, counter: ServiceCounter, delta: i64) void {
-        self.counters.add(self.ids[@intFromEnum(counter)], delta);
+        self.counters.add(self.ids[@backingInt(counter)], delta);
     }
 
     pub inline fn get(self: *const ServiceCounters, counter: ServiceCounter) i64 {
-        return self.counters.get(self.ids[@intFromEnum(counter)]);
+        return self.counters.get(self.ids[@backingInt(counter)]);
     }
 };
 
 test "ServiceCounters init allocates all service counters" {
-    var values_buf: [128 * 32]u8 align(128) = [_]u8{0} ** (128 * 32);
-    var meta_buf: [256 * 32]u8 align(4) = [_]u8{0} ** (256 * 32);
+    var values_buf: [128 * 32]u8 align(128) = @splat(0);
+    var meta_buf: [256 * 32]u8 align(4) = @splat(0);
     var manager = CountersManager.init(&values_buf, &meta_buf);
 
     const service_counters = try ServiceCounters.init(&manager);

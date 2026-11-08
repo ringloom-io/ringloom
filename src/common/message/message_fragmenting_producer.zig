@@ -92,7 +92,7 @@ test "unfragmented message sent as single record" {
     const capacity = 4096;
     const buf = try testing.allocator.alignedAlloc(
         u8,
-        @enumFromInt(std.math.log2(constants.ring_buffer_alignment)),
+        @fromBackingInt(@intCast(std.math.log2(constants.ring_buffer_alignment))),
         capacity + constants.ring_buffer_trailer_length,
     );
     defer testing.allocator.free(buf);
@@ -115,7 +115,7 @@ test "large message is fragmented" {
     const capacity = 4096;
     const buf = try testing.allocator.alignedAlloc(
         u8,
-        @enumFromInt(std.math.log2(constants.ring_buffer_alignment)),
+        @fromBackingInt(@intCast(std.math.log2(constants.ring_buffer_alignment))),
         capacity + constants.ring_buffer_trailer_length,
     );
     defer testing.allocator.free(buf);

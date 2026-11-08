@@ -329,12 +329,12 @@ pub const RingLoomEngine = struct {
         // 2. TopicPublicationResponse (template 8).
         const response = control_agent_mod.waitForTopicPublicationResponse(self.service_meta, 5000) catch
             return error.RegistrationTimeout;
-        if (response.status != @intFromEnum(topic_messages.PublicationStatus.ok)) {
+        if (response.status != @backingInt(topic_messages.PublicationStatus.ok)) {
             return switch (response.status) {
-                @intFromEnum(topic_messages.PublicationStatus.config_mismatch),
-                @intFromEnum(topic_messages.PublicationStatus.collision),
+                @backingInt(topic_messages.PublicationStatus.config_mismatch),
+                @backingInt(topic_messages.PublicationStatus.collision),
                 => error.TopicConfigMismatch,
-                @intFromEnum(topic_messages.PublicationStatus.disabled) => error.TopicDisabled,
+                @backingInt(topic_messages.PublicationStatus.disabled) => error.TopicDisabled,
                 else => error.RegistrationFailed,
             };
         }

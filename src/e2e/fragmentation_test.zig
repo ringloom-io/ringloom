@@ -23,9 +23,9 @@ test "large messages are fragmented and reassembled correctly" {
         .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
-            "--target-service",  "echo",
-            "--message-count",   "10",
-            "--message-size",    "4096",
+            "--target-service", "echo",
+            "--message-count",  "10",
+            "--message-size",   "4096",
         },
     });
     try harness.waitForServiceReady(ping, 5000);
@@ -60,9 +60,9 @@ test "very large messages beyond multiple fragment boundaries" {
         .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
-            "--target-service",  "echo",
-            "--message-count",   "3",
-            "--message-size",    "65536",
+            "--target-service", "echo",
+            "--message-count",  "3",
+            "--message-size",   "65536",
         },
     });
     try harness.waitForServiceReady(ping, 5000);
@@ -97,11 +97,11 @@ test "mixed small and large messages are handled correctly" {
         .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
-            "--target-service",    "echo",
-            "--message-count",     "20",
-            "--mixed-sizes",
-            "--small-message-size", "64",
-            "--large-message-size", "8192",
+            "--target-service", "echo",
+            "--message-count",  "20",
+            "--mixed-sizes",    "--small-message-size",
+            "64",               "--large-message-size",
+            "8192",
         },
     });
     try harness.waitForServiceReady(ping, 5000);

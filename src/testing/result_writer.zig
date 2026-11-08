@@ -47,7 +47,7 @@ pub const CorrectnessResult = struct {
 /// the same name is overwritten.  The returned slice is the full path to
 /// the written file (heap-allocated, caller-owned).
 pub fn writePerfResult(allocator: Allocator, dir_path: []const u8, result: PerfResult) ![]const u8 {
-    const file_name = try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.json", .{
+    const file_name = try allocator.print("{s}/{s}_{s}.json", .{
         dir_path,
         result.suite,
         result.scenario,
@@ -68,7 +68,7 @@ pub fn writePerfResult(allocator: Allocator, dir_path: []const u8, result: PerfR
 /// name is overwritten.  The returned slice is the full path to the
 /// written file (heap-allocated, caller-owned).
 pub fn writeCorrectnessResult(allocator: Allocator, dir_path: []const u8, result: CorrectnessResult) ![]const u8 {
-    const file_name = try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{
+    const file_name = try allocator.print("{s}/{s}.json", .{
         dir_path,
         result.scenario,
     });
@@ -85,7 +85,7 @@ pub fn writeCorrectnessResult(allocator: Allocator, dir_path: []const u8, result
 // ── JSON formatting (manual — avoids std.json limitations) ───────────
 
 fn formatPerfResultJson(allocator: Allocator, r: PerfResult) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
+    return allocator.print(
         \\{{
         \\    "suite": "{s}",
         \\    "scenario": "{s}",
@@ -127,7 +127,7 @@ fn formatCorrectnessResultJson(allocator: Allocator, r: CorrectnessResult) ![]co
     const passed_str = if (r.passed) "true" else "false";
 
     if (r.failure_reason) |reason| {
-        return std.fmt.allocPrint(allocator,
+        return allocator.print(
             \\{{
             \\    "scenario": "{s}",
             \\    "passed": {s},
@@ -142,7 +142,7 @@ fn formatCorrectnessResultJson(allocator: Allocator, r: CorrectnessResult) ![]co
             reason,
         });
     } else {
-        return std.fmt.allocPrint(allocator,
+        return allocator.print(
             \\{{
             \\    "scenario": "{s}",
             \\    "passed": {s},

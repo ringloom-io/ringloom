@@ -105,7 +105,7 @@ pub fn readCounter(
 
     const meta_base = id * counters.counter_metadata_length;
     const state = loadAt(i32, metadata_buffer, meta_base);
-    if (state != @intFromEnum(counters.CounterState.allocated)) return null;
+    if (state != @backingInt(counters.CounterState.allocated)) return null;
 
     const type_id = loadPlain(i32, metadata_buffer, meta_base + 4);
     const label_len_raw = loadPlain(i32, metadata_buffer, meta_base + 8);
@@ -160,7 +160,7 @@ fn loadPlain(comptime T: type, buffer: []u8, offset: usize) T {
 }
 
 test "deriveRingStats clamps used bytes to capacity" {
-    var buf: [1024 + ring_buffer.trailer_length]u8 align(8) = [_]u8{0} ** (1024 + ring_buffer.trailer_length);
+    var buf: [1024 + ring_buffer.trailer_length]u8 align(8) = @splat(0);
     storeAt(i64, &buf, 1024 + ring_buffer.tail_position_offset, 2048);
     storeAt(i64, &buf, 1024 + ring_buffer.head_position_offset, 0);
 

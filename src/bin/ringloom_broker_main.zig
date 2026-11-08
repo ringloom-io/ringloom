@@ -13,12 +13,12 @@ const ExitCode = enum(u8) {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    var debug_alloc: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => debug_alloc.allocator(),
-        .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
+        .debug, .safe => debug_alloc.allocator(),
+        .fast, .small => std.heap.smp_allocator,
     };
-    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+    defer if (builtin.mode == .debug or builtin.mode == .safe) {
         _ = debug_alloc.deinit();
     };
 
@@ -36,25 +36,25 @@ pub fn main(init: std.process.Init) !void {
 
     const config_path = parseConfigPath(args) catch {
         try printHelp(io);
-        std.process.exit(@intFromEnum(ExitCode.usage_error));
+        std.process.exit(@backingInt(ExitCode.usage_error));
     };
 
     var factory = BrokerApplicationFactory.init(allocator, io, init.environ_map);
     var bootstrap = factory.create(config_path) catch |err| {
         std.log.err("failed to load broker configuration: {}", .{err});
-        std.process.exit(@intFromEnum(ExitCode.config_error));
+        std.process.exit(@backingInt(ExitCode.config_error));
     };
     defer bootstrap.deinit();
 
     var app = ringloom_broker.BrokerApplication.init(allocator, bootstrap.config, io) catch |err| {
         std.log.err("failed to initialize broker application: {}", .{err});
-        std.process.exit(@intFromEnum(ExitCode.startup_error));
+        std.process.exit(@backingInt(ExitCode.startup_error));
     };
     defer app.deinit();
 
     const exit_code = app.run() catch |err| {
         std.log.err("broker runtime failed: {}", .{err});
-        std.process.exit(@intFromEnum(ExitCode.runtime_error));
+        std.process.exit(@backingInt(ExitCode.runtime_error));
     };
 
     std.process.exit(exit_code);

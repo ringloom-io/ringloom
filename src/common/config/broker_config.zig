@@ -171,13 +171,14 @@ pub const BrokerConfig = struct {
 
     pub fn buildAeronDirectory(self: *const BrokerConfig, buffer: []u8) std.fmt.BufPrintError![:0]u8 {
         if (self.aeron_directory.len > 0) {
-            return std.fmt.bufPrintZ(buffer, "{s}", .{self.aeron_directory});
+            return std.mem.printSentinel(buffer, "{s}", .{self.aeron_directory}, 0);
         }
 
-        return std.fmt.bufPrintZ(
+        return std.mem.printSentinel(
             buffer,
             "{s}/ringloom-aeron-{s}-node-{d}",
             .{ self.storage_path, self.group_name, self.node_id },
+            0,
         );
     }
 };

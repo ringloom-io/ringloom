@@ -85,10 +85,10 @@ pub const ProcessHandle = struct {
         const owned_exe = try allocator.dupe(u8, exe_path);
         errdefer allocator.free(owned_exe);
 
-        const stdout_path = try std.fmt.allocPrint(allocator, "{s}/{s}_stdout.log", .{ logs_dir, name });
+        const stdout_path = try allocator.print("{s}/{s}_stdout.log", .{ logs_dir, name });
         errdefer allocator.free(stdout_path);
 
-        const stderr_path = try std.fmt.allocPrint(allocator, "{s}/{s}_stderr.log", .{ logs_dir, name });
+        const stderr_path = try allocator.print("{s}/{s}_stderr.log", .{ logs_dir, name });
         errdefer allocator.free(stderr_path);
 
         // Open log files for mirroring pipe output.
@@ -353,7 +353,7 @@ pub const ProcessHandle = struct {
 
         const child = self.child orelse return false;
         const pid = child.id orelse return false;
-        var status: if (builtin.link_libc) std.c.c_int else u32 = undefined;
+        var status: if (builtin.link_libc) std.c.c_int else i32 = undefined;
 
         while (true) {
             const result = posix.system.waitpid(pid, &status, std.os.linux.W.NOHANG);
@@ -383,7 +383,7 @@ pub const ProcessHandle = struct {
 
         const child = self.child orelse return error.ProcessNotFound;
         const pid = child.id orelse return error.ProcessNotFound;
-        var status: if (builtin.link_libc) std.c.c_int else u32 = undefined;
+        var status: if (builtin.link_libc) std.c.c_int else i32 = undefined;
 
         while (true) {
             const result = posix.system.waitpid(pid, &status, 0);
@@ -406,7 +406,7 @@ fn statusToExitCode(status: u32) u32 {
     return if (posix.W.IFEXITED(status))
         @as(u32, posix.W.EXITSTATUS(status))
     else if (posix.W.IFSIGNALED(status))
-        128 + @intFromEnum(posix.W.TERMSIG(status))
+        128 + @backingInt(posix.W.TERMSIG(status))
     else
         255;
 }

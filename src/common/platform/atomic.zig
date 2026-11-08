@@ -154,7 +154,7 @@ pub const AtomicBool = struct {
 /// occupy their own 128-byte slot.
 pub const CacheLinePaddedAtomicI64 = extern struct {
     value: i64 align(constants.cache_line_pad) = 0,
-    _padding: [constants.cache_line_pad - @sizeOf(i64)]u8 = [_]u8{0} ** (constants.cache_line_pad - @sizeOf(i64)),
+    _padding: [constants.cache_line_pad - @sizeOf(i64)]u8 = @splat(0),
 
     const Self = @This();
 
@@ -168,7 +168,7 @@ pub const CacheLinePaddedAtomicI64 = extern struct {
     pub fn init(initial: i64) Self {
         return .{
             .value = initial,
-            ._padding = [_]u8{0} ** (constants.cache_line_pad - @sizeOf(i64)),
+            ._padding = @splat(0),
         };
     }
 
@@ -206,7 +206,7 @@ pub const CacheLinePaddedAtomicI64 = extern struct {
 /// words in the blocking ring buffer trailer.
 pub const CacheLinePaddedAtomicI32 = extern struct {
     value: i32 align(constants.cache_line_pad) = 0,
-    _padding: [constants.cache_line_pad - @sizeOf(i32)]u8 = [_]u8{0} ** (constants.cache_line_pad - @sizeOf(i32)),
+    _padding: [constants.cache_line_pad - @sizeOf(i32)]u8 = @splat(0),
 
     const Self = @This();
 
@@ -219,7 +219,7 @@ pub const CacheLinePaddedAtomicI32 = extern struct {
     pub fn init(initial: i32) Self {
         return .{
             .value = initial,
-            ._padding = [_]u8{0} ** (constants.cache_line_pad - @sizeOf(i32)),
+            ._padding = @splat(0),
         };
     }
 

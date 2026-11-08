@@ -106,8 +106,8 @@ test "setFmt truncates when message exceeds buffer" {
     var state = ErrorState{};
 
     // Build a format string argument that will exceed 8192 bytes.
-    const long_payload = "X" ** (max_error_message_length + 100);
-    state.setFmt(1, "{s}", .{long_payload});
+    const long_payload: [max_error_message_length + 100]u8 = @splat('X');
+    state.setFmt(1, "{s}", .{&long_payload});
 
     try std.testing.expect(state.isSet());
     try std.testing.expectEqual(max_error_message_length, state.msg_len);

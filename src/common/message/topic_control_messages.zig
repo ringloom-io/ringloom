@@ -103,7 +103,7 @@ pub const TopicLeaderChangedMsg = extern struct {
     topic_id: u64 align(1),
     leader_epoch: u64 align(1),
     leader_node_id: i16,
-    _pad: [6]u8 = [_]u8{0} ** 6,
+    _pad: [6]u8 = @splat(0),
 };
 
 pub const TopicEndpointMsg = extern struct {
@@ -177,7 +177,7 @@ pub fn encodeSubscribeTopic(buf: []u8, local_service_id: i32, start: StartPositi
     const msg = SubscribeTopicMsg{
         .header = undefined,
         .local_service_id = local_service_id,
-        .start_position = @intFromEnum(start),
+        .start_position = @backingInt(start),
         .name_length = @intCast(name.len),
     };
     writeStruct(buf, SubscribeTopicMsg, msg);
@@ -199,7 +199,7 @@ pub fn encodePublicationResponse(
         .topic_id = topic_id,
         .leader_epoch = leader_epoch,
         .leader_node_id = leader_node_id,
-        .status = @intFromEnum(status),
+        .status = @backingInt(status),
         .effective_config = effective_config,
     };
     writeStruct(buf, TopicPublicationResponseMsg, msg);
@@ -221,7 +221,7 @@ pub fn encodeSubscriptionResponse(
         .topic_id = topic_id,
         .start_index = start_index,
         .geometry = geometry,
-        .status = @intFromEnum(status),
+        .status = @backingInt(status),
         .queue_dir_length = @intCast(queue_dir.len),
     };
     writeStruct(buf, TopicSubscriptionResponseMsg, msg);
@@ -326,7 +326,7 @@ test "subscribe + subscription response round-trip with queue_dir tail" {
     var buf: [256]u8 = undefined;
     const n = encodeSubscribeTopic(&buf, 9, .latest, "metrics");
     const s = decode(SubscribeTopicMsg, buf[0..n]).?;
-    try testing.expectEqual(@as(u8, @intFromEnum(StartPosition.latest)), s.start_position);
+    try testing.expectEqual(@as(u8, @backingInt(StartPosition.latest)), s.start_position);
     try testing.expectEqualStrings("metrics", subscribeTopicName(buf[0..n]));
 
     const cfg = TopicConfig.fromName("FAST_DAILY", 7, false);
@@ -335,7 +335,7 @@ test "subscribe + subscription response round-trip with queue_dir tail" {
     const r = decode(TopicSubscriptionResponseMsg, buf2[0..n2]).?;
     try testing.expectEqual(@as(u64, 1234), r.topic_id);
     try testing.expectEqual(@as(u64, 99), r.start_index);
-    try testing.expectEqual(@as(u8, @intFromEnum(SubscriptionStatus.ok)), r.status);
+    try testing.expectEqual(@as(u8, @backingInt(SubscriptionStatus.ok)), r.status);
     try testing.expectEqualStrings("/dev/shm/topics/g/node-1/t_x", subscriptionResponseQueueDir(buf2[0..n2]));
 }
 

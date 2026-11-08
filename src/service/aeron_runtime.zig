@@ -40,7 +40,7 @@ pub const ServiceAeronRuntime = struct {
             return error.MissingAeronDiscovery;
         }
 
-        const owned_directory = try allocator.dupeZ(u8, directory);
+        const owned_directory = try allocator.dupeSentinel(u8, directory, 0);
         errdefer allocator.free(owned_directory);
 
         var client = try ringloom_aeron.Client.connect(.{
@@ -61,7 +61,7 @@ pub const ServiceAeronRuntime = struct {
             direct_peers.deinit(allocator);
         }
         for (discovery.peers()) |peer| {
-            const owned_peer_channel = try allocator.dupeZ(u8, peer.dataChannel());
+            const owned_peer_channel = try allocator.dupeSentinel(u8, peer.dataChannel(), 0);
             direct_peers.append(allocator, .{
                 .node_id = peer.node_id,
                 .data_stream_id = peer.data_stream_id,

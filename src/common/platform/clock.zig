@@ -13,9 +13,9 @@ const thread = @import("thread.zig");
 const platform_io = @import("io.zig");
 
 /// True when we can use RDTSC: x86_64, Linux, non-Debug build.
-const use_rdtsc = builtin.cpu.arch == .x86_64 and
-    builtin.os.tag == .linux and
-    builtin.mode != .Debug;
+const use_rdtsc = builtin.target.cpu.arch == .x86_64 and
+    builtin.target.os.tag == .linux and
+    builtin.mode != .debug;
 
 pub const Clock = struct {
     /// Returns the current monotonic time in nanoseconds.
@@ -28,7 +28,7 @@ pub const Clock = struct {
     pub fn monotonicNanos() i64 {
         if (comptime use_rdtsc) {
             return rdtscNanos();
-        } else if (comptime builtin.os.tag == .linux) {
+        } else if (comptime builtin.target.os.tag == .linux) {
             return monotonicNanosLinux();
         } else {
             return monotonicNanosStd();
@@ -44,7 +44,7 @@ pub const Clock = struct {
     ///
     /// Performance: ~25 ns on Linux via vDSO-backed `clock_gettime`.
     pub fn monotonicNanosStable() i64 {
-        if (comptime builtin.os.tag == .linux) {
+        if (comptime builtin.target.os.tag == .linux) {
             return monotonicNanosLinux();
         } else {
             return monotonicNanosStd();
@@ -145,7 +145,7 @@ pub const Clock = struct {
     ///
     /// Performance: ~5ns on Linux (COARSE), ~25ns on macOS, ~15ns on Windows.
     pub fn epochMillis() i64 {
-        if (comptime builtin.os.tag == .linux) {
+        if (comptime builtin.target.os.tag == .linux) {
             return epochMillisLinuxCoarse();
         } else {
             return epochMillisStd();
@@ -157,7 +157,7 @@ pub const Clock = struct {
     fn epochMillisLinuxCoarse() i64 {
         var ts: std.os.linux.timespec = undefined;
         // CLOCK_REALTIME_COARSE = 5 on Linux.
-        const CLOCK_REALTIME_COARSE: std.os.linux.clockid_t = @enumFromInt(5);
+        const CLOCK_REALTIME_COARSE: std.os.linux.clockid_t = @fromBackingInt(@intCast(5));
         const rc = std.os.linux.clock_gettime(CLOCK_REALTIME_COARSE, &ts);
         if (rc != 0) {
             // Fallback to standard clock if COARSE isn't available.

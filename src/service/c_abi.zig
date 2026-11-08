@@ -284,15 +284,15 @@ const PollDispatchContext = struct {
 };
 
 threadlocal var last_error_message_buffer: [max_error_message_length + 1:0]u8 =
-    [_:0]u8{0} ** (max_error_message_length + 1);
+    @splat(0);
 threadlocal var poll_dispatch_context: ?*PollDispatchContext = null;
 
-var abi_debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+var abi_debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
 
 fn abiAllocator() std.mem.Allocator {
     return switch (builtin.mode) {
-        .Debug, .ReleaseSafe => abi_debug_allocator.allocator(),
-        .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
+        .debug, .safe => abi_debug_allocator.allocator(),
+        .fast, .small => std.heap.smp_allocator,
     };
 }
 
@@ -307,7 +307,7 @@ fn setLastError(status: Status, message: []const u8) Status {
         @memcpy(last_error_message_buffer[0..len], message[0..len]);
     }
     last_error_message_buffer[len] = 0;
-    error_state_mod.err_state.set(@intFromEnum(status), last_error_message_buffer[0..len]);
+    error_state_mod.err_state.set(@backingInt(status), last_error_message_buffer[0..len]);
     return status;
 }
 
@@ -1723,8 +1723,8 @@ export fn ringloom_register_topic_publication(
     return .RINGLOOM_OK;
 }
 
-var topic_publisher_handle_allocator: std.heap.DebugAllocator(.{}) = .{};
-var topic_subscription_handle_allocator: std.heap.DebugAllocator(.{}) = .{};
+var topic_publisher_handle_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+var topic_subscription_handle_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
 
 fn topicPublisherFromOpaque(p: ?*ringloom_topic_publisher) ?*TopicPublisherHandle {
     return if (p) |ptr| @ptrCast(@alignCast(ptr)) else null;
@@ -1823,13 +1823,11 @@ export fn ringloom_subscribe_topic(
     const response = control_agent_mod.waitForTopicSubscriptionResponse(engine.service_meta, 5000) catch
         return setLastError(.RINGLOOM_ERR_REGISTRATION_TIMEOUT, "topic subscription timed out");
 
-    const ok_status: u8 = @intFromEnum(topic_messages.SubscriptionStatus.ok);
+    const ok_status: u8 = @backingInt(topic_messages.SubscriptionStatus.ok);
     if (response.status != ok_status) {
         return switch (response.status) {
-            @intFromEnum(topic_messages.SubscriptionStatus.unknown_topic) =>
-                setLastError(.RINGLOOM_ERR_TOPIC_UNKNOWN, "unknown topic"),
-            @intFromEnum(topic_messages.SubscriptionStatus.disabled) =>
-                setLastError(.RINGLOOM_ERR_TOPIC_DISABLED, "topics disabled on broker"),
+            @backingInt(topic_messages.SubscriptionStatus.unknown_topic) => setLastError(.RINGLOOM_ERR_TOPIC_UNKNOWN, "unknown topic"),
+            @backingInt(topic_messages.SubscriptionStatus.disabled) => setLastError(.RINGLOOM_ERR_TOPIC_DISABLED, "topics disabled on broker"),
             else => setLastError(.RINGLOOM_ERR_INTERNAL, "topic subscription failed"),
         };
     }
@@ -1998,7 +1996,7 @@ comptime {
     std.debug.assert(@offsetOf(ringloom_metric_slot_t, "value_len") == 16);
     std.debug.assert(@sizeOf(ringloom_metric_slot_t) == 24);
     std.debug.assert(@sizeOf(ringloom_ring_stats_t) == 40);
-    std.debug.assert(@intFromEnum(ringloom_aeron_publication_status_t.RINGLOOM_AERON_PUBLICATION_FAILED) == 7);
+    std.debug.assert(@backingInt(ringloom_aeron_publication_status_t.RINGLOOM_AERON_PUBLICATION_FAILED) == 7);
 }
 
 test "abi version matches header constant" {

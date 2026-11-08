@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 
 // Aeron 1.51.0 C source lists are derived from Aeron's CMake files and the
 // reference Zig build at /home/dragan/code/brz/aeron-zig.
@@ -20,7 +21,7 @@ pub const Options = struct {
 pub fn buildRingLoomAeron(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     options: Options,
 ) BuildResult {
     const upstream = b.dependency("aeron", .{});
@@ -67,9 +68,15 @@ pub fn buildRingLoomAeron(
         .link_libc = true,
         .pic = true,
     });
-    module.addIncludePath(upstream.path(client_root));
-    module.addIncludePath(upstream.path(driver_root));
-    module.addIncludePath(b.path("src/aeron"));
+    // `@cImport` was removed in Zig 0.17; translate the shim header with the
+    // external translate-c package and expose it to root.zig as `aeron_c`.
+    const translator: Translator = .init(b.dependency("translate_c", .{}), .{
+        .name = "aeron_zig_api",
+        .c_source_file = b.path("src/aeron/aeron_zig_api.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    module.addImport("aeron_c", translator.mod);
     module.linkLibrary(aeron_driver);
 
     return .{

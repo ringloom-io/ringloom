@@ -104,12 +104,12 @@ fn handleRiskAccepted(payload: []const u8) void {
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     runtime_io = io;
-    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    var debug_alloc: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => debug_alloc.allocator(),
-        .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
+        .debug, .safe => debug_alloc.allocator(),
+        .fast, .small => std.heap.smp_allocator,
     };
-    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+    defer if (builtin.mode == .debug or builtin.mode == .safe) {
         _ = debug_alloc.deinit();
     };
 

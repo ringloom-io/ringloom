@@ -80,7 +80,7 @@ pub const ServiceRegistry = struct {
 
     pub fn init() ServiceRegistry {
         return .{
-            .entries = [_]?ServiceEntry{null} ** constants.default_max_services,
+            .entries = @splat(null),
         };
     }
 

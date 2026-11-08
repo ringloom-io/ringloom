@@ -1288,8 +1288,8 @@ test "remote data fields encode RingLoomDataHeader fields" {
 }
 
 test "remote publication status updates health and counters" {
-    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
-    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
+    var values_buf: [128 * 64]u8 align(128) = @splat(0);
+    var meta_buf: [256 * 64]u8 align(4) = @splat(0);
     var counters_mgr = ringloom_common.concurrent.counters.CountersManager.init(&values_buf, &meta_buf);
     var service_counters = try ServiceCounters.init(&counters_mgr);
 

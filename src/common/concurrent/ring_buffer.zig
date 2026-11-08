@@ -142,35 +142,35 @@ pub const RingBuffer = struct {
         return @ptrCast(@alignCast(self.buffer.ptr + offset));
     }
 
-    inline fn loadTailPosition(self: *RingBuffer, order: std.builtin.AtomicOrder) i64 {
+    inline fn loadTailPosition(self: *RingBuffer, order: std.lang.AtomicOrder) i64 {
         return @atomicLoad(i64, self.trailerFieldPtr(tail_position_offset), order);
     }
 
-    inline fn loadHeadCache(self: *RingBuffer, order: std.builtin.AtomicOrder) i64 {
+    inline fn loadHeadCache(self: *RingBuffer, order: std.lang.AtomicOrder) i64 {
         return @atomicLoad(i64, self.trailerFieldPtr(head_cache_position_offset), order);
     }
 
-    inline fn storeHeadCache(self: *RingBuffer, value: i64, order: std.builtin.AtomicOrder) void {
+    inline fn storeHeadCache(self: *RingBuffer, value: i64, order: std.lang.AtomicOrder) void {
         @atomicStore(i64, self.trailerFieldPtr(head_cache_position_offset), value, order);
     }
 
-    inline fn loadHeadPosition(self: *RingBuffer, order: std.builtin.AtomicOrder) i64 {
+    inline fn loadHeadPosition(self: *RingBuffer, order: std.lang.AtomicOrder) i64 {
         return @atomicLoad(i64, self.trailerFieldPtr(head_position_offset), order);
     }
 
-    inline fn storeHeadPosition(self: *RingBuffer, value: i64, order: std.builtin.AtomicOrder) void {
+    inline fn storeHeadPosition(self: *RingBuffer, value: i64, order: std.lang.AtomicOrder) void {
         @atomicStore(i64, self.trailerFieldPtr(head_position_offset), value, order);
     }
 
-    inline fn loadCorrelationCounter(self: *const RingBuffer, order: std.builtin.AtomicOrder) i64 {
+    inline fn loadCorrelationCounter(self: *const RingBuffer, order: std.lang.AtomicOrder) i64 {
         return @atomicLoad(i64, self.trailerFieldPtrConst(correlation_counter_offset), order);
     }
 
-    inline fn loadConsumerHeartbeat(self: *const RingBuffer, order: std.builtin.AtomicOrder) i64 {
+    inline fn loadConsumerHeartbeat(self: *const RingBuffer, order: std.lang.AtomicOrder) i64 {
         return @atomicLoad(i64, self.trailerFieldPtrConst(consumer_heartbeat_offset), order);
     }
 
-    inline fn storeConsumerHeartbeat(self: *RingBuffer, value: i64, order: std.builtin.AtomicOrder) void {
+    inline fn storeConsumerHeartbeat(self: *RingBuffer, value: i64, order: std.lang.AtomicOrder) void {
         @atomicStore(i64, self.trailerFieldPtr(consumer_heartbeat_offset), value, order);
     }
 
@@ -682,7 +682,7 @@ fn scanBackToConfirmStillZeroed(self: *RingBuffer, from: usize, limit: usize) bo
 }
 
 fn allocateAlignedBuffer(allocator: std.mem.Allocator, buf_size: usize) ![]align(record_alignment) u8 {
-    const buf = try allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(record_alignment)), buf_size);
+    const buf = try allocator.alignedAlloc(u8, @fromBackingInt(std.math.log2(record_alignment)), buf_size);
     @memset(buf, 0);
     return buf;
 }
@@ -910,7 +910,7 @@ test "controlledReadWithContext supports commit and abort" {
     try rb.write(3, "third");
 
     const Context = struct {
-        seen: [4]i32 = [_]i32{0} ** 4,
+        seen: [4]i32 = @splat(0),
         len: usize = 0,
 
         fn handler(ctx: *anyopaque, msg_type_id: i32, _: []const u8) RingBuffer.ControlledReadAction {
@@ -1047,7 +1047,7 @@ test "write rejects message too long" {
 
     var rb = try RingBuffer.init(buf, false, null, null);
     // max_msg_length = 128 / 8 = 16 bytes.
-    const too_long: [17]u8 = .{0} ** 17;
+    const too_long: [17]u8 = @splat(0);
     const result = rb.write(1, &too_long);
     try std.testing.expectError(RingBuffer.WriteError.MessageTooLong, result);
 }
@@ -1104,7 +1104,7 @@ test "read does not misinterpret stale payload bytes as a header on a later lap"
 
     // Lap 1: fill the buffer with 128-byte records whose payload bytes form a
     // positive i32 (0x01010101) at every 8-byte boundary.
-    const payload = [_]u8{1} ** 120;
+    const payload: [120]u8 = @splat(1);
     for (0..cap / 128) |_| {
         try rb.write(1, &payload);
         _ = rb.read(&testNoopHandler, 10);
@@ -1129,7 +1129,7 @@ test "controlledRead commit does not misinterpret stale payload bytes on a later
     defer allocator.free(buf);
     var rb = try RingBuffer.init(buf, false, null, null);
 
-    const payload = [_]u8{1} ** 120;
+    const payload: [120]u8 = @splat(1);
     for (0..cap / 128) |_| {
         try rb.write(1, &payload);
         resetTestState();

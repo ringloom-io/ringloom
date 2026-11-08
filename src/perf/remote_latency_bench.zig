@@ -70,8 +70,7 @@ fn runRemoteLatencyBench(
     // Allow the cluster to discover peers and stabilise.
     platform.sleepNanos(cluster_settle_ns);
 
-    const echo_result_path = try std.fmt.allocPrint(
-        allocator,
+    const echo_result_path = try allocator.print(
         "{s}/remote-latency-echo-{s}.json",
         .{ harness.env.results_path, tag },
     );
@@ -93,11 +92,11 @@ fn runRemoteLatencyBench(
         .service_name = "ping",
         .broker_node_id = broker_a_node_id,
         .extra_args = &.{
-            "--target-service",  "echo",
-            "--message-count",   message_count,
-            "--message-size",    size_str,
-            "--warmup-count",    warmup_count,
-            "--spin-timeout-ms", "100",
+            "--target-service",          "echo",
+            "--message-count",           message_count,
+            "--message-size",            size_str,
+            "--warmup-count",            warmup_count,
+            "--spin-timeout-ms",         "100",
             "--target-ready-timeout-ms", "10000",
         },
     });

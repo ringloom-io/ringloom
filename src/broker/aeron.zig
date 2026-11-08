@@ -126,9 +126,9 @@ pub const BrokerUdpTransport = struct {
             config.local_port,
             config.aeron_udp_term_length,
         );
-        const inbound_channel = try allocator.dupeZ(u8, inbound_uri);
+        const inbound_channel = try allocator.dupeSentinel(u8, inbound_uri, 0);
         errdefer allocator.free(inbound_channel);
-        const admin_inbound_channel = try allocator.dupeZ(u8, inbound_uri);
+        const admin_inbound_channel = try allocator.dupeSentinel(u8, inbound_uri, 0);
         errdefer allocator.free(admin_inbound_channel);
 
         const inbound_stream_id = dataStreamId(config, config.node_id);
@@ -146,7 +146,7 @@ pub const BrokerUdpTransport = struct {
         errdefer if (repl_inbound_subscription) |*s| s.close() catch {};
         const repl_inbound_stream_id = replStreamId(config, config.node_id);
         if (topics_enabled) {
-            repl_inbound_channel = try allocator.dupeZ(u8, inbound_uri);
+            repl_inbound_channel = try allocator.dupeSentinel(u8, inbound_uri, 0);
             repl_inbound_subscription = try client.addSubscription(repl_inbound_channel.?, repl_inbound_stream_id, driver_agents);
         }
 
@@ -159,7 +159,7 @@ pub const BrokerUdpTransport = struct {
         errdefer if (topic_ipc_subscription) |*s| s.close() catch {};
         if (topics_enabled) {
             var ipc_uri_buf: [64]u8 = undefined;
-            const ipc_channel_z = try std.fmt.bufPrintZ(&ipc_uri_buf, "aeron:ipc", .{});
+            const ipc_channel_z = try std.mem.printSentinel(&ipc_uri_buf, "aeron:ipc", .{}, 0);
             topic_ipc_subscription = try client.addSubscription(ipc_channel_z, topic_ipc_stream_id, driver_agents);
         }
 
@@ -179,9 +179,9 @@ pub const BrokerUdpTransport = struct {
 
         for (config.peer_endpoints, 0..) |endpoint, i| {
             const peer_uri = try peerChannelUri(&channel_buf, endpoint, config.aeron_udp_term_length);
-            const peer_channel = try allocator.dupeZ(u8, peer_uri);
+            const peer_channel = try allocator.dupeSentinel(u8, peer_uri, 0);
             errdefer if (initialized == i) allocator.free(peer_channel);
-            const peer_admin_channel = try allocator.dupeZ(u8, peer_uri);
+            const peer_admin_channel = try allocator.dupeSentinel(u8, peer_uri, 0);
             errdefer if (initialized == i) allocator.free(peer_admin_channel);
 
             const stream_id = dataStreamId(config, endpoint.node_id);
@@ -197,7 +197,7 @@ pub const BrokerUdpTransport = struct {
             errdefer if (initialized == i and peer_repl_publication != null) peer_repl_publication.?.close() catch {};
             const peer_repl_stream_id = replStreamId(config, endpoint.node_id);
             if (topics_enabled) {
-                peer_repl_channel = try allocator.dupeZ(u8, peer_uri);
+                peer_repl_channel = try allocator.dupeSentinel(u8, peer_uri, 0);
                 peer_repl_publication = try client.addExclusivePublication(peer_repl_channel.?, peer_repl_stream_id, driver_agents);
             }
 

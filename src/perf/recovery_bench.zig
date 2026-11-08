@@ -66,7 +66,7 @@ fn writeRecoverySummary(
         try std.Io.Dir.cwd().createFile(std.testing.io, file_path, .{});
     defer file.close(std.testing.io);
 
-    const json = try std.fmt.allocPrint(allocator,
+    const json = try allocator.print(
         \\{{
         \\  "scenario": "{s}",
         \\  "build_mode": "{s}",
@@ -106,7 +106,7 @@ fn pingResultShowsFullSuccess(
     );
     defer allocator.free(content);
 
-    const sent_field = try std.fmt.allocPrint(allocator, "\"sent\": {d}", .{expected_sent});
+    const sent_field = try allocator.print("\"sent\": {d}", .{expected_sent});
     defer allocator.free(sent_field);
 
     return std.mem.indexOf(u8, content, sent_field) != null and

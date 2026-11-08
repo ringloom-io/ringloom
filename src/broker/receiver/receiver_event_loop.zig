@@ -170,7 +170,7 @@ pub const ReceiverEventLoop = struct {
         aeron_options: ReceiverAeronOptions,
     ) Self {
         var self = Self{
-            .peers = [_]?PeerLiveness{null} ** 256,
+            .peers = @splat(null),
             .service_registry = service_registry,
             .counters = counters,
             .counter_ids = ReceiverCounters.allocate(counters),
@@ -504,8 +504,8 @@ fn createTestCounters(
 
 test "ReceiverEventLoop init and peer liveness" {
     var registry = ServiceRegistry.init();
-    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
-    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
+    var values_buf: [128 * 64]u8 align(128) = @splat(0);
+    var meta_buf: [256 * 64]u8 align(4) = @splat(0);
     var counters = createTestCounters(&values_buf, &meta_buf);
 
     var recv_loop = ReceiverEventLoop.initWithAeron(
@@ -532,14 +532,14 @@ test "ReceiverEventLoop init and peer liveness" {
 
 test "processBrokerUdpFragment drops frames for another node" {
     var registry = ServiceRegistry.init();
-    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
-    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
+    var values_buf: [128 * 64]u8 align(128) = @splat(0);
+    var meta_buf: [256 * 64]u8 align(4) = @splat(0);
     var counters = createTestCounters(&values_buf, &meta_buf);
 
     var recv_loop = ReceiverEventLoop.init(&registry, &counters, 1, testing.allocator);
     defer recv_loop.deinit();
 
-    var frame_buf: [128]u8 = [_]u8{0} ** 128;
+    var frame_buf: [128]u8 = @splat(0);
     const payload = "misdirected";
     const frame_len = try data_header.encodeFrame(&frame_buf, payload, .{
         .source_node_id = 2,
@@ -556,8 +556,8 @@ test "processBrokerUdpFragment drops frames for another node" {
 
 test "processBrokerAdminUdpFragment dispatches admin envelope" {
     var registry = ServiceRegistry.init();
-    var values_buf: [128 * 64]u8 align(128) = [_]u8{0} ** (128 * 64);
-    var meta_buf: [256 * 64]u8 align(4) = [_]u8{0} ** (256 * 64);
+    var values_buf: [128 * 64]u8 align(128) = @splat(0);
+    var meta_buf: [256 * 64]u8 align(4) = @splat(0);
     var counters = createTestCounters(&values_buf, &meta_buf);
     var queue: AdminCommandQueue(64) = .{};
 

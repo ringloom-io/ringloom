@@ -22,7 +22,7 @@ test "observability exporter exposes broker and service metadata metrics" {
     });
     try harness.waitForServiceReady(echo, 5000);
 
-    const exporter_path = try std.fmt.allocPrint(allocator, "{s}/ringloom-observability", .{harness.bin_dir});
+    const exporter_path = try allocator.print("{s}/ringloom-observability", .{harness.bin_dir});
     defer allocator.free(exporter_path);
 
     const exporter = try allocator.create(ProcessHandle);

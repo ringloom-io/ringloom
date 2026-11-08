@@ -37,11 +37,11 @@ pub const BrokerMetadataHeader = extern struct {
 
 pub const BrokerAeronPeerEndpoint = extern struct {
     node_id: u8 = 0,
-    _reserved0: [3]u8 = [_]u8{0} ** 3,
+    _reserved0: [3]u8 = @splat(0),
     data_stream_id: i32 = 0,
     data_channel_length: u16 = 0,
-    _reserved1: [6]u8 = [_]u8{0} ** 6,
-    data_channel: [constants.max_aeron_channel_length]u8 = [_]u8{0} ** constants.max_aeron_channel_length,
+    _reserved1: [6]u8 = @splat(0),
+    data_channel: [constants.max_aeron_channel_length]u8 = @splat(0),
 
     pub fn dataChannel(self: *const BrokerAeronPeerEndpoint) []const u8 {
         const length = @min(@as(usize, @intCast(self.data_channel_length)), self.data_channel.len);
@@ -60,15 +60,15 @@ pub const BrokerAeronDiscovery = extern struct {
     admin_stream_base: i32 = 0,
     data_stream_base: i32 = 0,
     peer_count: u8 = 0,
-    _reserved0: [3]u8 = [_]u8{0} ** 3,
+    _reserved0: [3]u8 = @splat(0),
     aeron_directory_length: u16 = 0,
     local_data_channel_length: u16 = 0,
     local_admin_channel_length: u16 = 0,
     _reserved1: u16 = 0,
-    aeron_directory: [constants.max_aeron_directory_length]u8 = [_]u8{0} ** constants.max_aeron_directory_length,
-    local_data_channel: [constants.max_aeron_channel_length]u8 = [_]u8{0} ** constants.max_aeron_channel_length,
-    local_admin_channel: [constants.max_aeron_channel_length]u8 = [_]u8{0} ** constants.max_aeron_channel_length,
-    peer_data_channels: [constants.default_max_peers]BrokerAeronPeerEndpoint = [_]BrokerAeronPeerEndpoint{.{}} ** constants.default_max_peers,
+    aeron_directory: [constants.max_aeron_directory_length]u8 = @splat(0),
+    local_data_channel: [constants.max_aeron_channel_length]u8 = @splat(0),
+    local_admin_channel: [constants.max_aeron_channel_length]u8 = @splat(0),
+    peer_data_channels: [constants.default_max_peers]BrokerAeronPeerEndpoint = @splat(.{}),
 
     pub fn directory(self: *const BrokerAeronDiscovery) []const u8 {
         return self.aeron_directory[0..@as(usize, @intCast(self.aeron_directory_length))];

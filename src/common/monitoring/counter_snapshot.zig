@@ -20,7 +20,7 @@ pub const CounterSnapshot = struct {
         };
 
         inline for (0..SystemCounter.count) |i| {
-            const sc: SystemCounter = @enumFromInt(i);
+            const sc: SystemCounter = @fromBackingInt(@intCast(i));
             snapshot.values[i] = .{
                 .id = @intCast(i),
                 .label = sc.label(),

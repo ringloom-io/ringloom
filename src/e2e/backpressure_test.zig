@@ -36,10 +36,10 @@ test "system remains stable under backpressure with slow consumer" {
         .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
-            "--target-service",  "slow-echo",
-            "--message-count",   "500",
-            "--send-delay-us",   "0",
-            "--allow-failures",  "true",
+            "--target-service", "slow-echo",
+            "--message-count",  "500",
+            "--send-delay-us",  "0",
+            "--allow-failures", "true",
         },
     });
     try harness.waitForServiceReady(ping, 5000);
@@ -80,10 +80,10 @@ test "broker stays healthy when multiple producers overwhelm a single consumer" 
         .executable_name = "ringloom-test-ping-service",
         .service_name = "ping-a",
         .extra_args = &.{
-            "--target-service",  "slow-echo",
-            "--message-count",   "200",
-            "--send-delay-us",   "0",
-            "--allow-failures",  "true",
+            "--target-service", "slow-echo",
+            "--message-count",  "200",
+            "--send-delay-us",  "0",
+            "--allow-failures", "true",
         },
     });
     try harness.waitForServiceReady(ping_a, 5000);
@@ -92,10 +92,10 @@ test "broker stays healthy when multiple producers overwhelm a single consumer" 
         .executable_name = "ringloom-test-ping-service",
         .service_name = "ping-b",
         .extra_args = &.{
-            "--target-service",  "slow-echo",
-            "--message-count",   "200",
-            "--send-delay-us",   "0",
-            "--allow-failures",  "true",
+            "--target-service", "slow-echo",
+            "--message-count",  "200",
+            "--send-delay-us",  "0",
+            "--allow-failures", "true",
         },
     });
     try harness.waitForServiceReady(ping_b, 5000);
@@ -104,10 +104,10 @@ test "broker stays healthy when multiple producers overwhelm a single consumer" 
         .executable_name = "ringloom-test-ping-service",
         .service_name = "ping-c",
         .extra_args = &.{
-            "--target-service",  "slow-echo",
-            "--message-count",   "200",
-            "--send-delay-us",   "0",
-            "--allow-failures",  "true",
+            "--target-service", "slow-echo",
+            "--message-count",  "200",
+            "--send-delay-us",  "0",
+            "--allow-failures", "true",
         },
     });
     try harness.waitForServiceReady(ping_c, 5000);

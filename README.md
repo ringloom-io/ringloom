@@ -50,7 +50,7 @@ Core modules:
 
 ### Requirements
 
-- Zig **0.16.x**
+- Zig **0.17.x**
 - Linux
 - Optional tooling for bindings:
   - Gradle for Java bindings

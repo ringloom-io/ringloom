@@ -398,7 +398,7 @@ fn printAeronCncDetails(
         }
         try stdout.print("      [{d}] type={d} {s}={d}", .{ sample.id, sample.type_id, sample.label, sample.value });
         if (sample.systemCounter()) |system_counter| {
-            try stdout.print(" system_id={d}", .{@intFromEnum(system_counter)});
+            try stdout.print(" system_id={d}", .{@backingInt(system_counter)});
         }
         if (sample.streamKey()) |stream_key| {
             const kind = aeron_cnc_reader.channelKind(stream_key, broker_ingress_stream_id, admin_stream_base, data_stream_base);

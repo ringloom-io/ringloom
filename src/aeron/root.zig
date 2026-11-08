@@ -4,9 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const c = @cImport({
-    @cInclude("aeron_zig_api.h");
-});
+const c = @import("aeron_c");
 
 pub const Error = error{
     AeronCallFailed,
@@ -90,9 +88,9 @@ fn check(rc: c_int) Error!void {
 pub const ChannelUri = struct {
     pub fn ipc(buffer: []u8, term_length: ?usize) std.fmt.BufPrintError![:0]u8 {
         if (term_length) |length| {
-            return std.fmt.bufPrintZ(buffer, "aeron:ipc?term-length={d}", .{length});
+            return std.mem.printSentinel(buffer, "aeron:ipc?term-length={d}", .{length}, 0);
         }
-        return std.fmt.bufPrintZ(buffer, "aeron:ipc", .{});
+        return std.mem.printSentinel(buffer, "aeron:ipc", .{}, 0);
     }
 
     pub fn udpEndpoint(
@@ -102,16 +100,18 @@ pub const ChannelUri = struct {
         term_length: ?usize,
     ) std.fmt.BufPrintError![:0]u8 {
         if (term_length) |length| {
-            return std.fmt.bufPrintZ(
+            return std.mem.printSentinel(
                 buffer,
                 "aeron:udp?endpoint={s}:{d}|term-length={d}",
                 .{ endpoint_host, endpoint_port, length },
+                0,
             );
         }
-        return std.fmt.bufPrintZ(
+        return std.mem.printSentinel(
             buffer,
             "aeron:udp?endpoint={s}:{d}",
             .{ endpoint_host, endpoint_port },
+            0,
         );
     }
 };
@@ -772,7 +772,7 @@ test "channel URI builder writes IPC and UDP endpoint URIs" {
 
 test "embedded driver IPC exclusive publication round trip" {
     var dir_buffer: [128]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&dir_buffer, "/tmp/ringloom-aeron-test-{d}", .{std.os.linux.getpid()});
+    const dir = try std.mem.printSentinel(&dir_buffer, "/tmp/ringloom-aeron-test-{d}", .{std.os.linux.getpid()}, 0);
     try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
 

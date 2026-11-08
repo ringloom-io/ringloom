@@ -25,7 +25,7 @@
     .fingerprint = 0xd3be23016c4f6f26, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
@@ -38,8 +38,8 @@
             .hash = "N-V-__8AANhHNAGQAdVQPxoIhmCoz_7Dj7ODXvMcX9_C0eJf",
         },
         .ringloom_queue = .{
-            .url = "https://github.com/ringloom-io/ringloom-queue/archive/refs/tags/v0.2.1.tar.gz",
-            .hash = "ringloom_queue-0.0.0-EBSE_nKnBQCEF9mX23hHILcYSkSD202m7g4zTIy55kuK",
+            .url = "https://github.com/ringloom-io/ringloom-queue/archive/refs/tags/v0.2.2.tar.gz",
+            .hash = "ringloom_queue-0.0.0-EBSE_oumBQAvAm8YoxDIhRO0P3a0THwHBft36S-fdj_6",
         },
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -69,6 +69,10 @@
         //    // actually used.
         //    .lazy = false,
         //},
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c#cfac21f3199b2b02ce3fd7db652aa456421fe4ab",
+            .hash = "translate_c-2.0.2-Q_BUWvBNBwDnyehSiuAJmdFcMYHYGA-Jc3KiYdrV2Dqx",
+        },
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that

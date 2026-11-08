@@ -31,7 +31,7 @@ subscriber-chosen start position · first-creation-wins immutable config.
 
 ## Conventions reminder (see repo Copilot instructions)
 
-- Zig 0.16.x; extern structs for all wire formats; cache-line padding on shared atomics; power-of-two
+- Zig 0.17.x; extern structs for all wire formats; cache-line padding on shared atomics; power-of-two
   ring capacities; no hot-path allocation; SPDX header on every new file (`// SPDX-License-Identifier: Apache-2.0`).
 - ringloom-queue is consumed via `@import("ringloom_queue")` (`repl`, `Queue`, `Appender`, `Tailer`,
   `RollScheme`); its replication contract is in that repo's `docs/12-replication.md`.

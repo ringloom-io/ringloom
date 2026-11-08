@@ -16,7 +16,7 @@ pub const SystemCounters = struct {
 
         // Allocate all well-known counters at startup.
         inline for (0..SystemCounter.count) |i| {
-            const sc: SystemCounter = @enumFromInt(i);
+            const sc: SystemCounter = @fromBackingInt(@intCast(i));
             self.ids[i] = counters_mgr.allocate(@intCast(i), sc.label()) orelse
                 return error.CounterAllocationFailed;
         }
@@ -26,22 +26,22 @@ pub const SystemCounters = struct {
 
     /// Atomically increment a counter by 1.
     pub inline fn increment(self: *const SystemCounters, counter: SystemCounter) void {
-        self.counters.increment(self.ids[@intFromEnum(counter)]);
+        self.counters.increment(self.ids[@backingInt(counter)]);
     }
 
     /// Atomically add `delta` to a counter.
     pub inline fn add(self: *const SystemCounters, counter: SystemCounter, delta: i64) void {
-        self.counters.add(self.ids[@intFromEnum(counter)], delta);
+        self.counters.add(self.ids[@backingInt(counter)], delta);
     }
 
     /// Atomically set a counter to an absolute value.
     pub inline fn set(self: *const SystemCounters, counter: SystemCounter, value: i64) void {
-        self.counters.set(self.ids[@intFromEnum(counter)], value);
+        self.counters.set(self.ids[@backingInt(counter)], value);
     }
 
     /// Read the current value of a counter (atomic load).
     pub inline fn get(self: *const SystemCounters, counter: SystemCounter) i64 {
-        return self.counters.get(self.ids[@intFromEnum(counter)]);
+        return self.counters.get(self.ids[@backingInt(counter)]);
     }
 
     /// Conditionally update a counter to the maximum of current and new value.
@@ -59,7 +59,7 @@ const testing = std.testing;
 
 fn createTestBuffers() struct { values: []align(128) u8, metadata: []u8 } {
     // 64 counters × 128 bytes = 8192 bytes for values
-    const values = std.heap.page_allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, 128))), 8192) catch @panic("alloc");
+    const values = std.heap.page_allocator.alignedAlloc(u8, @fromBackingInt(@intCast(std.math.log2(@as(usize, 128)))), 8192) catch @panic("alloc");
     @memset(values, 0);
     // 64 counters × 256 bytes = 16384 bytes for metadata
     const metadata = std.heap.page_allocator.alloc(u8, 16384) catch @panic("alloc");
@@ -80,7 +80,7 @@ test "SystemCounters init allocates all well-known counters" {
 
     // Then — all well-known counters should be allocated with value 0
     inline for (0..SystemCounter.count) |i| {
-        const sc: SystemCounter = @enumFromInt(i);
+        const sc: SystemCounter = @fromBackingInt(@intCast(i));
         try testing.expectEqual(@as(i64, 0), counters.get(sc));
     }
 }
@@ -157,7 +157,7 @@ test "updateMax only updates when new value is larger" {
 test "SystemCounter.label returns non-empty strings for all counters" {
     // Given / When / Then
     inline for (0..SystemCounter.count) |i| {
-        const sc: SystemCounter = @enumFromInt(i);
+        const sc: SystemCounter = @fromBackingInt(@intCast(i));
         try testing.expect(sc.label().len > 0);
     }
 }

@@ -255,8 +255,7 @@ fn listDirectoryRecursive(writer: anytype, path: []const u8, depth: usize) !void
         switch (entry.kind) {
             .directory => {
                 writer.print("   📁 {s}/\n", .{entry.name}) catch return;
-                const sub_path = try std.fmt.allocPrint(
-                    std.heap.page_allocator,
+                const sub_path = try std.heap.page_allocator.print(
                     "{s}/{s}",
                     .{ path, entry.name },
                 );

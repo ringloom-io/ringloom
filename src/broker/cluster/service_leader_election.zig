@@ -331,7 +331,7 @@ pub const ServiceLeaderElectionManager = struct {
 // ── Helper ────────────────────────────────────────────────────────────
 
 pub fn padServiceName(name: []const u8) [32]u8 {
-    var result: [32]u8 = [_]u8{0} ** 32;
+    var result: [32]u8 = @splat(0);
     const len = @min(name.len, 32);
     @memcpy(result[0..len], name[0..len]);
     return result;

@@ -355,7 +355,7 @@ fn renderFlowControl(writer: *std.Io.Writer, group: []const u8, source_node_id: 
         try writer.print("ringloom_flow_control_remaining_bytes{{group=\"{s}\",source_node_id=\"{d}\",node_id=\"{d}\",service_id=\"{d}\",slot=\"{d}\"}} {d}\n", .{ group, source_node_id, entry.node_id, entry.service_id, i, remaining });
         try writer.print("ringloom_flow_control_capacity_bytes{{group=\"{s}\",source_node_id=\"{d}\",node_id=\"{d}\",service_id=\"{d}\",slot=\"{d}\"}} {d}\n", .{ group, source_node_id, entry.node_id, entry.service_id, i, capacity });
         try writer.print("ringloom_flow_control_usage_ratio{{group=\"{s}\",source_node_id=\"{d}\",node_id=\"{d}\",service_id=\"{d}\",slot=\"{d}\"}} {d:.6}\n", .{ group, source_node_id, entry.node_id, entry.service_id, i, usage });
-        try writer.print("ringloom_flow_control_pressure_state{{group=\"{s}\",source_node_id=\"{d}\",node_id=\"{d}\",service_id=\"{d}\",slot=\"{d}\"}} {d}\n", .{ group, source_node_id, entry.node_id, entry.service_id, i, @intFromEnum(entry.loadPressureState()) });
+        try writer.print("ringloom_flow_control_pressure_state{{group=\"{s}\",source_node_id=\"{d}\",node_id=\"{d}\",service_id=\"{d}\",slot=\"{d}\"}} {d}\n", .{ group, source_node_id, entry.node_id, entry.service_id, i, @backingInt(entry.loadPressureState()) });
         try writer.print("ringloom_flow_control_update_age_seconds{{group=\"{s}\",source_node_id=\"{d}\",node_id=\"{d}\",service_id=\"{d}\",slot=\"{d}\"}} {d:.3}\n", .{ group, source_node_id, entry.node_id, entry.service_id, i, monotonicAgeSeconds(now_ns, entry.loadLastUpdateNs()) });
     }
 }
@@ -376,7 +376,7 @@ fn brokerDirectMetricName(sample: metadata_reader.CounterSample) ?[]const u8 {
     if (brokerRuntimeMetricName(sample.label)) |metric| return metric;
 
     if (sample.type_id < 0 or sample.type_id >= SystemCounter.count) return null;
-    const counter: SystemCounter = @enumFromInt(@as(u8, @intCast(sample.type_id)));
+    const counter: SystemCounter = @fromBackingInt(@intCast(@as(u8, @intCast(sample.type_id))));
     if (!std.mem.eql(u8, sample.label, counter.label())) return null;
     return switch (counter) {
         .bytes_sent => "ringloom_broker_bytes_sent_total",
@@ -465,7 +465,7 @@ fn brokerRuntimeMetricName(label: []const u8) ?[]const u8 {
 
 fn serviceDirectMetricName(sample: metadata_reader.CounterSample) ?[]const u8 {
     if (sample.type_id < 0 or sample.type_id >= ServiceCounter.count) return null;
-    const counter: ServiceCounter = @enumFromInt(@as(u8, @intCast(sample.type_id)));
+    const counter: ServiceCounter = @fromBackingInt(@intCast(@as(u8, @intCast(sample.type_id))));
     if (!std.mem.eql(u8, sample.label, counter.label())) return null;
     return switch (counter) {
         .messages_sent => "ringloom_service_messages_sent_total",

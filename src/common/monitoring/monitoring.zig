@@ -45,7 +45,7 @@ pub const MonitoringSnapshot = struct {
 
         // Capture all system counters.
         inline for (0..SystemCounter.count) |i| {
-            const sc: SystemCounter = @enumFromInt(i);
+            const sc: SystemCounter = @fromBackingInt(@intCast(i));
             snapshot.counters[i] = .{
                 .id = @intCast(i),
                 .label = sc.label(),
@@ -111,7 +111,7 @@ pub const MonitoringSnapshot = struct {
 
 test "snapshot captures current counter values" {
     // Given
-    const values = try std.heap.page_allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, 128))), 8192);
+    const values = try std.heap.page_allocator.alignedAlloc(u8, @fromBackingInt(@intCast(std.math.log2(@as(usize, 128)))), 8192);
     defer std.heap.page_allocator.free(values);
     @memset(values, 0);
 
@@ -133,13 +133,13 @@ test "snapshot captures current counter values" {
 
     // Then
     try std.testing.expectEqual(@as(u8, 1), snapshot.node_id);
-    try std.testing.expectEqual(@as(i64, 42_000), snapshot.counters[@intFromEnum(SystemCounter.bytes_sent)].value);
-    try std.testing.expectEqual(@as(i64, 1), snapshot.counters[@intFromEnum(SystemCounter.messages_routed_local)].value);
+    try std.testing.expectEqual(@as(i64, 42_000), snapshot.counters[@backingInt(SystemCounter.bytes_sent)].value);
+    try std.testing.expectEqual(@as(i64, 1), snapshot.counters[@backingInt(SystemCounter.messages_routed_local)].value);
 }
 
 test "snapshot captures error log entries" {
     // Given
-    const values = try std.heap.page_allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, 128))), 8192);
+    const values = try std.heap.page_allocator.alignedAlloc(u8, @fromBackingInt(@intCast(std.math.log2(@as(usize, 128)))), 8192);
     defer std.heap.page_allocator.free(values);
     @memset(values, 0);
 
@@ -166,7 +166,7 @@ test "snapshot captures error log entries" {
 
 test "snapshot dump produces non-empty output" {
     // Given
-    const values = try std.heap.page_allocator.alignedAlloc(u8, @enumFromInt(std.math.log2(@as(usize, 128))), 8192);
+    const values = try std.heap.page_allocator.alignedAlloc(u8, @fromBackingInt(@intCast(std.math.log2(@as(usize, 128)))), 8192);
     defer std.heap.page_allocator.free(values);
     @memset(values, 0);
 

@@ -46,7 +46,7 @@ pub const CounterState = enum(i32) {
 };
 
 pub fn encodeTypeId(kind: MetricKind, category: u28) i32 {
-    const raw = (@as(u32, @intFromEnum(kind)) << metric_kind_shift) |
+    const raw = (@as(u32, @backingInt(kind)) << metric_kind_shift) |
         (@as(u32, category) & metric_category_mask);
     return @bitCast(raw);
 }
@@ -55,7 +55,7 @@ pub fn metricKindFromTypeId(type_id: i32) MetricKind {
     const raw: u32 = @bitCast(type_id);
     const kind_bits: u4 = @intCast(raw >> metric_kind_shift);
     return switch (kind_bits) {
-        @intFromEnum(MetricKind.gauge) => .gauge,
+        @backingInt(MetricKind.gauge) => .gauge,
         else => .counter,
     };
 }
@@ -113,12 +113,12 @@ pub const CountersManager = struct {
         while (id <= self.max_counter_id) : (id += 1) {
             const state_ptr = self.metadataStatePtr(id);
             const current = @atomicLoad(i32, state_ptr, .acquire);
-            const state: CounterState = @enumFromInt(current);
+            const state: CounterState = @fromBackingInt(current);
 
             switch (state) {
                 .unused, .reclaimed => {
                     // Try to claim a private initialization state.
-                    const desired = @intFromEnum(CounterState.allocating);
+                    const desired = @backingInt(CounterState.allocating);
                     if (@cmpxchgWeak(
                         i32,
                         state_ptr,
@@ -130,7 +130,7 @@ pub const CountersManager = struct {
                         // CAS succeeded — we own this slot.
                         self.writeMetadata(id, type_id, label);
                         @atomicStore(i64, self.valuePtr(id), 0, .release);
-                        @atomicStore(i32, state_ptr, @intFromEnum(CounterState.allocated), .release);
+                        @atomicStore(i32, state_ptr, @backingInt(CounterState.allocated), .release);
                         return id;
                     }
                     // CAS failed — another thread grabbed it; continue scanning.
@@ -145,7 +145,7 @@ pub const CountersManager = struct {
     pub fn free(self: *Self, counter_id: usize) void {
         std.debug.assert(counter_id <= self.max_counter_id);
         @atomicStore(i64, self.valuePtr(counter_id), 0, .release);
-        @atomicStore(i32, self.metadataStatePtr(counter_id), @intFromEnum(CounterState.reclaimed), .release);
+        @atomicStore(i32, self.metadataStatePtr(counter_id), @backingInt(CounterState.reclaimed), .release);
     }
 
     // ── Value Operations ──────────────────────────────────────────────
@@ -198,7 +198,7 @@ pub const CountersManager = struct {
     pub fn isAllocated(self: *Self, counter_id: usize) bool {
         if (counter_id > self.max_counter_id) return false;
         const state_raw = @atomicLoad(i32, self.metadataStatePtr(counter_id), .acquire);
-        const state: CounterState = @enumFromInt(state_raw);
+        const state: CounterState = @fromBackingInt(state_raw);
         return state == .allocated;
     }
 
@@ -212,7 +212,7 @@ pub const CountersManager = struct {
         var id: usize = 0;
         while (id <= self.max_counter_id) : (id += 1) {
             const state_raw = @atomicLoad(i32, self.metadataStatePtr(id), .acquire);
-            const state: CounterState = @enumFromInt(state_raw);
+            const state: CounterState = @fromBackingInt(state_raw);
             if (state == .allocated) count += 1;
         }
         return count;
@@ -223,7 +223,7 @@ pub const CountersManager = struct {
         var id: usize = 0;
         while (id <= self.max_counter_id) : (id += 1) {
             const state_before = @atomicLoad(i32, self.metadataStatePtr(id), .acquire);
-            const state: CounterState = @enumFromInt(state_before);
+            const state: CounterState = @fromBackingInt(state_before);
             if (state != .allocated) continue;
             if (allocated_index != index) {
                 allocated_index += 1;
@@ -256,7 +256,7 @@ pub const CountersManager = struct {
         var id: usize = 0;
         while (id <= self.max_counter_id) : (id += 1) {
             const state_raw = @atomicLoad(i32, self.metadataStatePtr(id), .acquire);
-            const state: CounterState = @enumFromInt(state_raw);
+            const state: CounterState = @fromBackingInt(state_raw);
             if (state == .allocated) {
                 const meta = self.readMetadata(id);
                 const value = @atomicLoad(i64, self.valuePtr(id), .acquire);
@@ -277,7 +277,7 @@ pub const CountersManager = struct {
     pub fn allocatedValuePtr(self: *Self, id: usize) CounterAccessError!*i64 {
         if (id > self.max_counter_id) return error.InvalidCounterId;
         const state_raw = @atomicLoad(i32, self.metadataStatePtr(id), .acquire);
-        const state: CounterState = @enumFromInt(state_raw);
+        const state: CounterState = @fromBackingInt(state_raw);
         if (state != .allocated) return error.CounterNotAllocated;
         return self.valuePtr(id);
     }
@@ -338,8 +338,8 @@ fn testForEachCallback(_: usize, _: i32, _: []const u8, _: i64) void {
 }
 
 test "allocate and increment counter" {
-    var values_buf: [128 * 4]u8 align(128) = [_]u8{0} ** (128 * 4);
-    var meta_buf: [256 * 4]u8 align(4) = [_]u8{0} ** (256 * 4);
+    var values_buf: [128 * 4]u8 align(128) = @splat(0);
+    var meta_buf: [256 * 4]u8 align(4) = @splat(0);
 
     var mgr = CountersManager.init(&values_buf, &meta_buf);
 
@@ -360,8 +360,8 @@ test "allocate and increment counter" {
 
 test "free and reallocate counter" {
     // Buffer sized for exactly 2 counters.
-    var values_buf: [128 * 2]u8 align(128) = [_]u8{0} ** (128 * 2);
-    var meta_buf: [256 * 2]u8 align(4) = [_]u8{0} ** (256 * 2);
+    var values_buf: [128 * 2]u8 align(128) = @splat(0);
+    var meta_buf: [256 * 2]u8 align(4) = @splat(0);
 
     var mgr = CountersManager.init(&values_buf, &meta_buf);
 
@@ -383,8 +383,8 @@ test "free and reallocate counter" {
 }
 
 test "forEach iterates only allocated counters" {
-    var values_buf: [128 * 4]u8 align(128) = [_]u8{0} ** (128 * 4);
-    var meta_buf: [256 * 4]u8 align(4) = [_]u8{0} ** (256 * 4);
+    var values_buf: [128 * 4]u8 align(128) = @splat(0);
+    var meta_buf: [256 * 4]u8 align(4) = @splat(0);
 
     var mgr = CountersManager.init(&values_buf, &meta_buf);
 
@@ -403,8 +403,8 @@ test "forEach iterates only allocated counters" {
 }
 
 test "set overwrites counter value" {
-    var values_buf: [128 * 4]u8 align(128) = [_]u8{0} ** (128 * 4);
-    var meta_buf: [256 * 4]u8 align(4) = [_]u8{0} ** (256 * 4);
+    var values_buf: [128 * 4]u8 align(128) = @splat(0);
+    var meta_buf: [256 * 4]u8 align(4) = @splat(0);
 
     var mgr = CountersManager.init(&values_buf, &meta_buf);
 
@@ -420,8 +420,8 @@ test "metric type id encodes kind without changing counter default" {
 }
 
 test "tryAdd and trySet reject unallocated counters" {
-    var values_buf: [128 * 2]u8 align(128) = [_]u8{0} ** (128 * 2);
-    var meta_buf: [256 * 2]u8 align(4) = [_]u8{0} ** (256 * 2);
+    var values_buf: [128 * 2]u8 align(128) = @splat(0);
+    var meta_buf: [256 * 2]u8 align(4) = @splat(0);
 
     var mgr = CountersManager.init(&values_buf, &meta_buf);
     try std.testing.expectError(error.CounterNotAllocated, mgr.tryAdd(0, 1));

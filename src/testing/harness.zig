@@ -204,11 +204,11 @@ pub const TestHarness = struct {
         errdefer self.allocator.free(config_path);
 
         // 2. Build the executable path.
-        const exe_path = try std.fmt.allocPrint(self.allocator, "{s}/ringloom-broker", .{self.bin_dir});
+        const exe_path = try self.allocator.print("{s}/ringloom-broker", .{self.bin_dir});
         defer self.allocator.free(exe_path);
 
         // 3. Build the process name.
-        const name = try std.fmt.allocPrint(self.allocator, "broker_{d}", .{spec.node_id});
+        const name = try self.allocator.print("broker_{d}", .{spec.node_id});
         defer self.allocator.free(name);
 
         // 4. Spawn.
@@ -242,8 +242,7 @@ pub const TestHarness = struct {
     /// `spec.extra_args` are appended.
     pub fn startService(self: *TestHarness, spec: ServiceSpec) !*ProcessHandle {
         // 1. Build the executable path.
-        const exe_path = try std.fmt.allocPrint(
-            self.allocator,
+        const exe_path = try self.allocator.print(
             "{s}/{s}",
             .{ self.bin_dir, spec.executable_name },
         );

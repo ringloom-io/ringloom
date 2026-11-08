@@ -41,8 +41,7 @@ fn runLocalThroughputBench(
     });
     try harness.waitForServiceReady(echo, 5000);
 
-    const result_path = try std.fmt.allocPrint(
-        allocator,
+    const result_path = try allocator.print(
         "{s}/local-throughput-" ++ tag ++ ".json",
         .{harness.env.results_path},
     );
@@ -53,11 +52,11 @@ fn runLocalThroughputBench(
         .executable_name = "ringloom-test-ping-service",
         .service_name = "ping",
         .extra_args = &.{
-            "--target-service",  "echo",
-            "--message-count",   throughput_message_count,
-            "--message-size",    size_str,
-            "--warmup-count",    throughput_warmup_count,
-            "--result-file",     result_path,
+            "--target-service", "echo",
+            "--message-count",  throughput_message_count,
+            "--message-size",   size_str,
+            "--warmup-count",   throughput_warmup_count,
+            "--result-file",    result_path,
         },
     });
     try harness.waitForServiceReady(ping, 5000);

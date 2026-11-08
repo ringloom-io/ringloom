@@ -112,7 +112,7 @@ pub fn readTopicStageTrace(payload: []const u8) ?TopicStageTrace {
 }
 
 test "embedSend writes basic timestamp and phase" {
-    var payload: [12]u8 = [_]u8{0xAA} ** 12;
+    var payload: [12]u8 = @splat(0xAA);
 
     embedSend(&payload, measured_phase, 1234);
 
@@ -121,7 +121,7 @@ test "embedSend writes basic timestamp and phase" {
 }
 
 test "embedSend resets trace timestamps for retried sends" {
-    var payload: [32]u8 = [_]u8{0xAA} ** 32;
+    var payload: [32]u8 = @splat(0xAA);
 
     embedSend(&payload, measured_phase, 100);
     stampSenderDequeue(&payload, 200);
@@ -133,7 +133,7 @@ test "embedSend resets trace timestamps for retried sends" {
 }
 
 test "stage trace is readable after sender and receiver stamps" {
-    var payload: [32]u8 = [_]u8{0xAA} ** 32;
+    var payload: [32]u8 = @splat(0xAA);
 
     embedSend(&payload, measured_phase, 100);
     stampSenderDequeue(&payload, 250);
@@ -146,7 +146,7 @@ test "stage trace is readable after sender and receiver stamps" {
 }
 
 test "topic stage trace reads with only send + receiver ingress stamped" {
-    var payload: [128]u8 = [_]u8{0xAA} ** 128;
+    var payload: [128]u8 = @splat(0xAA);
 
     embedSend(&payload, measured_phase, 1000);
     // Topic leader stamps only receiver ingress (no sender-dequeue stage).

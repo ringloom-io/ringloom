@@ -51,7 +51,7 @@ pub const OutboundChannel = struct {
         return .{
             .publisher = publisher,
             .envelope = .{
-                .direction = @intFromEnum(direction),
+                .direction = @backingInt(direction),
                 .topic_id = topic_id,
                 .leader_epoch = leader_epoch,
                 .source_node_id = source_node,
@@ -76,7 +76,7 @@ pub const OutboundChannel = struct {
     pub fn offer(self: *OutboundChannel, frame: []const u8) i64 {
         const total = TopicReplEnvelope.encoded_length + frame.len;
         if (total > self.scratch.len) {
-            return @intFromEnum(OfferResult.max_position_exceeded);
+            return @backingInt(OfferResult.max_position_exceeded);
         }
         const n = self.envelope.encodeWithFrame(self.scratch, frame);
         return self.publisher.offerFn(self.publisher.ctx, self.target_node, self.scratch[0..n]);
@@ -202,19 +202,19 @@ pub const LoopWire = struct {
     fn offerImpl(ctx: *anyopaque, target_node: u8, frame: []const u8) i64 {
         _ = target_node;
         const self: *LoopWire = @ptrCast(@alignCast(ctx));
-        if (!self.connected) return @intFromEnum(OfferResult.not_connected);
+        if (!self.connected) return @backingInt(OfferResult.not_connected);
         if (self.drop_remaining > 0) {
             self.drop_remaining -= 1;
             self.connected = false;
             self.peer_inbound.setConnected(false);
-            return @intFromEnum(OfferResult.not_connected);
+            return @backingInt(OfferResult.not_connected);
         }
         // Strip envelope, route inner frame to the peer inbound (as the demux does).
-        if (frame.len < TopicReplEnvelope.encoded_length) return @intFromEnum(OfferResult.closed);
+        if (frame.len < TopicReplEnvelope.encoded_length) return @backingInt(OfferResult.closed);
         const env = TopicReplEnvelope.decode(frame) catch
-            return @intFromEnum(OfferResult.closed);
+            return @backingInt(OfferResult.closed);
         const inner = env.frameSlice(frame);
-        if (!self.peer_inbound.pushFrame(inner)) return @intFromEnum(OfferResult.back_pressured);
+        if (!self.peer_inbound.pushFrame(inner)) return @backingInt(OfferResult.back_pressured);
         return 1;
     }
 

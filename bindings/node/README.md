@@ -7,7 +7,7 @@ These bindings expose the `ringloom_service` native library to Node.js through a
 
 - Node.js 20+
 - npm
-- Zig 0.16.x
+- Zig 0.17.x
 - A C++17 compiler usable by `node-gyp`
 
 ## Build

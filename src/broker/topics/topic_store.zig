@@ -27,7 +27,6 @@ const topic_config_mod = @import("topic_config.zig");
 const TopicId = topic_id_mod.TopicId;
 const TopicConfig = topic_config_mod.TopicConfig;
 
-
 const RawQueue = rq.Queue([]const u8);
 
 pub const TopicStoreError = error{
@@ -120,7 +119,7 @@ pub const TopicStore = struct {
 
     /// Builds `<base_dir>/t_<topicIdHex>` into an owned slice.
     fn buildDir(self: *TopicStore, topic_id: TopicId) ![]u8 {
-        return std.fmt.allocPrint(self.allocator, "{s}/t_{x:0>16}", .{ self.base_dir, topic_id });
+        return self.allocator.print("{s}/t_{x:0>16}", .{ self.base_dir, topic_id });
     }
 
     /// Opens (creating if needed) a topic queue on disk without adding it to
@@ -240,7 +239,7 @@ test "store opens master and replica queues with distinct dirs" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    const base = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+    const base = try allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
     defer allocator.free(base);
 
     var store = TopicStore.init(allocator, base, 1 << 20, 1 << 20);
@@ -263,7 +262,7 @@ test "leader append advances hwm and is durable/replayable in order" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    const base = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+    const base = try allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
     defer allocator.free(base);
 
     var store = TopicStore.init(allocator, base, 1 << 20, 1 << 20);
@@ -301,7 +300,7 @@ test "unknown roll scheme rejected" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    const base = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+    const base = try allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
     defer allocator.free(base);
 
     var store = TopicStore.init(allocator, base, 1 << 20, 1 << 20);

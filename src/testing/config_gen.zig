@@ -61,8 +61,7 @@ pub const ConfigGen = struct {
         spec: BrokerSpec,
         storage_path: []const u8,
     ) ![]const u8 {
-        const file_name = try std.fmt.allocPrint(
-            self.allocator,
+        const file_name = try self.allocator.print(
             "{s}/broker_{d}.properties",
             .{ dir_path, spec.node_id },
         );
@@ -85,8 +84,7 @@ pub const ConfigGen = struct {
         spec: ServiceSpec,
         storage_path: []const u8,
     ) ![]const u8 {
-        const file_name = try std.fmt.allocPrint(
-            self.allocator,
+        const file_name = try self.allocator.print(
             "{s}/service_{s}.properties",
             .{ dir_path, spec.service_name },
         );

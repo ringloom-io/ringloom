@@ -24,7 +24,7 @@ const testing = std.testing;
 
 test "ThreadingMode has three variants" {
     // Given / When / Then
-    const fields = @typeInfo(ThreadingMode).@"enum".fields;
+    const fields = @typeInfo(ThreadingMode).@"enum".field_names;
     try testing.expectEqual(@as(usize, 3), fields.len);
 }
 

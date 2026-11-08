@@ -155,8 +155,7 @@ test "factory loads config from explicit path" {
 
     var factory = BrokerApplicationFactory.init(testing.allocator, testing.io, null);
 
-    const file_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const file_path = try testing.allocator.print(
         "{s}/{s}",
         .{ tmp_abs, "broker.properties" },
     );

@@ -9,9 +9,9 @@ pub fn scenarioPath(
     suite: []const u8,
     file_name: []const u8,
 ) ![]const u8 {
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ default_results_root, suite });
+    const dir_path = try allocator.print("{s}/{s}", .{ default_results_root, suite });
     defer allocator.free(dir_path);
 
     try std.Io.Dir.cwd().createDirPath(std.testing.io, dir_path);
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, file_name });
+    return allocator.print("{s}/{s}", .{ dir_path, file_name });
 }

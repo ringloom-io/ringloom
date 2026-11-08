@@ -55,12 +55,12 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) noreturn {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const alloc = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => gpa.allocator(),
+        .debug, .safe => gpa.allocator(),
         else => std.heap.smp_allocator,
     };
-    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+    defer if (builtin.mode == .debug or builtin.mode == .safe) {
         _ = gpa.deinit();
     };
 
@@ -120,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
         const json = try std.fmt.bufPrint(&buf,
             \\{{"suite":"topic","scenario":"topic-publish-{s}-{d}B","topic":"{s}","ack_mode":{d},"message_size":{d},"warmup":{d},"published":{d},"acked_through":{d},"publish_ns":{d},"ack_wait_ns":{d},"total_ns":{d},"offer_msgs_per_sec":{d},"throughput_msgs_per_sec":{d}}}
             \\
-        , .{ @tagName(ack_mode), size, topic, @intFromEnum(ack_mode), size, warmup, count, publisher.ackedSeq(), publish_ns, ack_wait_ns, total_ns, offer_rate, tput });
+        , .{ @tagName(ack_mode), size, topic, @backingInt(ack_mode), size, warmup, count, publisher.ackedSeq(), publish_ns, ack_wait_ns, total_ns, offer_rate, tput });
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = result_file, .data = json });
     }
 }

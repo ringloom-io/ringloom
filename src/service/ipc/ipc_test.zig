@@ -8,7 +8,7 @@ const IpcConsumer = @import("ipc_consumer.zig").IpcConsumer;
 const RingBuffer = ringloom_common.concurrent.ring_buffer.RingBuffer;
 const constants = ringloom_common.memory.constants;
 
-const rb_alignment: ?std.mem.Alignment = @enumFromInt(std.math.log2(constants.ring_buffer_alignment));
+const rb_alignment: ?std.mem.Alignment = @fromBackingInt(@intCast(std.math.log2(constants.ring_buffer_alignment)));
 
 // File-level state for handler callbacks (Zig fn ptrs can't capture mutable locals).
 var test_received_type: i32 = 0;

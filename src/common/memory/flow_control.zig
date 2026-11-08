@@ -47,7 +47,7 @@ pub const FlowControlEntry = extern struct {
     _reserved1: u32 = 0,
     /// Monotonic timestamp of last update (nanoseconds).
     last_update_ns: i64,
-    _padding: [32]u8 = [_]u8{0} ** 32,
+    _padding: [32]u8 = @splat(0),
 
     comptime {
         std.debug.assert(@sizeOf(FlowControlEntry) == 64);
@@ -59,7 +59,7 @@ pub const FlowControlEntry = extern struct {
     }
 
     pub fn storeState(self: *volatile FlowControlEntry, s: SlotState) void {
-        @atomicStore(u8, &self.state, @intFromEnum(s), .release);
+        @atomicStore(u8, &self.state, @backingInt(s), .release);
     }
 
     pub fn loadPressureState(self: *const volatile FlowControlEntry) PressureState {
@@ -68,7 +68,7 @@ pub const FlowControlEntry = extern struct {
     }
 
     pub fn storePressureState(self: *volatile FlowControlEntry, ps: PressureState) void {
-        @atomicStore(u8, &self.pressure_state, @intFromEnum(ps), .release);
+        @atomicStore(u8, &self.pressure_state, @backingInt(ps), .release);
     }
 
     pub fn loadRemainingBytes(self: *const volatile FlowControlEntry) u32 {
@@ -101,7 +101,7 @@ pub const FlowControlEntry = extern struct {
 pub const FlowControlHeader = extern struct {
     version: u32,
     max_entries: u32,
-    _padding: [56]u8 = [_]u8{0} ** 56,
+    _padding: [56]u8 = @splat(0),
 
     comptime {
         std.debug.assert(@sizeOf(FlowControlHeader) == 64);

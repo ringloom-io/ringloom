@@ -313,7 +313,7 @@ fn nullPublisher() channel.Publisher {
 }
 
 fn tmpBase(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
-    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+    return allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
 }
 
 const Fixture = struct {

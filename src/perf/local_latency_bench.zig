@@ -47,8 +47,7 @@ fn runLocalLatencyBench(
     const broker = try harness.startBroker(.{});
     try harness.waitForBrokerReady(broker, 5000);
 
-    const echo_result_path = try std.fmt.allocPrint(
-        allocator,
+    const echo_result_path = try allocator.print(
         "{s}/local-latency-echo-{s}B.json",
         .{ harness.env.results_path, cfg.label },
     );
@@ -62,8 +61,7 @@ fn runLocalLatencyBench(
     });
     try harness.waitForServiceReady(echo, 5000);
 
-    const result_filename = try std.fmt.allocPrint(
-        allocator,
+    const result_filename = try allocator.print(
         "{s}/local-latency-{s}B.json",
         .{ harness.env.results_path, cfg.label },
     );

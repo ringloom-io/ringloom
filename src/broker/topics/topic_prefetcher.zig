@@ -58,7 +58,7 @@ pub const TopicPrefetcher = struct {
             if (did == 0) {
                 // Brief idle backoff — use platform nanosleep.
                 const builtin = @import("builtin");
-                if (builtin.os.tag == .linux) {
+                if (builtin.target.os.tag == .linux) {
                     const ts: std.os.linux.timespec = .{ .sec = 0, .nsec = @intCast(@min(self.idle_sleep_ns, 999_999_999)) };
                     _ = std.os.linux.nanosleep(&ts, null);
                 }
@@ -96,7 +96,7 @@ test "prefetcher poll runs maintenance without mutating queue contents" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    const base = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+    const base = try allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
     defer allocator.free(base);
 
     var store = TopicStore.init(allocator, base, 1 << 20, 1 << 20);

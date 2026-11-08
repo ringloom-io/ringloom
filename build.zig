@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
         .use_llvm = use_llvm,
     });
 
-    const ringloom_aeron_perf = aeron_build.buildRingLoomAeron(b, target, .ReleaseFast, .{
+    const ringloom_aeron_perf = aeron_build.buildRingLoomAeron(b, target, .fast, .{
         .module_name = null,
         .library_name = "aeron_driver_perf",
         .use_llvm = use_llvm,
@@ -127,9 +127,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(broker_exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     // ── Test service binaries (for end-to-end IPC tests) ─────────────
     //
@@ -339,7 +337,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/perf/root.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
                 .{ .name = "ringloom_testing", .module = ringloom_testing },
@@ -361,7 +359,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/perf/ring_buffer_bench.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
             },
@@ -378,7 +376,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/perf/plain_aeron_remote_bench.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "ringloom_common", .module = ringloom_common },
                 .{ .name = "ringloom_aeron", .module = ringloom_aeron_perf.module },
@@ -489,9 +487,7 @@ pub fn build(b: *std.Build) void {
 
     const stat_run_cmd = b.addRunArtifact(stat_exe);
     stat_run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        stat_run_cmd.addArgs(args);
-    }
+    stat_run_cmd.addPassthruArgs();
 
     const stat_step = b.step("stat", "Run the ringloom-stat monitoring tool");
     stat_step.dependOn(&stat_run_cmd.step);
@@ -517,9 +513,7 @@ pub fn build(b: *std.Build) void {
 
     const observability_run_cmd = b.addRunArtifact(observability_exe);
     observability_run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        observability_run_cmd.addArgs(args);
-    }
+    observability_run_cmd.addPassthruArgs();
 
     const observability_run_step = b.step("run-observability", "Run the ringloom-observability Prometheus exporter");
     observability_run_step.dependOn(&observability_run_cmd.step);
@@ -596,9 +590,7 @@ pub fn build(b: *std.Build) void {
         "zig-out/bin",
     });
     run_sample_cmd.step.dependOn(sample_build_step);
-    if (b.args) |args| {
-        run_sample_cmd.addArgs(args);
-    }
+    run_sample_cmd.addPassthruArgs();
 
     const run_sample_step = b.step("run-sample-order-management", "Run the order-management sample");
     run_sample_step.dependOn(&run_sample_cmd.step);

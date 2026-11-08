@@ -132,7 +132,7 @@ pub const ReplHub = struct {
     }
 
     fn queueIdBytes(topic_id: TopicId) [16]u8 {
-        var out: [16]u8 = [_]u8{0} ** 16;
+        var out: [16]u8 = @splat(0);
         std.mem.writeInt(u64, out[0..8], topic_id, .little);
         return out;
     }
@@ -352,7 +352,7 @@ const testing = std.testing;
 const TopicConfig = @import("topic_config.zig").TopicConfig;
 
 fn tmpBase(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
-    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+    return allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
 }
 
 test "full-mesh leader->replica replication reaches byte parity over loopback" {

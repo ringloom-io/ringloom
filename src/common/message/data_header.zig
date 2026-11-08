@@ -182,7 +182,7 @@ test "RingLoomDataHeader layout is stable" {
 }
 
 test "encode and decode data frame round trip" {
-    var buf: [128]u8 = [_]u8{0} ** 128;
+    var buf: [128]u8 = @splat(0);
     const payload = "hello-aeron";
     const written = try encodeFrame(&buf, payload, .{
         .source_node_id = 1,
@@ -204,7 +204,7 @@ test "encode and decode data frame round trip" {
 }
 
 test "request response and leader routed fields round trip" {
-    var buf: [96]u8 = [_]u8{0} ** 96;
+    var buf: [96]u8 = @splat(0);
     const written = try encodeFrame(&buf, "rpc", .{
         .source_node_id = 4,
         .source_service_id = 100,
@@ -227,7 +227,7 @@ test "request response and leader routed fields round trip" {
 }
 
 test "invalid payload length illegal flags and node/service ids are rejected" {
-    var buf: [64]u8 = [_]u8{0} ** 64;
+    var buf: [64]u8 = @splat(0);
     try testing.expectError(error.InvalidFlags, encodeHeader(&buf, .{
         .source_node_id = 1,
         .source_service_id = 1,
@@ -264,7 +264,7 @@ test "invalid payload length illegal flags and node/service ids are rejected" {
 }
 
 test "decode rejects mismatched frame payload length" {
-    var buf: [64]u8 = [_]u8{0} ** 64;
+    var buf: [64]u8 = @splat(0);
     const written = try encodeFrame(&buf, "abc", .{
         .source_node_id = 1,
         .source_service_id = 1,

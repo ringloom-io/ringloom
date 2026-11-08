@@ -114,8 +114,8 @@ pub const CounterSample = struct {
     pub fn systemCounter(self: CounterSample) ?SystemCounter {
         if (self.type_id != system_counter_type_id or self.key.len < 4) return null;
         const raw = std.mem.readInt(i32, self.key[0..4], .little);
-        if (raw < 0 or raw > @intFromEnum(SystemCounter.error_frames_sent)) return null;
-        return @enumFromInt(raw);
+        if (raw < 0 or raw > @backingInt(SystemCounter.error_frames_sent)) return null;
+        return @fromBackingInt(raw);
     }
 
     pub fn streamKey(self: CounterSample) ?StreamKey {
@@ -411,7 +411,7 @@ test "missing CnC file returns a clear error" {
 }
 
 test "stream key parsing and channel kind mapping are stable" {
-    var key: [counter_key_length]u8 = [_]u8{0} ** counter_key_length;
+    var key: [counter_key_length]u8 = @splat(0);
     std.mem.writeInt(i64, key[0..8], 123, .little);
     std.mem.writeInt(i32, key[8..12], 7, .little);
     std.mem.writeInt(i32, key[12..16], 30_003, .little);

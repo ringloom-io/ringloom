@@ -404,7 +404,7 @@ pub const TopicSubsystem = struct {
 
     /// Build the absolute queue directory for a topic (mirrors TopicStore layout).
     pub fn queueDir(self: *TopicSubsystem, allocator: std.mem.Allocator, topic_id: TopicId) ![]u8 {
-        return std.fmt.allocPrint(allocator, "{s}/t_{x:0>16}", .{ self.store.base_dir, topic_id });
+        return allocator.print("{s}/t_{x:0>16}", .{ self.store.base_dir, topic_id });
     }
 
     /// Scan the topics base directory for existing queue dirs and rebuild
@@ -538,7 +538,7 @@ fn nullPublisher() Publisher {
 }
 
 fn tmpBase(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
-    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+    return allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
 }
 
 test "disabled subsystem ignores publish/subscribe" {

@@ -132,7 +132,7 @@ pub const TopicPublisher = struct {
             .topic_id = self.topic_id,
             .leader_epoch = self.leader_epoch,
             .correlation_id = correlation_id,
-            .ack_mode = @intFromEnum(ack_mode),
+            .ack_mode = @backingInt(ack_mode),
             .publisher_id = self.publisher_id,
             .publish_seq = seq,
         };

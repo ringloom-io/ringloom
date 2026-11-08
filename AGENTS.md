@@ -2,7 +2,7 @@
 
 ## Validation and benchmarks
 
-Use Zig 0.16.0. Run `zig build test` for correctness; run `zig build e2e` for
+Use Zig 0.17.x (0.17.1 tested). Run `zig build test` for correctness; run `zig build e2e` for
 changes to service/broker behavior. Performance tests are separate from those.
 
 For performance work, read [docs/benchmarks.md](docs/benchmarks.md) first. The

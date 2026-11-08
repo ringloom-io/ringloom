@@ -73,7 +73,7 @@ pub const Node = struct {
 pub const NodeMembership = struct {
     /// Node storage indexed by nodeId. Since nodeId is u8, a flat array
     /// of 256 optional slots is more efficient than a hash map.
-    nodes: [256]?Node = [_]?Node{null} ** 256,
+    nodes: [256]?Node = @splat(null),
     /// nodeId of the local broker (set at init, never changes).
     local_node_id: u8,
     /// Number of active nodes.
@@ -199,7 +199,7 @@ pub const NodeMembership = struct {
 
 /// Pad a host:port string into a fixed 22-byte array (null-padded).
 pub fn padHostPort(host_port: []const u8) [22]u8 {
-    var result: [22]u8 = [_]u8{0} ** 22;
+    var result: [22]u8 = @splat(0);
     const len = @min(host_port.len, 22);
     @memcpy(result[0..len], host_port[0..len]);
     return result;

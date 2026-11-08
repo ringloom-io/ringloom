@@ -56,12 +56,12 @@ fn parseU64(args: []const [:0]const u8, name: []const u8, default: u64) u64 {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const alloc = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => gpa.allocator(),
+        .debug, .safe => gpa.allocator(),
         else => std.heap.smp_allocator,
     };
-    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+    defer if (builtin.mode == .debug or builtin.mode == .safe) {
         _ = gpa.deinit();
     };
 

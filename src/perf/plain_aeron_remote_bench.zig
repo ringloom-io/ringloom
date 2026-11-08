@@ -298,8 +298,7 @@ fn runPlainAeronRemoteBench(allocator: std.mem.Allocator, cfg: MessageSizeConfig
     }
     try std.testing.expectEqual(cfg.measured_count, echo_state.total_measured.load(.acquire));
 
-    const result_path = try std.fmt.allocPrint(
-        allocator,
+    const result_path = try allocator.print(
         "{s}/plain-aeron-remote-transit-{s}B.json",
         .{ output_dir, cfg.label },
     );

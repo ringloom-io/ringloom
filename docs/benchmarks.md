@@ -5,7 +5,7 @@ machine tuning; `docs/benchmark-results.md` holds published snapshots.
 
 ## Repeatable runs
 
-From the repository root, with Zig 0.16.0, Python 3, Bash, GNU timeout and flock:
+From the repository root, with Zig 0.17.1, Python 3, Bash, GNU timeout and flock:
 
 ```sh
 # Focused check after ring-buffer or topic-path changes (~minutes).

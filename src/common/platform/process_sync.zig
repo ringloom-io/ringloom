@@ -49,7 +49,7 @@ pub const ProcessSynchronizer = struct {
 
     /// Get the platform-specific synchronizer for the current OS.
     pub fn getPlatformInstance() ProcessSynchronizer {
-        return switch (comptime builtin.os.tag) {
+        return switch (comptime builtin.target.os.tag) {
             .linux => linuxFutex(),
             .macos => macosUlock(),
             .windows => windowsWaitOnAddress(),
@@ -98,9 +98,9 @@ fn linuxFutexWait(ptr: *const i32, expected: i32, timeout_ns: ?i64) WaitResult {
 
     const err: u32 = @intCast(@as(usize, @bitCast(-signed_rc)));
     return switch (err) {
-        @intFromEnum(std.os.linux.E.AGAIN) => .value_changed,
-        @intFromEnum(std.os.linux.E.TIMEDOUT) => .timed_out,
-        @intFromEnum(std.os.linux.E.INTR) => .interrupted,
+        @backingInt(std.os.linux.E.AGAIN) => .value_changed,
+        @backingInt(std.os.linux.E.TIMEDOUT) => .timed_out,
+        @backingInt(std.os.linux.E.INTR) => .interrupted,
         else => .woken,
     };
 }
@@ -165,7 +165,7 @@ extern "c" fn __ulock_wake(
 ) c_int;
 
 fn macosUlockWait(ptr: *const i32, expected: i32, timeout_ns: ?i64) WaitResult {
-    if (comptime builtin.os.tag != .macos) unreachable;
+    if (comptime builtin.target.os.tag != .macos) unreachable;
 
     const timeout_us: u32 = if (timeout_ns) |ns|
         @intCast(@max(1, @divTrunc(ns, std.time.ns_per_us)))
@@ -182,20 +182,20 @@ fn macosUlockWait(ptr: *const i32, expected: i32, timeout_ns: ?i64) WaitResult {
     if (rc >= 0) return .woken;
     const err: u32 = @intCast(-rc);
     return switch (err) {
-        @intFromEnum(std.posix.E.AGAIN) => .value_changed,
-        @intFromEnum(std.posix.E.TIMEDOUT) => .timed_out,
-        @intFromEnum(std.posix.E.INTR) => .interrupted,
+        @backingInt(std.posix.E.AGAIN) => .value_changed,
+        @backingInt(std.posix.E.TIMEDOUT) => .timed_out,
+        @backingInt(std.posix.E.INTR) => .interrupted,
         else => .woken,
     };
 }
 
 fn macosUlockWake(ptr: *const i32) void {
-    if (comptime builtin.os.tag != .macos) unreachable;
+    if (comptime builtin.target.os.tag != .macos) unreachable;
     _ = __ulock_wake(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, @ptrCast(ptr), 0);
 }
 
 fn macosUlockWakeAll(ptr: *const i32) void {
-    if (comptime builtin.os.tag != .macos) unreachable;
+    if (comptime builtin.target.os.tag != .macos) unreachable;
     _ = __ulock_wake(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO | ULF_WAKE_ALL, @ptrCast(ptr), 0);
 }
 
@@ -210,7 +210,7 @@ fn windowsWaitOnAddress() ProcessSynchronizer {
 }
 
 fn windowsWait(ptr: *const i32, expected: i32, timeout_ns: ?i64) WaitResult {
-    if (comptime builtin.os.tag != .windows) unreachable;
+    if (comptime builtin.target.os.tag != .windows) unreachable;
     _ = ptr;
     _ = expected;
     _ = timeout_ns;
@@ -219,12 +219,12 @@ fn windowsWait(ptr: *const i32, expected: i32, timeout_ns: ?i64) WaitResult {
 }
 
 fn windowsWake(ptr: *const i32) void {
-    if (comptime builtin.os.tag != .windows) unreachable;
+    if (comptime builtin.target.os.tag != .windows) unreachable;
     _ = ptr;
 }
 
 fn windowsWakeAll(ptr: *const i32) void {
-    if (comptime builtin.os.tag != .windows) unreachable;
+    if (comptime builtin.target.os.tag != .windows) unreachable;
     _ = ptr;
 }
 

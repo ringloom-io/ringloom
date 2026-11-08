@@ -60,8 +60,7 @@ test "backpressure onset detection - 128B escalating load" {
         const count_str = fmtU32(&count_buf, step.message_count);
         const size_str = fmtU32(&size_buf, step.message_size);
 
-        const result_path = try std.fmt.allocPrint(
-            allocator,
+        const result_path = try allocator.print(
             "backpressure-onset-{s}.json",
             .{step.label},
         );
@@ -126,8 +125,7 @@ test "backpressure onset detection - 1024B escalating load" {
         const count_str = fmtU32(&count_buf, step.message_count);
         const size_str = fmtU32(&size_buf, step.message_size);
 
-        const result_path = try std.fmt.allocPrint(
-            allocator,
+        const result_path = try allocator.print(
             "backpressure-onset-{s}.json",
             .{step.label},
         );
@@ -180,8 +178,7 @@ test "backpressure varying consumer delay - 128B" {
         });
         try harness.waitForServiceReady(slow, 5000);
 
-        const result_path = try std.fmt.allocPrint(
-            allocator,
+        const result_path = try allocator.print(
             "backpressure-delay-{s}ms.json",
             .{delay_str},
         );
@@ -247,8 +244,7 @@ test "backpressure onset detection - 4096B large payload" {
         const count_str = fmtU32(&count_buf, step.message_count);
         const size_str = fmtU32(&size_buf, step.message_size);
 
-        const result_path = try std.fmt.allocPrint(
-            allocator,
+        const result_path = try allocator.print(
             "backpressure-onset-{s}.json",
             .{step.label},
         );

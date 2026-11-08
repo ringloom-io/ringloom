@@ -48,7 +48,7 @@ pub const defaultIo = io.default;
 
 /// Get the current process ID.
 pub fn getPid() i64 {
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .linux) {
         return @intCast(std.os.linux.getpid());
     } else {
         // Portable fallback — std.process doesn't expose getpid directly,

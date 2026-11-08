@@ -25,7 +25,7 @@ const test_io = @import("io.zig");
 
 /// Returns the current process ID portably.
 fn getCurrentPid() i64 {
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .linux) {
         return @intCast(std.os.linux.getpid());
     } else {
         const c = struct {
@@ -63,31 +63,31 @@ pub const TempEnv = struct {
             safe_name[i] = if (c == '/' or c == '\\' or c == ' ') '_' else c;
         }
 
-        const base_path = try std.fmt.allocPrint(allocator, "/tmp/ringloom-e2e-{s}-{d}", .{ safe_name, pid });
+        const base_path = try allocator.print("/tmp/ringloom-e2e-{s}-{d}", .{ safe_name, pid });
         errdefer allocator.free(base_path);
 
-        const storage_path = try std.fmt.allocPrint(allocator, "{s}/storage", .{base_path});
+        const storage_path = try allocator.print("{s}/storage", .{base_path});
         errdefer allocator.free(storage_path);
 
-        const aeron_path = try std.fmt.allocPrint(allocator, "{s}/aeron", .{base_path});
+        const aeron_path = try allocator.print("{s}/aeron", .{base_path});
         errdefer allocator.free(aeron_path);
 
-        const logs_path = try std.fmt.allocPrint(allocator, "{s}/logs", .{base_path});
+        const logs_path = try allocator.print("{s}/logs", .{base_path});
         errdefer allocator.free(logs_path);
 
-        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{base_path});
+        const config_path = try allocator.print("{s}/config", .{base_path});
         errdefer allocator.free(config_path);
 
-        const results_path = try std.fmt.allocPrint(allocator, "{s}/results", .{base_path});
+        const results_path = try allocator.print("{s}/results", .{base_path});
         errdefer allocator.free(results_path);
 
-        const artifacts_path = try std.fmt.allocPrint(allocator, "{s}/artifacts", .{base_path});
+        const artifacts_path = try allocator.print("{s}/artifacts", .{base_path});
         errdefer allocator.free(artifacts_path);
 
         // Create the full directory tree.  `makePath` creates intermediate
         // directories, so we can jump straight to the deepest leaves.
         // Create the default group services directory under storage.
-        const default_services = try std.fmt.allocPrint(allocator, "{s}/ringloom-test/services", .{storage_path});
+        const default_services = try allocator.print("{s}/ringloom-test/services", .{storage_path});
         defer allocator.free(default_services);
 
         try test_io.createDirPath(default_services);
@@ -144,10 +144,10 @@ pub const TempEnv = struct {
     /// `services/` child) if it does not already exist.  The returned
     /// slice is heap-allocated and owned by the caller.
     pub fn groupStoragePath(self: *const TempEnv, group: []const u8) ![]const u8 {
-        const group_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.storage_path, group });
+        const group_path = try self.allocator.print("{s}/{s}", .{ self.storage_path, group });
         errdefer self.allocator.free(group_path);
 
-        const services_path = try std.fmt.allocPrint(self.allocator, "{s}/services", .{group_path});
+        const services_path = try self.allocator.print("{s}/services", .{group_path});
         defer self.allocator.free(services_path);
 
         try test_io.createDirPath(services_path);
@@ -157,7 +157,7 @@ pub const TempEnv = struct {
 
     /// Returns `<aeron_path>/node-<node_id>`, heap-allocated and caller-owned.
     pub fn aeronDirectoryPath(self: *const TempEnv, node_id: u8) ![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{s}/node-{d}", .{ self.aeron_path, node_id });
+        return self.allocator.print("{s}/node-{d}", .{ self.aeron_path, node_id });
     }
 
     /// Maps a scenario-local broker port into this harness's isolated UDP port window.
@@ -167,12 +167,12 @@ pub const TempEnv = struct {
 
     /// Returns `<logs_path>/<filename>`, heap-allocated and caller-owned.
     pub fn logFilePath(self: *const TempEnv, filename: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.logs_path, filename });
+        return self.allocator.print("{s}/{s}", .{ self.logs_path, filename });
     }
 
     /// Returns `<config_path>/<filename>`, heap-allocated and caller-owned.
     pub fn configFilePath(self: *const TempEnv, filename: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.config_path, filename });
+        return self.allocator.print("{s}/{s}", .{ self.config_path, filename });
     }
 };
 
@@ -208,7 +208,7 @@ test "init creates expected directory structure" {
     artifacts_dir.close(test_io.io());
 
     // The default group services directory must also exist.
-    const services = try std.fmt.allocPrint(allocator, "{s}/ringloom-test/services", .{env.storage_path});
+    const services = try allocator.print("{s}/ringloom-test/services", .{env.storage_path});
     var services_dir = try test_io.openDir(services, .{});
     services_dir.close(test_io.io());
 }
@@ -247,7 +247,7 @@ test "groupStoragePath creates group directory on demand" {
     const path = try env.groupStoragePath("my-custom-group");
 
     // Then
-    const services_path = try std.fmt.allocPrint(allocator, "{s}/services", .{path});
+    const services_path = try allocator.print("{s}/services", .{path});
     var dir = try test_io.openDir(services_path, .{});
     dir.close(test_io.io());
 }

@@ -28,7 +28,7 @@ const State = struct {
     gateway_client: ?*ServiceClient = null,
     leader_routing: bool = false,
     account_remaining: [tables.account_count]i64 = initAccountRemaining(),
-    symbol_notional: [tables.symbol_count]i64 = [_]i64{0} ** tables.symbol_count,
+    symbol_notional: [tables.symbol_count]i64 = @splat(0),
 };
 
 fn initAccountRemaining() [tables.account_count]i64 {
@@ -149,12 +149,12 @@ fn rejectToGateway(envelope: *const protocol.Envelope, order: protocol.NewOrder,
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     runtime_io = io;
-    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    var debug_alloc: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => debug_alloc.allocator(),
-        .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
+        .debug, .safe => debug_alloc.allocator(),
+        .fast, .small => std.heap.smp_allocator,
     };
-    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+    defer if (builtin.mode == .debug or builtin.mode == .safe) {
         _ = debug_alloc.deinit();
     };
 

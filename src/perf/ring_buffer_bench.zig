@@ -132,7 +132,7 @@ const SpscSaturatedProducer = struct {
     }
 
     fn runInner(self: *@This()) !void {
-        var payload = [_]u8{0x6D} ** payload_size_bytes;
+        var payload: [payload_size_bytes]u8 = @splat(0x6D);
         payload[payload.len - 1] = 0x92;
 
         for (0..spsc_warmup_batches) |_| {
@@ -212,7 +212,7 @@ const SpscHandoffProducer = struct {
     }
 
     fn runInner(self: *@This()) !void {
-        var payload = [_]u8{0xA5} ** payload_size_bytes;
+        var payload: [payload_size_bytes]u8 = @splat(0xA5);
         payload[payload.len - 1] = 0x5A;
 
         const total_start_ns = Clock.monotonicNanos();
@@ -237,8 +237,7 @@ const RingBufferStorage = struct {
         label: []const u8,
     ) !RingBufferStorage {
         const total_size = RingBuffer.calculateRequiredSize(data_capacity, false);
-        const file_name = try std.fmt.allocPrint(
-            allocator,
+        const file_name = try allocator.print(
             "ring-buffer-{d}-{s}.bin",
             .{ platform.getPid(), label },
         );
@@ -282,7 +281,7 @@ fn writeScenarioResult(
         try std.Io.Dir.cwd().createFile(std.testing.io, file_path, .{});
     defer file.close(std.testing.io);
 
-    const json = try std.fmt.allocPrint(allocator,
+    const json = try allocator.print(
         \\{{
         \\  "suite": "{s}",
         \\  "scenario": "{s}",
@@ -368,7 +367,7 @@ fn percentile(sorted: []const u64, pct: usize) u64 {
 }
 
 fn initPayload(fill_byte: u8) [payload_size_bytes]u8 {
-    var payload = [_]u8{fill_byte} ** payload_size_bytes;
+    var payload: [payload_size_bytes]u8 = @splat(fill_byte);
     payload[0] = fill_byte;
     payload[payload.len - 1] = fill_byte ^ 0xFF;
     return payload;
