@@ -129,7 +129,11 @@ pub const KvContext = struct {
         const scratch = try self.allocator.alloc(u8, opts.max_frame_length + common.message.data_header.RingLoomDataHeader.encoded_length);
         errdefer self.allocator.free(scratch);
         const id = try format.storeIdOf(name);
-        w.* = .{ .allocator = self.allocator, .context = self, .name_len = name.len, .nonce = Publisher.newPublisherId(), .config = cfg, .options = opts, .publisher = .{ .topic_id = id, .publisher_id = Publisher.newPublisherId(), .source_node_id = @intCast(self.node_id), .source_service_id = @intCast(self.service_id), .leader_node_id = 0, .leader_epoch = 0, .scratch = scratch }, .buffer = buffer, .scratch = scratch, .builder = format.DataFrameBuilder.init(buffer, 0, 0).withLimits(cfg.max_key_len, cfg.max_value_len) };
+        // The open below sends exactly one RegisterKvWriter; doWork must not
+        // resend it until a reply (queued) or a leader change arrives. A blind
+        // resend could be granted after this attempt already failed (e.g. the
+        // first copy got LEADER_UNAVAILABLE), leaving an orphan lease.
+        w.* = .{ .allocator = self.allocator, .context = self, .name_len = name.len, .nonce = Publisher.newPublisherId(), .next_retry_ns = open_pending, .config = cfg, .options = opts, .publisher = .{ .topic_id = id, .publisher_id = Publisher.newPublisherId(), .source_node_id = @intCast(self.node_id), .source_service_id = @intCast(self.service_id), .leader_node_id = 0, .leader_epoch = 0, .scratch = scratch }, .buffer = buffer, .scratch = scratch, .builder = format.DataFrameBuilder.init(buffer, 0, 0).withLimits(cfg.max_key_len, cfg.max_value_len) };
         @memcpy(w.name_buf[0..name.len], name);
         self.lock();
         if (!self.active) {
@@ -261,6 +265,7 @@ pub const KvContext = struct {
                         w.builder.max_value_len = m.config.max_value_len;
                         self.retarget(w, m.leader_node_id, m.leader_epoch);
                         w.transition(if (m.status == 0) .granted else .queued, m.writer_epoch);
+                        if (w.next_retry_ns == open_pending) w.next_retry_ns = Clock.monotonicNanos() + 100 * std.time.ns_per_ms;
                     }
                 },
                 msgs.TEMPLATE_KV_WRITER_GRANTED => {
@@ -371,6 +376,9 @@ pub const KvContext = struct {
     }
 };
 
+/// `KvWriter.next_retry_ns` while the initial open awaits its first reply.
+const open_pending = std.math.maxInt(i64);
+
 fn statusError(s: msgs.KvStatus) !void {
     return switch (s) {
         .ok, .queued => {},
@@ -436,4 +444,28 @@ test "KV dispatch matches nonce, fences on leader change, retries queues, ignore
     try t.expectEqualStrings("/tmp/store", msgs.readerStoreDir(&ctx.reader_response.?));
     ctx.dispatch(&.{ 24, 0 });
     try t.expectEqualStrings("/tmp/store", msgs.readerStoreDir(&ctx.reader_response.?));
+}
+
+test "KV open in flight does not resend its register until a reply or leader change" {
+    const t = std.testing;
+    var ctx = KvContext.testContext(t.allocator);
+    var storage: [256]u8 = undefined;
+    const id: u64 = 77;
+    var w = Writer{ .allocator = t.failing_allocator, .context = &ctx, .name_len = 1, .nonce = 123, .next_retry_ns = open_pending, .config = .{}, .options = .{}, .publisher = .{ .topic_id = id, .publisher_id = 456, .leader_node_id = 1, .leader_epoch = 3 }, .buffer = &storage, .scratch = &.{}, .builder = format.DataFrameBuilder.init(&storage, 0, 3) };
+    ctx.writers = &w;
+    // doWork stamps next_retry_ns whenever it (re)sends a register.
+    ctx.doWork();
+    try t.expectEqual(open_pending, w.next_retry_ns);
+    // A queued reply turns on the periodic queue refresh.
+    var buf: [1024]u8 = undefined;
+    const n = msgs.encodeKvWriterResponse(&buf, .queued, id, 123, 0, 3, 1, .{});
+    ctx.dispatch(buf[0..n]);
+    try t.expectEqual(types.KvWriterState.queued, w.state());
+    try t.expect(w.next_retry_ns != open_pending);
+    // A leader change during an open re-registers on the new leader.
+    w.response_status = null;
+    w.next_retry_ns = open_pending;
+    const m = topic_msgs.encodeTopicLeaderChanged(&buf, id, 2, 4);
+    ctx.dispatch(buf[0..m]);
+    try t.expectEqual(@as(i64, 0), w.next_retry_ns);
 }

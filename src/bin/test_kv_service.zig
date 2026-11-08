@@ -256,6 +256,10 @@ pub fn main(init: std.process.Init) !void {
     try expectValue(engine, &session, "visible", null);
     try written(engine, writer, writer.put("clear-me", "value", .{ .ack_mode = .replicate_once }));
     try expectValue(engine, &session, "clear-me", "value");
+    // The earlier "ttl" check can pass before the put is applied at all.
+    // "clear-me" being visible proves "ttl" was applied, so this now waits for
+    // its 50 ms expiry before iteration counts live entries.
+    try expectValue(engine, &session, "ttl", null);
     var visited: u64 = 0;
     if (session.forEach(&visited, visit).status != .done or visited != 1) return error.IterationCount;
     try written(engine, writer, writer.clear(.{ .ack_mode = .replicate_once }));

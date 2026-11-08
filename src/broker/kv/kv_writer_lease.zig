@@ -217,7 +217,16 @@ pub const StoreLease = struct {
     /// Queue a request. Register/reassert retries from the same session replace
     /// the pending one. Returns false if the inbox is full.
     pub fn submit(self: *StoreLease, req: Request) bool {
-        if (req.kind != .unregister) {
+        if (req.kind == .unregister) {
+            // The session is closing: its still-pending register/reassert
+            // requests (e.g. a client-side retry sent before it gave up on the
+            // open) must not be granted after it left.
+            var i: usize = 0;
+            while (i < self.inbox_len) {
+                const e = self.inbox[i];
+                if (e.kind != .unregister and e.who.nonce == req.who.nonce) self.removeInbox(i) else i += 1;
+            }
+        } else {
             for (self.inbox[0..self.inbox_len]) |*e| {
                 if (e.kind == req.kind and e.who.nonce == req.who.nonce) {
                     e.* = req; // refresh party/config; keeps FIFO position
@@ -541,7 +550,14 @@ pub const StoreLease = struct {
             .unregister => {
                 if (self.findWaiter(r.who.nonce)) |i| self.removeWaiter(i);
                 if (view.holder) |h| {
-                    if (h.nonce == r.who.nonce and h.epoch == r.epoch and self.want_release == null) {
+                    // Epoch 0: the session closed before it learned any epoch
+                    // (its open failed, timed out, or it was still queued), so
+                    // a grant to that nonce was issued for a request it has
+                    // abandoned. Nonces are never reused, so release it.
+                    // A non-zero epoch must match: a delayed unregister cannot
+                    // release a later same-nonce reasserted grant.
+                    const epoch_ok = r.epoch == 0 or h.epoch == r.epoch;
+                    if (h.nonce == r.who.nonce and epoch_ok and self.want_release == null) {
                         self.want_release = .{ .epoch = h.epoch, .reason = release_graceful };
                     }
                 }
@@ -1322,4 +1338,47 @@ test "delayed unregister cannot release a same-nonce reasserted grant" {
     try sim.tick();
     try testing.expect(sim.track.holder() == null);
     try testing.expectEqual(releases + 1, sim.appended_releases);
+}
+
+test "abandoned open: epoch-0 unregister releases a grant the client never saw, so its retry is not HELD_BY_OTHER" {
+    // Client open attempt #1 (nonce 0xA) sent a register that was granted, but
+    // the client had already failed that attempt (e.g. LEADER_UNAVAILABLE
+    // answered an earlier copy) and closed it with epoch 0. Attempt #2 uses a
+    // fresh nonce from the same service and must get the lease.
+    var sim = try Sim.init();
+    defer sim.deinit();
+    const stale = Sim.who(1, 10, 0xA);
+    try sim.register(stale, .fail_if_held, cfg_a);
+    try sim.tick();
+    try testing.expectEqual(@as(u64, 0xA), sim.track.holder().?.nonce);
+    try sim.unregister(stale, 0);
+    try sim.register(Sim.who(1, 10, 0xB), .fail_if_held, cfg_a);
+    try sim.tick();
+    try sim.tick();
+    try testing.expectEqual(@as(u32, 1), sim.appended_releases);
+    try testing.expectEqual(KvStatus.ok, sim.lastReply().status);
+    try testing.expectEqual(@as(u64, 0xB), sim.lastReply().nonce);
+    try testing.expectEqual(@as(u64, 0xB), sim.track.holder().?.nonce);
+    try testing.expectEqual(@as(u64, 2), sim.track.holder().?.epoch);
+    // Real contention is still enforced against the new holder.
+    try sim.register(Sim.who(1, 10, 0xC), .fail_if_held, cfg_a);
+    try sim.tick();
+    try testing.expectEqual(KvStatus.held_by_other, sim.lastReply().status);
+}
+
+test "unregister drops the closing session's pending register before it is granted" {
+    var sim = try Sim.init();
+    defer sim.deinit();
+    sim.track.onEntry(1, try kv.format.encodeStoreHeader(&sim.buf, 1, cfg_a));
+    sim.next_index = 1;
+    const stale = Sim.who(1, 10, 0xA);
+    try sim.register(stale, .fail_if_held, cfg_a);
+    try sim.unregister(stale, 0);
+    try sim.register(Sim.who(1, 10, 0xB), .fail_if_held, cfg_a);
+    try sim.tick();
+    try testing.expectEqual(@as(u32, 1), sim.appended_grants);
+    try testing.expectEqual(@as(u32, 0), sim.appended_releases);
+    try testing.expectEqual(@as(usize, 1), sim.replies.items.len);
+    try testing.expectEqual(@as(u64, 0xB), sim.lastReply().nonce);
+    try testing.expectEqual(KvStatus.ok, sim.lastReply().status);
 }
