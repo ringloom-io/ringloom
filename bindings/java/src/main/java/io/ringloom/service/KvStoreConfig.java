@@ -17,10 +17,16 @@ public record KvStoreConfig(int formatVersion, int maxKeyLength, long maxValueLe
     public static KvStoreConfig defaults() {
         try (Arena a = Arena.ofConfined()) {
             var s = a.allocate(80, 8); KvNative.store_config_init(s);
-            byte[] b = s.asSlice(32,16).toArray(JAVA_BYTE); int n=0; while(n<16 && b[n]!=0)n++;
-            return new KvStoreConfig(Short.toUnsignedInt(s.get(JAVA_SHORT,4)), Short.toUnsignedInt(s.get(JAVA_SHORT,8)), Integer.toUnsignedLong(s.get(JAVA_INT,12)), s.get(JAVA_LONG,16), s.get(JAVA_LONG,24), new String(b,0,n,StandardCharsets.UTF_8),s.get(JAVA_INT,48));
+            return read(s);
         }
     }
+    /** Decodes a native ringloom_kv_store_config_t. */
+    static KvStoreConfig read(MemorySegment s) {
+        byte[] b = s.asSlice(32,16).toArray(JAVA_BYTE); int n=0; while(n<16 && b[n]!=0)n++;
+        return new KvStoreConfig(Short.toUnsignedInt(s.get(JAVA_SHORT,4)), Short.toUnsignedInt(s.get(JAVA_SHORT,8)), Integer.toUnsignedLong(s.get(JAVA_INT,12)), s.get(JAVA_LONG,16), s.get(JAVA_LONG,24), new String(b,0,n,StandardCharsets.UTF_8),s.get(JAVA_INT,48));
+    }
+    /** Allocates a zeroed config with its size field set, ready to be filled by native code. */
+    static MemorySegment allocateOut(Arena a) { var s=a.allocate(80,8); s.set(JAVA_INT,0,80); return s; }
     MemorySegment allocate(Arena a) {
         var s=a.allocate(80,8); KvNative.store_config_init(s);
         s.set(JAVA_SHORT,4,(short)formatVersion); s.set(JAVA_SHORT,8,(short)maxKeyLength); s.set(JAVA_INT,12,(int)maxValueLength);

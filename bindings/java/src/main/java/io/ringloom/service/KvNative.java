@@ -30,7 +30,49 @@ final class KvNative {
     static int session_new(MemorySegment x0, MemorySegment x1) {
         try { return (int) SESSION_NEW.invokeExact(x0, x1); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_session_new", t); }
     }
-    private static final MethodHandle GET = RingloomNative.downcall("ringloom_kv_get", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
+    static { if (ADDRESS.byteSize() != 8) throw new ExceptionInInitializerError("KV raw-address downcalls require 64-bit pointers"); }
+    /** get never blocks behind Java code and never upcalls, so it is linked critical with heap access:
+     * the ADDRESS form accepts heap segments (MemorySegment.ofArray). */
+    private static final MethodHandle GET = RingloomNative.downcall("ringloom_kv_get", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS), Linker.Option.critical(true));
+    private static final MethodHandle GET_RAW = RingloomNative.downcall("ringloom_kv_get", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG), Linker.Option.critical(false));
+    static int get_raw(MemorySegment session, long key, long keyLength, long out, long capacity, long outLength) {
+        try { return (int) GET_RAW.invokeExact(session, key, keyLength, out, capacity, outLength); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_get", t); }
+    }
+    // put/delete are deliberately not critical: they spin on the native KvContext lock, which the control
+    // thread holds while upcalling the Java state callback; a critical call would block the safepoint
+    // that callback may need (deadlock). They therefore require native segments.
+    private static final MethodHandle PUT_RAW = RingloomNative.downcall("ringloom_kv_put", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_BYTE, JAVA_LONG));
+    static int put_raw(MemorySegment writer, long key, long keyLength, long value, long valueLength, long ttl, byte ack, long outSeq) {
+        try { return (int) PUT_RAW.invokeExact(writer, key, keyLength, value, valueLength, ttl, ack, outSeq); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_put", t); }
+    }
+    private static final MethodHandle DELETE_RAW = RingloomNative.downcall("ringloom_kv_delete", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_BYTE, JAVA_LONG));
+    static int delete_raw(MemorySegment writer, long key, long keyLength, byte ack, long outSeq) {
+        try { return (int) DELETE_RAW.invokeExact(writer, key, keyLength, ack, outSeq); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_delete", t); }
+    }
+    private static final MethodHandle READER_CONFIG = RingloomNative.downcall("ringloom_kv_reader_config", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
+    static int reader_config(MemorySegment x0, MemorySegment x1) {
+        try { return (int) READER_CONFIG.invokeExact(x0, x1); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_reader_config", t); }
+    }
+    private static final MethodHandle WRITER_CONFIG = RingloomNative.downcall("ringloom_kv_writer_config", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
+    static int writer_config(MemorySegment x0, MemorySegment x1) {
+        try { return (int) WRITER_CONFIG.invokeExact(x0, x1); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_writer_config", t); }
+    }
+    private static final MethodHandle WRITER_ACKED_SEQ = RingloomNative.downcall("ringloom_kv_writer_acked_seq", FunctionDescriptor.of(JAVA_LONG, ADDRESS));
+    static long writer_acked_seq(MemorySegment x0) {
+        try { return (long) WRITER_ACKED_SEQ.invokeExact(x0); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_writer_acked_seq", t); }
+    }
+    private static final MethodHandle WRITER_LEADER_EPOCH = RingloomNative.downcall("ringloom_kv_writer_leader_epoch", FunctionDescriptor.of(JAVA_LONG, ADDRESS));
+    static long writer_leader_epoch(MemorySegment x0) {
+        try { return (long) WRITER_LEADER_EPOCH.invokeExact(x0); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_writer_leader_epoch", t); }
+    }
+    private static final MethodHandle WRITER_EPOCH = RingloomNative.downcall("ringloom_kv_writer_epoch", FunctionDescriptor.of(JAVA_LONG, ADDRESS));
+    static long writer_epoch(MemorySegment x0) {
+        try { return (long) WRITER_EPOCH.invokeExact(x0); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_writer_epoch", t); }
+    }
+    private static final MethodHandle ABANDON_BATCH = RingloomNative.downcall("ringloom_kv_abandon_batch", FunctionDescriptor.of(JAVA_INT, ADDRESS));
+    static int abandon_batch(MemorySegment x0) {
+        try { return (int) ABANDON_BATCH.invokeExact(x0); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_abandon_batch", t); }
+    }
     static int get(MemorySegment x0, MemorySegment x1, long x2, MemorySegment x3, long x4, MemorySegment x5) {
         try { return (int) GET.invokeExact(x0, x1, x2, x3, x4, x5); } catch (Throwable t) { throw new IllegalStateException("ringloom_kv_get", t); }
     }
@@ -92,6 +134,8 @@ final class KvNative {
     }
     static void check(String op, int status) { RingloomNative.throwForStatus("ringloom_kv_" + op, status); }
     static void guard() { KvCallbackGuard.check(); }
+    /** For critical(true) downcalls: heap segments are allowed, read-only checks are the caller's job. */
+    static MemorySegment heapOrNative(MemorySegment s) { return java.util.Objects.requireNonNull(s, "segment"); }
     static MemorySegment pointer(MemorySegment s) { java.util.Objects.requireNonNull(s, "segment"); if (!s.isNative()) throw new IllegalArgumentException("KV requires native memory segments"); return s; }
     static MemorySegment name(Arena a, String name) {
         var bytes = java.util.Objects.requireNonNull(name).getBytes(java.nio.charset.StandardCharsets.UTF_8);

@@ -16,7 +16,7 @@ import java.nio.file.Path;
 
 final class RingloomNative {
 
-    static final int ABI_VERSION = 6;
+    static final int ABI_VERSION = 7;
     private static final String LIBRARY_BASE_NAME = "ringloom_service";
     private static final String CLASSPATH_LIBRARY_ROOT =
         "/io/ringloom/service/native";
@@ -1642,6 +1642,17 @@ final class RingloomNative {
             new IllegalStateException("Missing native symbol " + symbol)
         );
         return LINKER.downcallHandle(address, descriptor);
+    }
+
+    static MethodHandle downcall(
+        String symbol,
+        FunctionDescriptor descriptor,
+        Linker.Option... options
+    ) {
+        MemorySegment address = SYMBOLS.find(symbol).orElseThrow(() ->
+            new IllegalStateException("Missing native symbol " + symbol)
+        );
+        return LINKER.downcallHandle(address, descriptor, options);
     }
 
     private static MethodHandle optionalDowncall(

@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define RINGLOOM_SERVICE_ABI_VERSION 6u
+#define RINGLOOM_SERVICE_ABI_VERSION 7u
 
 typedef struct ringloom_service ringloom_service_t;
 typedef struct ringloom_client ringloom_client_t;
@@ -493,9 +493,11 @@ uint64_t ringloom_topic_publisher_replicated_count(const ringloom_topic_publishe
 uint64_t ringloom_topic_subscription_id(const ringloom_topic_subscription_t *subscription);
 
 
-/* KV ABI 6. Initialize all option/status size fields to sizeof(struct).
+/* KV ABI 7. Initialize all option/status/config size fields to sizeof(struct).
  * NULL reader/writer options select defaults. Config is required.
- * Sessions belong to one thread. Free sessions before readers; close writers
+ * A session may be used by any thread, but by only one thread at a time
+ * (MDB_NOTLS); a held view must be released by the thread that took it.
+ * Free sessions before readers; close writers
  * and readers before destroying the service. A view pins a snapshot until
  * release; get/view/iteration reuse that snapshot while it is held.
  * Callbacks must not re-enter the KV API or close their handles. A visit
@@ -554,6 +556,8 @@ void ringloom_kv_reader_options_init(ringloom_kv_reader_options_t*);
 void ringloom_kv_writer_options_init(ringloom_kv_writer_options_t*);
 int ringloom_kv_open_reader(ringloom_client_t*, const char*, const ringloom_kv_reader_options_t*, ringloom_kv_reader_t**);
 int ringloom_kv_reader_status(const ringloom_kv_reader_t*, ringloom_kv_status_t*);
+/* Effective immutable store config captured at open (limits from the store). */
+int ringloom_kv_reader_config(const ringloom_kv_reader_t*, ringloom_kv_store_config_t* out);
 int ringloom_kv_session_new(ringloom_kv_reader_t*, ringloom_kv_session_t**);
 int ringloom_kv_get(ringloom_kv_session_t*, const uint8_t*, size_t, uint8_t*, size_t, size_t*);
 int ringloom_kv_view(ringloom_kv_session_t*, const uint8_t*, size_t, const uint8_t**, size_t*);
@@ -567,8 +571,23 @@ int ringloom_kv_delete(ringloom_kv_writer_t*, const uint8_t*, size_t, uint8_t ac
 int ringloom_kv_clear(ringloom_kv_writer_t*, uint8_t ack_mode, uint64_t*);
 int ringloom_kv_begin_batch(ringloom_kv_writer_t*);
 int ringloom_kv_commit_batch(ringloom_kv_writer_t*, uint8_t ack_mode, uint64_t*);
+/* Drops records buffered since begin_batch and ends the batch. Frames already
+ * auto-flushed while the batch was open are not recalled. OK if no batch is open. */
+int ringloom_kv_abandon_batch(ringloom_kv_writer_t*);
 int ringloom_kv_is_acked(ringloom_kv_writer_t*, uint64_t);
 int ringloom_kv_writer_state(const ringloom_kv_writer_t*);
+/* Highest acknowledged replicate_once sequence for this writer (monotonic,
+ * lock-free). Same namespace as the out_seq of put/delete/clear/commit_batch. */
+uint64_t ringloom_kv_writer_acked_seq(const ringloom_kv_writer_t*);
+/* Topic leader epoch the writer currently publishes under (0 = none). */
+uint64_t ringloom_kv_writer_leader_epoch(const ringloom_kv_writer_t*);
+/* Current lease epoch; 0 while queued or revoked (kept while reasserting). */
+uint64_t ringloom_kv_writer_epoch(const ringloom_kv_writer_t*);
+/* Effective config the broker accepted (may differ from the request in map_size_hint only). */
+int ringloom_kv_writer_config(const ringloom_kv_writer_t*, ringloom_kv_store_config_t* out);
+/* Threading: writer mutations, the accessors above and control polling are
+ * serialized natively, so one thread may publish while another polls control.
+ * close_writer must not race with publishing or ringloom_service_poll_control. */
 void ringloom_kv_close_writer(ringloom_kv_writer_t*);
 
 #ifdef __cplusplus

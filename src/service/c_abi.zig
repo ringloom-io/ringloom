@@ -23,7 +23,7 @@ pub const ringloom_client = opaque {};
 pub const ringloom_message_consumer = opaque {};
 pub const ringloom_metrics_reader = opaque {};
 
-pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 6;
+pub const RINGLOOM_SERVICE_ABI_VERSION: u32 = 7;
 const max_error_message_length = error_state_mod.max_error_message_length;
 const claim_handle_record_length = std.math.minInt(i32);
 
@@ -2098,7 +2098,7 @@ test "client target layout matches expected offsets" {
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(ringloom_client_target_t));
 }
 
-// ── Replicated KV stores (ABI 6) ──────────────────────────────────────
+// ── Replicated KV stores (ABI 7) ──────────────────────────────────────
 const kv_api = @import("kv.zig");
 pub const ringloom_kv_reader = opaque {};
 pub const ringloom_kv_session = opaque {};
@@ -2214,6 +2214,16 @@ export fn ringloom_kv_reader_status(reader: ?*const ringloom_kv_reader, out: ?*r
     if (dest.size < @sizeOf(ringloom_kv_status_t)) return kvInvalid();
     const s = r.status();
     dest.* = .{ .state = @truncate(@backingInt(s.state)), .replication_live = @intFromBool(s.replication_live), .generation = s.generation, .applied_index = s.applied_index, .applied_leader_epoch = s.applied_leader_epoch, .applied_at_ns = s.applied_at_ns, .local_log_tip_index = s.local_log_tip_index, .lag_entries = s.lag_entries, .heartbeat_age_ms = s.heartbeat_age_ms, .generation_switches = s.generation_switches };
+    return .RINGLOOM_OK;
+}
+export fn ringloom_kv_reader_config(reader: ?*const ringloom_kv_reader, out: ?*ringloom_kv_store_config_t) Status {
+    clearLastError();
+    const p = reader orelse return kvInvalid();
+    const r: *const kv_api.KvReader = @ptrCast(@alignCast(p));
+    const dest = out orelse return kvInvalid();
+    if (dest.size < @sizeOf(ringloom_kv_store_config_t)) return kvInvalid();
+    dest.* = r.effectiveConfig();
+    dest.size = @sizeOf(ringloom_kv_store_config_t);
     return .RINGLOOM_OK;
 }
 export fn ringloom_kv_session_new(reader: ?*ringloom_kv_reader, out: ?*?*ringloom_kv_session) Status {
@@ -2379,6 +2389,12 @@ export fn ringloom_kv_commit_batch(writer: ?*ringloom_kv_writer, ack_mode: u8, o
     const ack = kv_api.AckMode.fromU8(ack_mode) orelse return kvInvalid();
     return kvWriteResult(w.writer.commitBatch(.{ .ack_mode = ack }), out_seq);
 }
+export fn ringloom_kv_abandon_batch(writer: ?*ringloom_kv_writer) Status {
+    clearLastError();
+    const w = kvWriter(writer) orelse return kvInvalid();
+    w.writer.abandonBatch();
+    return .RINGLOOM_OK;
+}
 export fn ringloom_kv_is_acked(writer: ?*ringloom_kv_writer, seq: u64) c_int {
     const w = kvWriter(writer) orelse return 0;
     return @intFromBool(w.writer.isAcked(seq));
@@ -2387,6 +2403,30 @@ export fn ringloom_kv_writer_state(writer: ?*const ringloom_kv_writer) c_int {
     const p = writer orelse return -1;
     const h: *const KvCWriter = @ptrCast(@alignCast(p));
     return @backingInt(h.writer.state());
+}
+fn kvConstWriter(p: ?*const ringloom_kv_writer) ?*const KvCWriter {
+    return if (p) |v| @ptrCast(@alignCast(v)) else null;
+}
+export fn ringloom_kv_writer_acked_seq(writer: ?*const ringloom_kv_writer) u64 {
+    const h = kvConstWriter(writer) orelse return 0;
+    return h.writer.ackedSeq();
+}
+export fn ringloom_kv_writer_leader_epoch(writer: ?*const ringloom_kv_writer) u64 {
+    const h = kvConstWriter(writer) orelse return 0;
+    return h.writer.leaderEpoch();
+}
+export fn ringloom_kv_writer_epoch(writer: ?*const ringloom_kv_writer) u64 {
+    const h = kvConstWriter(writer) orelse return 0;
+    return h.writer.writerEpoch();
+}
+export fn ringloom_kv_writer_config(writer: ?*const ringloom_kv_writer, out: ?*ringloom_kv_store_config_t) Status {
+    clearLastError();
+    const h = kvConstWriter(writer) orelse return kvInvalid();
+    const dest = out orelse return kvInvalid();
+    if (dest.size < @sizeOf(ringloom_kv_store_config_t)) return kvInvalid();
+    dest.* = h.writer.effectiveConfig();
+    dest.size = @sizeOf(ringloom_kv_store_config_t);
+    return .RINGLOOM_OK;
 }
 export fn ringloom_kv_close_writer(writer: ?*ringloom_kv_writer) void {
     if (kvWriter(writer)) |h| {
@@ -2427,6 +2467,12 @@ test "KV ABI sizes, defaults and validation" {
     try t.expectEqual(Status.RINGLOOM_ERR_INVALID_ARGUMENT, ringloom_kv_open_reader(null, "prices", null, null));
     try t.expectEqual(@as(c_int, -1), ringloom_kv_writer_state(null));
     try t.expectEqual(@as(c_int, 0), ringloom_kv_is_acked(null, 1));
+    try t.expectEqual(@as(u64, 0), ringloom_kv_writer_acked_seq(null));
+    try t.expectEqual(@as(u64, 0), ringloom_kv_writer_leader_epoch(null));
+    try t.expectEqual(@as(u64, 0), ringloom_kv_writer_epoch(null));
+    try t.expectEqual(Status.RINGLOOM_ERR_INVALID_ARGUMENT, ringloom_kv_writer_config(null, &cfg));
+    try t.expectEqual(Status.RINGLOOM_ERR_INVALID_ARGUMENT, ringloom_kv_reader_config(null, &cfg));
+    try t.expectEqual(Status.RINGLOOM_ERR_INVALID_ARGUMENT, ringloom_kv_abandon_batch(null));
     ringloom_kv_release(null);
     ringloom_kv_session_free(null);
     ringloom_kv_close_reader(null);
@@ -2454,6 +2500,13 @@ test "KV ABI copying, borrowed views, expiry and iterator stop" {
     cf.publishGeneration(1);
     const reader = try kv_api.KvReader.openLocal(t.allocator, dir, .{}, .{});
     defer ringloom_kv_close_reader(@ptrCast(reader));
+    var reader_cfg: ringloom_kv_store_config_t = .{};
+    reader_cfg.size = 4;
+    try t.expectEqual(Status.RINGLOOM_ERR_INVALID_ARGUMENT, ringloom_kv_reader_config(@ptrCast(reader), &reader_cfg));
+    reader_cfg = .{ .max_key_len = 1 };
+    try t.expectEqual(Status.RINGLOOM_OK, ringloom_kv_reader_config(@ptrCast(reader), &reader_cfg));
+    try t.expectEqual(@as(u16, 511), reader_cfg.max_key_len);
+    try t.expectEqual(@as(u32, 80), reader_cfg.size);
     var session: ?*ringloom_kv_session = null;
     try t.expectEqual(Status.RINGLOOM_OK, ringloom_kv_session_new(@ptrCast(reader), &session));
     defer ringloom_kv_session_free(session);

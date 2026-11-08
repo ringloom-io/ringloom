@@ -13,6 +13,7 @@ bin_dir="zig-out/bin"
 timeout_sec="10"
 mode=""
 topics_enabled="false"
+kv_enabled="false"
 
 usage() {
     cat <<'EOF'
@@ -20,12 +21,15 @@ Usage:
   ./scripts/start-test-broker.sh [--workspace DIR] [--group NAME] [--node-id N]
                                  [--host HOST] [--port PORT]
                                  [--peer NODE@HOST:PORT]... [--bin-dir DIR]
-                                 [--timeout SEC] --foreground
+                                 [--timeout SEC] [--topics] [--kv] --foreground
   ./scripts/start-test-broker.sh [--workspace DIR] [--group NAME] [--node-id N]
                                  [--host HOST] [--port PORT]
                                  [--peer NODE@HOST:PORT]... [--bin-dir DIR]
-                                 [--timeout SEC] --daemon
+                                 [--timeout SEC] [--topics] [--kv] --daemon
   ./scripts/start-test-broker.sh --workspace DIR [--node-id N] --stop
+
+  --topics  enable persistent topics (storage under <storage>/topics)
+  --kv      enable replicated KV stores (storage under <storage>/kv); implies --topics
 EOF
 }
 
@@ -64,6 +68,11 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --topics)
+            topics_enabled="true"
+            shift
+            ;;
+        --kv)
+            kv_enabled="true"
             topics_enabled="true"
             shift
             ;;
@@ -138,6 +147,10 @@ write_config() {
         if [[ "$topics_enabled" == "true" ]]; then
             printf 'broker.topics.enabled=true\n'
             printf 'broker.topics.path=%s/topics\n' "$storage_dir"
+        fi
+        if [[ "$kv_enabled" == "true" ]]; then
+            printf 'broker.kv.enabled=true\n'
+            printf 'broker.kv.path=%s/kv\n' "$storage_dir"
         fi
     } >"$config_file"
 }

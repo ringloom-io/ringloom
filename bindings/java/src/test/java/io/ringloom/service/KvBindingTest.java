@@ -49,11 +49,14 @@ final class KvBindingTest {
                 assertArrayEquals(val.toArray(JAVA_BYTE),view.toArray(JAVA_BYTE));
                 session.release();assertThrows(IllegalStateException.class,()->view.get(JAVA_BYTE,0));
                 await(service,()->session.get(key,out,n)==0 && n[0]==other.byteSize());
-                AtomicReference<Throwable> wrongThread=new AtomicReference<>();
-                Thread t=new Thread(()->{try{session.release();}catch(Throwable e){wrongThread.set(e);}});t.start();t.join();assertInstanceOf(WrongThreadException.class,wrongThread.get());
-                MemorySegment[] escaped={null};
-                assertEquals(0,session.forEach((k,v)->{escaped[0]=v;assertThrows(IllegalStateException.class,session::release);return false;}));
-                assertThrows(IllegalStateException.class,()->escaped[0].get(JAVA_BYTE,0));
+                // SERIAL (default) sessions may move between threads; CONFINED keeps owner checks.
+                AtomicReference<Throwable> otherThread=new AtomicReference<>();
+                Thread t=new Thread(()->{try{session.release();}catch(Throwable e){otherThread.set(e);}});t.start();t.join();assertNull(otherThread.get());
+                try(KvSession confined=reader.newSession(KvSessionMode.CONFINED)) {
+                    assertEquals(KvSessionMode.CONFINED,confined.mode());
+                    Thread c=new Thread(()->{try{confined.release();}catch(Throwable e){otherThread.set(e);}});c.start();c.join();assertInstanceOf(WrongThreadException.class,otherThread.get());
+                }
+                assertEquals(0,session.forEach((k,v)->{assertTrue(v.isReadOnly());assertThrows(IllegalStateException.class,session::release);return false;}));
                 assertThrows(IllegalStateException.class,()->session.forEach((k,v)->{throw new RuntimeException("visitor");}));
                 var empty=a.allocateFrom("empty");
                 assertEquals(0,writer.beginBatch()); assertEquals(0,writer.put(empty,MemorySegment.NULL,0,TopicAckMode.REPLICATE_ONCE,seq));assertEquals(0,seq[0]);

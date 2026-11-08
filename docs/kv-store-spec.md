@@ -644,6 +644,39 @@ The C++, Node, and Java bindings wrap only this C ABI and never link LMDB direct
 engine does not affect them. For Java, the copying `get` into a caller-provided `MemorySegment` is
 the main API; `view` is exposed as a scoped segment.
 
+**ABI 7 additions** (service ABI 6 → 7):
+
+```c
+int      ringloom_kv_reader_config(const ringloom_kv_reader_t*, ringloom_kv_store_config_t* out);
+int      ringloom_kv_writer_config(const ringloom_kv_writer_t*, ringloom_kv_store_config_t* out);
+uint64_t ringloom_kv_writer_acked_seq(const ringloom_kv_writer_t*);    // lock-free, monotonic
+uint64_t ringloom_kv_writer_leader_epoch(const ringloom_kv_writer_t*); // 0 = none
+uint64_t ringloom_kv_writer_epoch(const ringloom_kv_writer_t*);        // 0 while queued/revoked
+int      ringloom_kv_abandon_batch(ringloom_kv_writer_t*);
+```
+
+- `*_config` require `out->size >= sizeof(ringloom_kv_store_config_t)`. The reader reports the limits
+  stored in the store's control file; the writer reports the config the broker accepted.
+- `acked_seq` uses the same sequence namespace as the `out_seq` of `put`/`delete`/`clear`/`commit_batch`.
+- `abandon_batch` drops records buffered since `begin_batch` and ends the batch. Frames auto-flushed
+  while the batch was open (buffer full) are already published and are not recalled.
+- Threading: a read session may be used by any thread, one at a time (MDB_NOTLS). Writer mutations,
+  the writer accessors and control polling are serialized by the native `KvContext` lock, so one
+  thread may publish while another runs `ringloom_service_poll_control`. `close_writer` must not race
+  with publishing on the same writer (it frees the writer), nor — conservatively — with control polling.
+
+**Java binding (ABI 7):** `KvSession` defaults to `KvSessionMode.SERIAL` (any thread, one at a time,
+pinned to the viewing thread while a `view` is held, closable from any idle thread);
+`KvReader.newSession(KvSessionMode.CONFINED)` keeps the owner-thread check. `get`, `put` and `delete`
+have offset/length overloads that pass raw addresses (allocation-free); `forEach` reuses one upcall stub
+per session and `forEachRaw(KvRawVisitor)` iterates without allocation. `get` is linked with
+`Linker.Option.critical(true)` and accepts heap segments. `put`/`delete` are not critical: they can wait
+on the `KvContext` lock that the control thread holds while upcalling the Java state callback, and a
+critical call blocks the safepoint that callback may need. Writes therefore require native segments.
+`KvReader` adds `config()`, `status(KvStatusHolder)` and `openSessionCount()`; `KvWriter` adds
+`ackedSequence()`, `leaderEpoch()`, `writerEpoch()` (single downcalls, no monitor), `config()` and
+`abandonBatch()`.
+
 ---
 
 ## 12. Control-plane messages

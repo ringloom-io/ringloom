@@ -40,6 +40,35 @@ pub const KvWriter = struct {
     pub fn isAcked(self: *const KvWriter, seq: u64) bool {
         return seq != 0 and self.publisher.isAcked(seq);
     }
+    /// Highest acknowledged replicate_once sequence (monotonic, lock-free).
+    /// Same namespace as the sequence tokens returned by writes.
+    pub fn ackedSeq(self: *const KvWriter) u64 {
+        return self.publisher.ackedSeq();
+    }
+    /// Topic leader epoch this writer publishes under (0 = none yet).
+    pub fn leaderEpoch(self: *const KvWriter) u64 {
+        const ctx = self.context orelse return 0;
+        ctx.lock();
+        defer ctx.unlock();
+        return self.publisher.leader_epoch;
+    }
+    /// Current lease epoch; 0 unless granted (or reasserting a grant).
+    pub fn writerEpoch(self: *const KvWriter) u64 {
+        const ctx = self.context orelse return 0;
+        ctx.lock();
+        defer ctx.unlock();
+        return switch (self.writer_state) {
+            .granted, .reasserting => self.epoch,
+            .queued, .revoked => 0,
+        };
+    }
+    /// Effective store config accepted by the broker.
+    pub fn effectiveConfig(self: *const KvWriter) types.KvStoreConfig {
+        const ctx = self.context orelse return self.config;
+        ctx.lock();
+        defer ctx.unlock();
+        return self.config;
+    }
     pub fn put(self: *KvWriter, key: []const u8, value: []const u8, opts: types.KvPutOpts) types.KvWriteResult {
         return self.write(.put, key, value, opts.ttl_ms, opts.ack_mode);
     }
@@ -112,6 +141,18 @@ pub const KvWriter = struct {
         }
         return r;
     }
+    /// Discards the records buffered by the open batch and ends it. Frames
+    /// already auto-flushed while the batch was open are not recalled.
+    /// No-op when no batch is open.
+    pub fn abandonBatch(self: *KvWriter) void {
+        const ctx = self.context orelse return;
+        ctx.lock();
+        defer ctx.unlock();
+        if (!self.batching) return;
+        self.builder.reset();
+        self.batch_ack = .fire_and_forget;
+        self.batching = false;
+    }
     fn flush(self: *KvWriter, ack: types.AckMode) types.KvWriteResult {
         if (self.builder.isEmpty()) return .{ .ok = 0 };
         self.builder.writer_epoch = self.epoch;
@@ -164,9 +205,21 @@ test "writer validation, batch preservation, fencing and TTL encoding" {
     try std.testing.expectEqual(types.KvWriteResult.leader_unavailable, w.commitBatch(.{}));
     try std.testing.expect(w.batching);
     try std.testing.expectEqual(@as(u32, 1), w.builder.recordCount());
+    try std.testing.expectEqual(@as(u64, 2), w.writerEpoch());
+    try std.testing.expectEqual(@as(u64, 3), w.leaderEpoch());
+    try std.testing.expectEqual(@as(u64, 0), w.ackedSeq());
+    try std.testing.expectEqual(@as(u16, 4), w.effectiveConfig().max_key_len);
     w.transition(.reasserting, 2);
     try std.testing.expectEqual(types.KvWriteResult.leader_unavailable, w.clear(.{}));
     w.transition(.granted, 4);
+    try std.testing.expectEqual(@as(u32, 1), w.builder.recordCount());
+    // Abandon drops the buffered records and ends the batch; repeat is a no-op.
+    w.abandonBatch();
+    try std.testing.expect(!w.batching);
+    try std.testing.expect(w.builder.isEmpty());
+    w.abandonBatch();
+    w.beginBatch();
+    try std.testing.expectEqual(types.KvWriteResult{ .ok = 0 }, w.put("k", "v", .{}));
     try std.testing.expectEqual(@as(u32, 1), w.builder.recordCount());
     w.transition(.revoked, 4);
     w.transition(.granted, 5);
