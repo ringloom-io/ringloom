@@ -1,6 +1,6 @@
 # RingLoom
 
-![RingLoom logo](assets/RingLoom.png)
+<img src="assets/RingLoom.svg" alt="RingLoom logo" width="200" height="200">
 
 **RingLoom** is a high-performance message broker and service runtime for low-latency systems.
 It combines zero-copy same-host IPC over shared-memory ring buffers with cross-host Aeron UDP

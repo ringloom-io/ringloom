@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none" role="img" aria-labelledby="title desc">
+<title id="title">RingLoom</title><desc id="desc">Four interwoven cyan, blue and purple loops form an open ring, representing shared-memory rings and connected message paths.</desc>
+<ellipse cx="128" cy="128" rx="101" ry="74" transform="rotate(0 128 128)" stroke="#159CB5" stroke-width="9"/>
+<ellipse cx="128" cy="128" rx="101" ry="74" transform="rotate(45 128 128)" stroke="#2380C4" stroke-width="9"/>
+<ellipse cx="128" cy="128" rx="101" ry="74" transform="rotate(90 128 128)" stroke="#7161CB" stroke-width="9"/>
+<ellipse cx="128" cy="128" rx="101" ry="74" transform="rotate(135 128 128)" stroke="#B653C2" stroke-width="9"/>
+
+</svg>
